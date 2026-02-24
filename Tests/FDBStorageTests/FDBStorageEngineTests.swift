@@ -4,9 +4,7 @@ import Foundation
 @testable import FDBStorage
 import FoundationDB
 
-/// FDB が起動していない環境ではスキップされる
-///
-/// テスト実行前に FoundationDB が起動している必要がある:
+/// Tests require a running FoundationDB instance:
 /// ```
 /// sudo launchctl load /Library/LaunchDaemons/com.apple.foundationdb.fdbmonitor.plist
 /// ```
@@ -24,7 +22,6 @@ struct FDBStorageEngineTests {
         return FDBStorageEngine(database: database)
     }
 
-    /// テスト用のユニークなキープレフィックス
     private func testPrefix() -> Bytes {
         let uuid = UUID().uuidString.prefix(8)
         return Array("_test_\(uuid)_".utf8)
@@ -34,112 +31,200 @@ struct FDBStorageEngineTests {
         prefix + suffix
     }
 
-    @Test func getSetValue() async throws {
-        let engine = try makeEngine()
-        let prefix = testPrefix()
-
+    private func cleanup(engine: FDBStorageEngine, prefix: Bytes) async throws {
         try await engine.withTransaction { tx in
-            let key = prefixedKey(prefix, [0x01])
-            tx.setValue([1, 2, 3], for: key)
-            let value = try await tx.getValue(for: key)
-            #expect(value == [1, 2, 3])
-        }
-
-        // cleanup
-        try await engine.withTransaction { tx in
-            tx.clearRange(begin: prefix, end: prefix + [0xFF])
+            tx.clearRange(begin: prefix, end: prefix + [0xFF, 0xFF])
         }
     }
 
-    @Test func clearKey() async throws {
-        let engine = try makeEngine()
-        let prefix = testPrefix()
-        let key = prefixedKey(prefix, [0x01])
-
-        try await engine.withTransaction { tx in
-            tx.setValue([42], for: key)
-        }
-
-        try await engine.withTransaction { tx in
-            tx.clear(key: key)
-        }
-
-        try await engine.withTransaction { tx in
-            let value = try await tx.getValue(for: key)
-            #expect(value == nil)
-        }
+    private func collectRange(
+        _ tx: any Transaction,
+        begin: Bytes, end: Bytes
+    ) async throws -> [(key: Bytes, value: Bytes)] {
+        let seq = try await tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
+        var result: [(key: Bytes, value: Bytes)] = []
+        for try await item in seq { result.append(item) }
+        return result
     }
 
-    @Test func clearRange() async throws {
+    // =========================================================================
+    // MARK: - Reverse + Limit Ordering
+    //
+    // FDB adapter collects all results forward via AsyncKVSequence,
+    // then reverses in memory, then applies limit via prefix().
+    // This ordering is critical: limit AFTER reverse.
+    // =========================================================================
+
+    @Test func reverse_resultsInDescendingOrder() async throws {
         let engine = try makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: prefixedKey(prefix, [0x01]))
-            tx.setValue([2], for: prefixedKey(prefix, [0x02]))
-            tx.setValue([3], for: prefixedKey(prefix, [0x03]))
-            tx.setValue([4], for: prefixedKey(prefix, [0x04]))
-        }
-
-        try await engine.withTransaction { tx in
-            tx.clearRange(
-                begin: prefixedKey(prefix, [0x02]),
-                end: prefixedKey(prefix, [0x04])
-            )
-        }
-
-        try await engine.withTransaction { tx in
-            let v1 = try await tx.getValue(for: prefixedKey(prefix, [0x01]))
-            let v2 = try await tx.getValue(for: prefixedKey(prefix, [0x02]))
-            let v3 = try await tx.getValue(for: prefixedKey(prefix, [0x03]))
-            let v4 = try await tx.getValue(for: prefixedKey(prefix, [0x04]))
-            #expect(v1 == [1])
-            #expect(v2 == nil)
-            #expect(v3 == nil)
-            #expect(v4 == [4])
-        }
-
-        // cleanup
-        try await engine.withTransaction { tx in
-            tx.clearRange(begin: prefix, end: prefix + [0xFF])
-        }
-    }
-
-    @Test func getRange() async throws {
-        let engine = try makeEngine()
-        let prefix = testPrefix()
-
-        try await engine.withTransaction { tx in
-            tx.setValue([10], for: prefixedKey(prefix, [0x01]))
-            tx.setValue([20], for: prefixedKey(prefix, [0x02]))
-            tx.setValue([30], for: prefixedKey(prefix, [0x03]))
-            tx.setValue([40], for: prefixedKey(prefix, [0x04]))
-            tx.setValue([50], for: prefixedKey(prefix, [0x05]))
+            for i: UInt8 in 1...5 {
+                tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
+            }
         }
 
         try await engine.withTransaction { tx in
             let results = try await tx.getRange(
-                begin: prefixedKey(prefix, [0x02]),
-                end: prefixedKey(prefix, [0x05]),
+                begin: prefixedKey(prefix, [0x01]),
+                end: prefixedKey(prefix, [0x06]),
                 limit: 0,
+                reverse: true
+            )
+            var values: [Bytes] = []
+            for try await item in results {
+                values.append(item.value)
+            }
+            #expect(values == [[50], [40], [30], [20], [10]])
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    @Test func reverseThenLimit_takesLastNItems() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+
+        try await engine.withTransaction { tx in
+            for i: UInt8 in 1...5 {
+                tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
+            }
+        }
+
+        try await engine.withTransaction { tx in
+            let results = try await tx.getRange(
+                begin: prefixedKey(prefix, [0x01]),
+                end: prefixedKey(prefix, [0x06]),
+                limit: 2,
+                reverse: true
+            )
+            var collected: [(key: Bytes, value: Bytes)] = []
+            for try await item in results {
+                collected.append(item)
+            }
+            // limit=2 applied AFTER reverse: [5]=50, [4]=40
+            #expect(collected.count == 2)
+            #expect(collected[0].value == [50])
+            #expect(collected[1].value == [40])
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    @Test func forwardLimit_takesFirstNItems() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+
+        try await engine.withTransaction { tx in
+            for i: UInt8 in 1...5 {
+                tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
+            }
+        }
+
+        try await engine.withTransaction { tx in
+            let results = try await tx.getRange(
+                begin: prefixedKey(prefix, [0x01]),
+                end: prefixedKey(prefix, [0x06]),
+                limit: 2,
                 reverse: false
             )
             var collected: [(key: Bytes, value: Bytes)] = []
             for try await item in results {
                 collected.append(item)
             }
-            #expect(collected.count == 3)
-            #expect(collected[0].value == [20])
-            #expect(collected[2].value == [40])
+            // limit=2 forward: [1]=10, [2]=20
+            #expect(collected.count == 2)
+            #expect(collected[0].value == [10])
+            #expect(collected[1].value == [20])
         }
 
-        // cleanup
-        try await engine.withTransaction { tx in
-            tx.clearRange(begin: prefix, end: prefix + [0xFF])
-        }
+        try await cleanup(engine: engine, prefix: prefix)
     }
 
-    @Test func commitPersists() async throws {
+    // =========================================================================
+    // MARK: - Multi-Batch Collection
+    //
+    // FDB returns results in batches. AsyncKVSequence handles pagination.
+    // Verify all batches are collected correctly.
+    // =========================================================================
+
+    @Test func largeScan_collectsAllBatches() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+
+        try await engine.withTransaction { tx in
+            for i: UInt16 in 0..<500 {
+                let key = prefix + withUnsafeBytes(of: i.bigEndian) { Array($0) }
+                tx.setValue(withUnsafeBytes(of: i) { Array($0) }, for: key)
+            }
+        }
+
+        try await engine.withTransaction { tx in
+            let results = try await tx.getRange(
+                begin: prefix,
+                end: prefix + [0xFF, 0xFF],
+                limit: 0,
+                reverse: false
+            )
+            var count = 0
+            var prevKey: Bytes?
+            for try await item in results {
+                if let prev = prevKey {
+                    #expect(prev.lexicographicallyPrecedes(item.key))
+                }
+                prevKey = item.key
+                count += 1
+            }
+            #expect(count == 500)
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    @Test func largeScan_reverseCollectsAllBatches() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+
+        try await engine.withTransaction { tx in
+            for i: UInt16 in 0..<500 {
+                let key = prefix + withUnsafeBytes(of: i.bigEndian) { Array($0) }
+                tx.setValue(withUnsafeBytes(of: i) { Array($0) }, for: key)
+            }
+        }
+
+        try await engine.withTransaction { tx in
+            let results = try await tx.getRange(
+                begin: prefix,
+                end: prefix + [0xFF, 0xFF],
+                limit: 0,
+                reverse: true
+            )
+            var count = 0
+            var prevKey: Bytes?
+            for try await item in results {
+                if let prev = prevKey {
+                    // Descending order
+                    #expect(item.key.lexicographicallyPrecedes(prev))
+                }
+                prevKey = item.key
+                count += 1
+            }
+            #expect(count == 500)
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    // =========================================================================
+    // MARK: - Commit Bool → StorageError Mapping
+    //
+    // FDB commit() returns Bool. false → StorageError.transactionConflict.
+    // We can't easily trigger a real conflict in a unit test, so we verify
+    // the commit path works correctly for the success case.
+    // =========================================================================
+
+    @Test func commit_persistsData() async throws {
         let engine = try makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
@@ -153,13 +238,10 @@ struct FDBStorageEngineTests {
         #expect(value == [42])
         tx2.cancel()
 
-        // cleanup
-        try await engine.withTransaction { tx in
-            tx.clearRange(begin: prefix, end: prefix + [0xFF])
-        }
+        try await cleanup(engine: engine, prefix: prefix)
     }
 
-    @Test func cancelDiscards() async throws {
+    @Test func cancel_discardsData() async throws {
         let engine = try makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
@@ -169,12 +251,128 @@ struct FDBStorageEngineTests {
         tx1.cancel()
 
         let tx2 = try engine.createTransaction()
-        let value = try await tx2.getValue(for: key)
-        #expect(value == nil)
+        let cancelledValue = try await tx2.getValue(for: key)
+        #expect(cancelledValue == nil)
         tx2.cancel()
     }
 
-    @Test func withTransactionAutoCommit() async throws {
+    // =========================================================================
+    // MARK: - FDB Read-Your-Writes (native)
+    //
+    // Unlike SQLite/InMemory, FDB has native read-your-writes.
+    // Writes are immediately visible within the same transaction.
+    // =========================================================================
+
+    @Test func readYourWrites_setValue() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+        let key = prefixedKey(prefix, [0x01])
+
+        try await engine.withTransaction { tx in
+            tx.setValue([42], for: key)
+            let value = try await tx.getValue(for: key)
+            #expect(value == [42])
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    @Test func readYourWrites_clearThenGet() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+        let key = prefixedKey(prefix, [0x01])
+
+        try await engine.withTransaction { tx in
+            tx.setValue([42], for: key)
+        }
+
+        try await engine.withTransaction { tx in
+            tx.clear(key: key)
+            let value = try await tx.getValue(for: key)
+            #expect(value == nil)
+        }
+    }
+
+    @Test func readYourWrites_setInRangeScan() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+
+        try await engine.withTransaction { tx in
+            tx.setValue([10], for: prefixedKey(prefix, [0x01]))
+            tx.setValue([30], for: prefixedKey(prefix, [0x03]))
+        }
+
+        try await engine.withTransaction { tx in
+            tx.setValue([20], for: prefixedKey(prefix, [0x02]))
+            let range = try await collectRange(
+                tx, begin: prefix, end: prefix + [0xFF]
+            )
+            // New key [0x02] should appear in range scan
+            #expect(range.count == 3)
+            #expect(range[1].value == [20])
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    // =========================================================================
+    // MARK: - Range Boundary Semantics (begin inclusive, end exclusive)
+    // =========================================================================
+
+    @Test func range_beginInclusive_endExclusive() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+
+        try await engine.withTransaction { tx in
+            tx.setValue([1], for: prefixedKey(prefix, [0x01]))
+            tx.setValue([2], for: prefixedKey(prefix, [0x02]))
+            tx.setValue([3], for: prefixedKey(prefix, [0x03]))
+            tx.setValue([4], for: prefixedKey(prefix, [0x04]))
+            tx.setValue([5], for: prefixedKey(prefix, [0x05]))
+        }
+
+        try await engine.withTransaction { tx in
+            let range = try await collectRange(
+                tx,
+                begin: prefixedKey(prefix, [0x02]),
+                end: prefixedKey(prefix, [0x05])
+            )
+            #expect(range.count == 3)
+            #expect(range[0].value == [2])  // begin included
+            #expect(range[2].value == [4])  // end excluded
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    @Test func range_empty() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+
+        try await engine.withTransaction { tx in
+            tx.setValue([1], for: prefixedKey(prefix, [0x05]))
+        }
+
+        try await engine.withTransaction { tx in
+            let range = try await collectRange(
+                tx,
+                begin: prefixedKey(prefix, [0x01]),
+                end: prefixedKey(prefix, [0x03])
+            )
+            #expect(range.count == 0)
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    // =========================================================================
+    // MARK: - withTransaction Error Handling
+    //
+    // FDBStorageEngine.withTransaction wraps non-FDBError/non-StorageError
+    // in StorageError.backendError. Verify rollback on error.
+    // =========================================================================
+
+    @Test func withTransaction_autoCommits() async throws {
         let engine = try makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
@@ -184,52 +382,135 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let value = try await tx.getValue(for: key)
-            #expect(value == [99])
+            let committedValue = try await tx.getValue(for: key)
+            #expect(committedValue == [99])
         }
 
-        // cleanup
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    @Test func withTransaction_errorCausesRollback() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+        let key = prefixedKey(prefix, [0x01])
+
+        struct TestError: Error {}
+
+        do {
+            try await engine.withTransaction { tx in
+                tx.setValue([42], for: key)
+                throw TestError()
+            }
+        } catch {
+            // FDB wraps TestError → StorageError.backendError
+        }
+
         try await engine.withTransaction { tx in
-            tx.clearRange(begin: prefix, end: prefix + [0xFF])
+            let rolledBackValue = try await tx.getValue(for: key)
+            #expect(rolledBackValue == nil)
         }
     }
+
+    // =========================================================================
+    // MARK: - FDB-Specific: fdbTransaction Access
+    // =========================================================================
 
     @Test func fdbTransactionAccess() async throws {
         let engine = try makeEngine()
         let tx = try engine.createTransaction()
+        // Verify the underlying FDB transaction is accessible
         _ = tx.fdbTransaction
         tx.cancel()
     }
 
-    @Test func largeRangeScan() async throws {
+    // =========================================================================
+    // MARK: - clearRange Semantics
+    // =========================================================================
+
+    @Test func clearRange_boundaryVerification() async throws {
         let engine = try makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
-            for i: UInt16 in 0..<500 {
-                let key = prefix + withUnsafeBytes(of: i.bigEndian) { Array($0) }
-                let value = withUnsafeBytes(of: i) { Array($0) }
-                tx.setValue(value, for: key)
-            }
+            tx.setValue([1], for: prefixedKey(prefix, [0x01]))
+            tx.setValue([2], for: prefixedKey(prefix, [0x02]))
+            tx.setValue([3], for: prefixedKey(prefix, [0x03]))
+            tx.setValue([4], for: prefixedKey(prefix, [0x04]))
+            tx.setValue([5], for: prefixedKey(prefix, [0x05]))
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
-                begin: prefix,
-                end: prefix + [0xFF, 0xFF],
-                limit: 0,
-                reverse: false
+            tx.clearRange(
+                begin: prefixedKey(prefix, [0x02]),
+                end: prefixedKey(prefix, [0x05])
             )
-            var count = 0
-            for try await _ in results {
-                count += 1
-            }
-            #expect(count == 500)
         }
 
-        // cleanup
         try await engine.withTransaction { tx in
-            tx.clearRange(begin: prefix, end: prefix + [0xFF, 0xFF])
+            let v1 = try await tx.getValue(for: prefixedKey(prefix, [0x01]))
+            let v2 = try await tx.getValue(for: prefixedKey(prefix, [0x02]))
+            let v3 = try await tx.getValue(for: prefixedKey(prefix, [0x03]))
+            let v4 = try await tx.getValue(for: prefixedKey(prefix, [0x04]))
+            let v5 = try await tx.getValue(for: prefixedKey(prefix, [0x05]))
+            #expect(v1 == [1])   // before range
+            #expect(v2 == nil)   // begin inclusive
+            #expect(v3 == nil)   // within range
+            #expect(v4 == nil)   // within range
+            #expect(v5 == [5])   // end exclusive
         }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    // =========================================================================
+    // MARK: - Ordering
+    // =========================================================================
+
+    @Test func keyOrdering_preserved() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+
+        try await engine.withTransaction { tx in
+            // Insert in non-sorted order
+            tx.setValue([5], for: prefixedKey(prefix, [0x05]))
+            tx.setValue([1], for: prefixedKey(prefix, [0x01]))
+            tx.setValue([3], for: prefixedKey(prefix, [0x03]))
+            tx.setValue([2], for: prefixedKey(prefix, [0x02]))
+        }
+
+        try await engine.withTransaction { tx in
+            let range = try await collectRange(
+                tx, begin: prefix, end: prefix + [0xFF]
+            )
+            let values = range.map { $0.value }
+            #expect(values == [[1], [2], [3], [5]])
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    // =========================================================================
+    // MARK: - Subspace Isolation
+    // =========================================================================
+
+    @Test func subspaceRangeIsolation() async throws {
+        let engine = try makeEngine()
+        let prefix = testPrefix()
+        let spaceA = Subspace(prefix + Array("alpha".utf8))
+        let spaceB = Subspace(prefix + Array("beta".utf8))
+
+        try await engine.withTransaction { tx in
+            tx.setValue([1], for: spaceA.pack(Tuple(Int64(1))))
+            tx.setValue([2], for: spaceA.pack(Tuple(Int64(2))))
+            tx.setValue([3], for: spaceB.pack(Tuple(Int64(1))))
+        }
+
+        try await engine.withTransaction { tx in
+            let (begin, end) = spaceA.range()
+            let range = try await collectRange(tx, begin: begin, end: end)
+            #expect(range.count == 2)
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
     }
 }

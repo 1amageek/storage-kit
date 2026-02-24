@@ -36,7 +36,10 @@ let package = Package(
         ),
         .testTarget(
             name: "FDBStorageTests",
-            dependencies: ["FDBStorage"]
+            dependencies: ["FDBStorage"],
+            linkerSettings: [
+                .unsafeFlags(["-L/usr/local/lib", "-Xlinker", "-rpath", "-Xlinker", "/usr/local/lib"]),
+            ]
         ),
         .testTarget(
             name: "SQLiteStorageTests",
