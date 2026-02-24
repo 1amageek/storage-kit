@@ -1,11 +1,12 @@
 import StorageKit
 import Foundation
 
-/// SQLite トランザクションの StorageKit.Transaction 実装
+/// StorageKit.Transaction implementation for SQLite.
 ///
-/// `setValue`/`clear`/`clearRange` は non-throwing のため、書き込みはバッファし commit 時に一括適用する。
-/// `getValue` はバッファを逆順チェックして read-your-writes を実現。
-/// `getRange` はバッファを flush してから SQL クエリを実行。
+/// Write operations (`setValue`/`clear`/`clearRange`) are non-throwing per the protocol,
+/// so writes are buffered and flushed on commit.
+/// `getValue` checks the buffer in reverse order to provide read-your-writes semantics.
+/// `getRange` flushes the buffer before executing the SQL query.
 public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
 
     private let connection: SQLiteConnection
@@ -32,7 +33,7 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
             throw StorageError.invalidOperation("Transaction cancelled")
         }
 
-        // バッファを逆順チェック（read-your-writes）
+        // Check write buffer in reverse order (read-your-writes)
         for op in writeBuffer.reversed() {
             switch op {
             case .set(let k, let v) where k == key:
@@ -60,7 +61,7 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
             throw StorageError.invalidOperation("Transaction cancelled")
         }
 
-        // バッファ内の操作を SQLite に適用してから range query
+        // Flush buffered writes to SQLite before executing range query
         try flushWriteBuffer()
         let results = try connection.getRange(
             begin: begin, end: end, limit: limit, reverse: reverse
@@ -114,8 +115,8 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
 
     // MARK: - Internal
 
-    /// NSLock.unlock() は async context から呼べないため、
-    /// nonisolated な同期関数経由で呼び出す
+    /// NSLock.unlock() cannot be called from async contexts,
+    /// so we route through a nonisolated synchronous function.
     private nonisolated func releaseLock() {
         lock.unlock()
     }
@@ -137,7 +138,7 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
 
 // MARK: - Byte Comparison
 
-/// バイト列の辞書順比較
+/// Lexicographic comparison of byte arrays.
 private func compareBytes(_ lhs: Bytes, _ rhs: Bytes) -> Int {
     let minLen = min(lhs.count, rhs.count)
     for i in 0..<minLen {

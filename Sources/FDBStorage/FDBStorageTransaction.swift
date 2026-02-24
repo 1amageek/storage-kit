@@ -1,15 +1,15 @@
 import StorageKit
 import FoundationDB
 
-/// FoundationDB トランザクションの StorageKit.Transaction アダプタ
+/// StorageKit.Transaction adapter for FoundationDB transactions.
 ///
-/// FDB の TransactionProtocol をラップし、StorageKit の統一インターフェースを提供する。
-/// `fdbTransaction` プロパティで FDB 固有機能（version 管理, atomic ops 等）に直接アクセス可能。
+/// Wraps FDB's `TransactionProtocol` and provides StorageKit's unified interface.
+/// Use the `fdbTransaction` property to access FDB-specific features (version management, atomic ops, etc.).
 public final class FDBStorageTransaction: Transaction, @unchecked Sendable {
 
-    /// FDB トランザクションへの直接アクセス
+    /// Direct access to the underlying FDB transaction.
     ///
-    /// database-framework 等が FDB 固有機能を使う場合に利用:
+    /// Use this when FDB-specific features are needed:
     /// ```swift
     /// if let fdbTx = transaction as? FDBStorageTransaction {
     ///     fdbTx.fdbTransaction.setReadVersion(cachedVersion)
@@ -33,7 +33,7 @@ public final class FDBStorageTransaction: Transaction, @unchecked Sendable {
         limit: Int,
         reverse: Bool
     ) async throws -> KeyValueSequence {
-        // AsyncKVSequence で全結果を取得（バッチング自動処理）
+        // Collect all results via AsyncKVSequence (handles batching automatically)
         var records: [(key: Bytes, value: Bytes)] = []
         let sequence = fdbTransaction.getRange(
             beginKey: begin, endKey: end, snapshot: false

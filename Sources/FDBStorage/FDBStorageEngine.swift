@@ -1,10 +1,10 @@
 import StorageKit
 import FoundationDB
 
-/// FoundationDB バックエンドの StorageEngine 実装
+/// FoundationDB backend StorageEngine implementation.
 ///
-/// FDBDatabase をラップし、StorageKit の統一インターフェースを提供する。
-/// リトライロジックは FDB の `isRetryable` エラー判定に基づいて自前で実装。
+/// Wraps FDB's `DatabaseProtocol` and provides StorageKit's unified interface.
+/// Retry logic is based on FDB's `isRetryable` error classification.
 public final class FDBStorageEngine: StorageEngine, @unchecked Sendable {
     public typealias TransactionType = FDBStorageTransaction
 

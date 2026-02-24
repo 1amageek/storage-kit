@@ -1,14 +1,14 @@
 import SQLite3
 import StorageKit
 
-/// SQLite3 C API の薄いラッパー
+/// Thin wrapper around the SQLite3 C API.
 ///
-/// スレッドセーフではない — 呼び出し側で排他制御すること。
-/// `WITHOUT ROWID` テーブルで BLOB 主キーの B-tree 直接格納を実現。
+/// Not thread-safe — callers must provide external synchronization.
+/// Uses a `WITHOUT ROWID` table for efficient BLOB primary key B-tree storage.
 final class SQLiteConnection {
     private var db: OpaquePointer?
 
-    /// ファイルパス or ":memory:" でデータベースを開く
+    /// Opens a database at the given file path, or ":memory:" for in-memory.
     init(path: String) throws {
         var dbPointer: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
@@ -21,7 +21,7 @@ final class SQLiteConnection {
         self.db = opened
     }
 
-    /// テーブル作成 + WAL モード設定
+    /// Creates the KV table and enables WAL mode.
     func initialize() throws {
         try execute("PRAGMA journal_mode=WAL")
         try execute("""
@@ -32,7 +32,7 @@ final class SQLiteConnection {
             """)
     }
 
-    /// SQL 実行（バインドなし）
+    /// Executes a SQL statement without parameter bindings.
     func execute(_ sql: String) throws {
         guard let db else {
             throw StorageError.invalidOperation("Database closed")
@@ -158,7 +158,7 @@ final class SQLiteConnection {
         return results
     }
 
-    /// 接続を閉じる
+    /// Closes the database connection.
     func close() {
         guard let db else { return }
         sqlite3_close_v2(db)
@@ -201,6 +201,5 @@ final class SQLiteConnection {
 
 // MARK: - SQLITE_TRANSIENT workaround
 
-/// sqlite3_bind_blob の SQLITE_TRANSIENT に相当する値
-/// C マクロ `((sqlite3_destructor_type)-1)` を Swift で表現
+/// Equivalent to the C macro `((sqlite3_destructor_type)-1)` for SQLITE_TRANSIENT.
 private let SQLITE_TRANSIENT_PTR = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

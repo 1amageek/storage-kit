@@ -1,17 +1,17 @@
 import StorageKit
 import Foundation
 
-/// SQLite バックエンドの StorageEngine 実装
+/// SQLite backend StorageEngine implementation.
 ///
-/// `WITHOUT ROWID` テーブルで BLOB 主キーの B-tree 直接格納を実現。
-/// SQLite は single-writer のため、`NSLock` でトランザクションを直列化する。
+/// Uses a `WITHOUT ROWID` table for efficient BLOB primary key B-tree storage.
+/// SQLite is single-writer, so transactions are serialized with `NSLock`.
 ///
-/// ## 使用例
+/// ## Usage
 /// ```swift
-/// // ファイルベース
+/// // File-based
 /// let engine = try SQLiteStorageEngine(path: "/path/to/db.sqlite")
 ///
-/// // インメモリ（テスト用）
+/// // In-memory (for testing)
 /// let engine = try SQLiteStorageEngine()
 /// ```
 public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
@@ -20,14 +20,14 @@ public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
     private let lock = NSLock()
     private var connection: SQLiteConnection?
 
-    /// ファイルベースのデータベース
+    /// Opens a file-based database.
     public init(path: String) throws {
         let conn = try SQLiteConnection(path: path)
         try conn.initialize()
         self.connection = conn
     }
 
-    /// インメモリデータベース（テスト用）
+    /// Opens an in-memory database (for testing).
     public init() throws {
         let conn = try SQLiteConnection(path: ":memory:")
         try conn.initialize()
@@ -63,7 +63,7 @@ public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
         }
     }
 
-    /// データベースを閉じる
+    /// Closes the database connection.
     public func close() {
         lock.lock()
         defer { lock.unlock() }
