@@ -131,12 +131,38 @@ final class SQLiteConnection {
         limit: Int,
         reverse: Bool
     ) throws -> [(key: Bytes, value: Bytes)] {
+        try getRange(
+            begin: begin, beginInclusive: true,
+            end: end, endInclusive: false,
+            limit: limit, reverse: reverse
+        )
+    }
+
+    /// Flexible range query with configurable boundary inclusivity.
+    ///
+    /// - Parameters:
+    ///   - begin: The lower bound key.
+    ///   - beginInclusive: If true, uses `>=`; if false, uses `>`.
+    ///   - end: The upper bound key.
+    ///   - endInclusive: If true, uses `<=`; if false, uses `<`.
+    ///   - limit: Maximum number of results (0 = unlimited).
+    ///   - reverse: If true, results are returned in descending order.
+    func getRange(
+        begin: Bytes,
+        beginInclusive: Bool,
+        end: Bytes,
+        endInclusive: Bool,
+        limit: Int,
+        reverse: Bool
+    ) throws -> [(key: Bytes, value: Bytes)] {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
+        let beginOp = beginInclusive ? ">=" : ">"
+        let endOp = endInclusive ? "<=" : "<"
         let order = reverse ? "DESC" : "ASC"
         let limitClause = limit > 0 ? "LIMIT ?" : ""
-        let sql = "SELECT key, value FROM kv_store WHERE key >= ? AND key < ? ORDER BY key \(order) \(limitClause)"
+        let sql = "SELECT key, value FROM kv_store WHERE key \(beginOp) ? AND key \(endOp) ? ORDER BY key \(order) \(limitClause)"
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
 

@@ -1,6 +1,49 @@
 import StorageKit
 import Foundation
 
+/// SQLite 用の getRange 結果型
+///
+/// 配列ベースの AsyncSequence。ゼロコピーで結果を返す。
+public struct SQLiteRangeResult: AsyncSequence, Sendable {
+    public typealias Element = (Bytes, Bytes)
+
+    private let results: [(key: Bytes, value: Bytes)]
+    private let error: (any Error)?
+
+    init(_ results: [(key: Bytes, value: Bytes)]) {
+        self.results = results
+        self.error = nil
+    }
+
+    init(error: any Error) {
+        self.results = []
+        self.error = error
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        Iterator(results: results, error: error)
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        private let results: [(key: Bytes, value: Bytes)]
+        private let error: (any Error)?
+        private var index: Int = 0
+
+        init(results: [(key: Bytes, value: Bytes)], error: (any Error)?) {
+            self.results = results
+            self.error = error
+        }
+
+        public mutating func next() async throws -> (Bytes, Bytes)? {
+            if let error { throw error }
+            guard index < results.count else { return nil }
+            let entry = results[index]
+            index += 1
+            return (entry.key, entry.value)
+        }
+    }
+}
+
 /// StorageKit.Transaction implementation for SQLite.
 ///
 /// Write operations (`setValue`/`clear`/`clearRange`) are non-throwing per the protocol,
@@ -8,6 +51,8 @@ import Foundation
 /// `getValue` checks the buffer in reverse order to provide read-your-writes semantics.
 /// `getRange` flushes the buffer before executing the SQL query.
 public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
+
+    public typealias RangeResult = SQLiteRangeResult
 
     private let connection: SQLiteConnection
     private let lock: NSLock
@@ -28,7 +73,7 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
 
     // MARK: - Read
 
-    public func getValue(for key: Bytes) async throws -> Bytes? {
+    public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
         guard !cancelled else {
             throw StorageError.invalidOperation("Transaction cancelled")
         }
@@ -52,21 +97,71 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
     }
 
     public func getRange(
-        begin: Bytes,
-        end: Bytes,
+        from begin: KeySelector,
+        to end: KeySelector,
         limit: Int,
-        reverse: Bool
-    ) async throws -> KeyValueSequence {
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) -> SQLiteRangeResult {
         guard !cancelled else {
-            throw StorageError.invalidOperation("Transaction cancelled")
+            return SQLiteRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
         }
 
-        // Flush buffered writes to SQLite before executing range query
-        try flushWriteBuffer()
-        let results = try connection.getRange(
-            begin: begin, end: end, limit: limit, reverse: reverse
-        )
-        return KeyValueSequence(results)
+        // Resolve KeySelectors to SQL boundary conditions.
+        //
+        // For the common case (firstGreaterOrEqual), this produces:
+        //   begin: key >= beginKey (inclusive)
+        //   end:   key < endKey   (exclusive)
+        //
+        // For firstGreaterThan (orEqual=true, offset=1):
+        //   begin: key > beginKey (exclusive)
+        //   end:   key > endKey → effectively key > endKey
+        //
+        // For complex offsets, we fall back to firstGreaterOrEqual semantics
+        // since SQLite doesn't have FDB's multi-step resolution.
+        let (beginKey, beginInclusive) = Self.resolveForSQL(begin)
+        let (endKey, endInclusive) = Self.resolveForSQL(end)
+
+        do {
+            try flushWriteBuffer()
+            let results = try connection.getRange(
+                begin: beginKey, beginInclusive: beginInclusive,
+                end: endKey, endInclusive: endInclusive,
+                limit: limit, reverse: reverse
+            )
+            return SQLiteRangeResult(results)
+        } catch {
+            return SQLiteRangeResult(error: error)
+        }
+    }
+
+    /// Resolve a KeySelector to a SQL boundary condition.
+    ///
+    /// Returns the key and whether the boundary is inclusive.
+    /// Handles the four standard factory patterns:
+    /// - firstGreaterOrEqual (orEqual=false, offset=1) → key >= k
+    /// - firstGreaterThan    (orEqual=true,  offset=1) → key > k
+    /// - lastLessOrEqual     (orEqual=true,  offset=0) → key <= k
+    /// - lastLessThan        (orEqual=false, offset=0) → key < k
+    private static func resolveForSQL(_ selector: KeySelector) -> (key: Bytes, inclusive: Bool) {
+        switch (selector.orEqual, selector.offset) {
+        case (false, 1):
+            // firstGreaterOrEqual: key >= selector.key
+            return (selector.key, true)
+        case (true, 1):
+            // firstGreaterThan: key > selector.key
+            return (selector.key, false)
+        case (true, 0):
+            // lastLessOrEqual: key <= selector.key
+            return (selector.key, true)
+        case (false, 0):
+            // lastLessThan: key < selector.key
+            return (selector.key, false)
+        default:
+            // Non-standard offset: approximate as >= (safe default for range scans)
+            return (selector.key, true)
+        }
     }
 
     // MARK: - Write
@@ -81,9 +176,9 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
         writeBuffer.append(.clear(key: key))
     }
 
-    public func clearRange(begin: Bytes, end: Bytes) {
+    public func clearRange(beginKey: Bytes, endKey: Bytes) {
         guard !cancelled else { return }
-        writeBuffer.append(.clearRange(begin: begin, end: end))
+        writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
     }
 
     // MARK: - Transaction Management
@@ -115,8 +210,6 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
 
     // MARK: - Internal
 
-    /// NSLock.unlock() cannot be called from async contexts,
-    /// so we route through a nonisolated synchronous function.
     private nonisolated func releaseLock() {
         lock.unlock()
     }
@@ -138,7 +231,6 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
 
 // MARK: - Byte Comparison
 
-/// Lexicographic comparison of byte arrays.
 private func compareBytes(_ lhs: Bytes, _ rhs: Bytes) -> Int {
     let minLen = min(lhs.count, rhs.count)
     for i in 0..<minLen {

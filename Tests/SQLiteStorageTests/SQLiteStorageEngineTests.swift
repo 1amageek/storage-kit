@@ -39,7 +39,7 @@ struct SQLiteStorageEngineTests {
         let engine = try SQLiteStorageEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
-        tx.clearRange(begin: [0x01], end: [0x05])
+        tx.clearRange(beginKey: [0x01], endKey: [0x05])
         let value = try await tx.getValue(for: [0x02])
         #expect(value == nil)
         try await tx.commit()
@@ -48,7 +48,7 @@ struct SQLiteStorageEngineTests {
     @Test func clearRangeThenSet_setWins() async throws {
         let engine = try SQLiteStorageEngine()
         let tx = try engine.createTransaction()
-        tx.clearRange(begin: [0x01], end: [0x05])
+        tx.clearRange(beginKey: [0x01], endKey: [0x05])
         tx.setValue([99], for: [0x03])
         let value = try await tx.getValue(for: [0x03])
         #expect(value == [99])
@@ -70,9 +70,9 @@ struct SQLiteStorageEngineTests {
         let engine = try SQLiteStorageEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
-        tx.clearRange(begin: [0x01], end: [0x05])
+        tx.clearRange(beginKey: [0x01], endKey: [0x05])
         tx.setValue([2], for: [0x02])
-        tx.clearRange(begin: [0x01], end: [0x05])
+        tx.clearRange(beginKey: [0x01], endKey: [0x05])
         let value = try await tx.getValue(for: [0x02])
         #expect(value == nil)
         try await tx.commit()
@@ -132,7 +132,7 @@ struct SQLiteStorageEngineTests {
         let engine = try SQLiteStorageEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         let beginValue = try await tx.getValue(for: [0x02])
         #expect(beginValue == nil)
         try await tx.commit()
@@ -142,7 +142,7 @@ struct SQLiteStorageEngineTests {
         let engine = try SQLiteStorageEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x05])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         let endValue = try await tx.getValue(for: [0x05])
         #expect(endValue == [1])
         try await tx.commit()
@@ -152,7 +152,7 @@ struct SQLiteStorageEngineTests {
         let engine = try SQLiteStorageEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x04])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         let justBeforeEndValue = try await tx.getValue(for: [0x04])
         #expect(justBeforeEndValue == nil)
         try await tx.commit()
@@ -162,7 +162,7 @@ struct SQLiteStorageEngineTests {
         let engine = try SQLiteStorageEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         let justBeforeBeginValue = try await tx.getValue(for: [0x01])
         #expect(justBeforeBeginValue == [1])
         try await tx.commit()
@@ -173,7 +173,7 @@ struct SQLiteStorageEngineTests {
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01, 0xFF])
         tx.setValue([2], for: [0x02, 0x00])
-        tx.clearRange(begin: [0x02, 0x00], end: [0x03, 0x00])
+        tx.clearRange(beginKey: [0x02, 0x00], endKey: [0x03, 0x00])
         // [0x01, 0xFF] < begin → preserved
         let preservedValue = try await tx.getValue(for: [0x01, 0xFF])
         #expect(preservedValue == [1])
@@ -196,7 +196,7 @@ struct SQLiteStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            tx.clearRange(begin: [0x02], end: [0x05])
+            tx.clearRange(beginKey: [0x02], endKey: [0x05])
         }
 
         try await engine.withTransaction { tx in
@@ -223,12 +223,12 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     private func collectRange(
-        _ tx: any Transaction,
+        _ tx: some Transaction,
         begin: Bytes, end: Bytes
     ) async throws -> [(key: Bytes, value: Bytes)] {
-        let seq = try await tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
+        let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
         var result: [(key: Bytes, value: Bytes)] = []
-        for try await item in seq { result.append(item) }
+        for try await (key, value) in seq { result.append((key: key, value: value)) }
         return result
     }
 
@@ -337,7 +337,7 @@ struct SQLiteStorageEngineTests {
         }
 
         let tx = try engine.createTransaction()
-        tx.clearRange(begin: [0x01], end: [0x04])
+        tx.clearRange(beginKey: [0x01], endKey: [0x04])
         tx.setValue([99], for: [0x02])
 
         let crts1 = try await tx.getValue(for: [0x01])
@@ -365,7 +365,7 @@ struct SQLiteStorageEngineTests {
 
         let tx = try engine.createTransaction()
         tx.setValue([99], for: [0x01])    // overwrite
-        tx.clearRange(begin: [0x01], end: [0x03])  // then clear range
+        tx.clearRange(beginKey: [0x01], endKey: [0x03])  // then clear range
 
         let oc1 = try await tx.getValue(for: [0x01])
         let oc2 = try await tx.getValue(for: [0x02])
@@ -470,7 +470,10 @@ struct SQLiteStorageEngineTests {
         let tx = try engine.createTransaction()
         tx.cancel()
         do {
-            _ = try await tx.getRange(begin: [0x00], end: [0xFF], limit: 0, reverse: false)
+            let seq = tx.getRange(begin: [0x00], end: [0xFF], limit: 0, reverse: false)
+            for try await _ in seq {
+                Issue.record("Expected error")
+            }
             Issue.record("Expected error")
         } catch let error as StorageError {
             guard case .invalidOperation = error else {
@@ -589,19 +592,15 @@ struct SQLiteStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
+            let collected = try await tx.collectRange(
                 begin: [0x01], end: [0x06], limit: 2, reverse: true
             )
-            var collected: [(key: Bytes, value: Bytes)] = []
-            for try await item in results {
-                collected.append(item)
-            }
             // Last 2 items: [5]=50, [4]=40
             #expect(collected.count == 2)
-            #expect(collected[0].key == [0x05])
-            #expect(collected[0].value == [50])
-            #expect(collected[1].key == [0x04])
-            #expect(collected[1].value == [40])
+            #expect(collected[0].0 == [0x05])
+            #expect(collected[0].1 == [50])
+            #expect(collected[1].0 == [0x04])
+            #expect(collected[1].1 == [40])
         }
     }
 

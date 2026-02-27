@@ -10,7 +10,7 @@ let package = Package(
         .library(name: "SQLiteStorage", targets: ["SQLiteStorage"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/1amageek/fdb-swift-bindings.git", branch: "main"),
+        .package(url: "https://github.com/1amageek/fdb-swift-bindings.git", branch: "feature/directory-layer"),
     ],
     targets: [
         .target(

@@ -50,11 +50,56 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     }
 }
 
+/// InMemoryEngine 用の getRange 結果型
+///
+/// 配列ベースの AsyncSequence。ゼロコピーで結果を返す。
+public struct InMemoryRangeResult: AsyncSequence, Sendable {
+    public typealias Element = (Bytes, Bytes)
+
+    private let results: [(key: Bytes, value: Bytes)]
+    private let error: (any Error)?
+
+    init(_ results: [(key: Bytes, value: Bytes)]) {
+        self.results = results
+        self.error = nil
+    }
+
+    init(error: any Error) {
+        self.results = []
+        self.error = error
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        Iterator(results: results, error: error)
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        private let results: [(key: Bytes, value: Bytes)]
+        private let error: (any Error)?
+        private var index: Int = 0
+
+        init(results: [(key: Bytes, value: Bytes)], error: (any Error)?) {
+            self.results = results
+            self.error = error
+        }
+
+        public mutating func next() async throws -> (Bytes, Bytes)? {
+            if let error { throw error }
+            guard index < results.count else { return nil }
+            let entry = results[index]
+            index += 1
+            return (entry.key, entry.value)
+        }
+    }
+}
+
 /// InMemoryEngine のトランザクション実装
 ///
 /// 読み取りスナップショット + 書き込みバッファ方式。
 /// commit 時にメインストアに反映する。
 public final class InMemoryTransaction: Transaction, @unchecked Sendable {
+
+    public typealias RangeResult = InMemoryRangeResult
 
     private let engine: InMemoryEngine
     private var snapshot: [(key: Bytes, value: Bytes)]
@@ -74,7 +119,7 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
 
     // MARK: - Read
 
-    public func getValue(for key: Bytes) async throws -> Bytes? {
+    public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
         guard !cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
 
         // 書き込みバッファを逆順に確認（最新の操作が優先）
@@ -93,22 +138,26 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
         }
 
         // スナップショットから検索（二分探索）
-        if let index = binarySearch(snapshot, for: key) {
-            return snapshot[index].value
+        if let index = binarySearch(self.snapshot, for: key) {
+            return self.snapshot[index].value
         }
         return nil
     }
 
     public func getRange(
-        begin: Bytes,
-        end: Bytes,
+        from begin: KeySelector,
+        to end: KeySelector,
         limit: Int,
-        reverse: Bool
-    ) async throws -> KeyValueSequence {
-        guard !cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) -> InMemoryRangeResult {
+        guard !cancelled else {
+            return InMemoryRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
+        }
 
-        // スナップショットに書き込みバッファを適用した一時ストアを構築
-        var effective = snapshot
+        // Build effective store by applying write buffer to snapshot
+        var effective = self.snapshot
         for op in writeBuffer {
             switch op {
             case .set(let key, let value):
@@ -127,35 +176,35 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
             }
         }
 
-        // 範囲内のエントリを収集
+        // Resolve KeySelectors using FDB-compatible algorithm
+        let allKeys = effective.map(\.key)
+        let startIdx = begin.resolve(in: allKeys)
+        let endIdx = end.resolve(in: allKeys)
+
+        guard startIdx < endIdx else {
+            return InMemoryRangeResult([])
+        }
+
+        // Collect entries in the resolved range [startIdx, endIdx)
         var results: [(key: Bytes, value: Bytes)] = []
-        let startIdx = insertionPoint(effective, for: begin)
 
         if reverse {
-            let endIdx = insertionPoint(effective, for: end)
             var i = endIdx - 1
             while i >= startIdx {
-                let entry = effective[i]
-                if compareBytes(entry.key, begin) >= 0 && compareBytes(entry.key, end) < 0 {
-                    results.append(entry)
-                    if limit > 0 && results.count >= limit { break }
-                }
+                results.append(effective[i])
+                if limit > 0 && results.count >= limit { break }
                 i -= 1
             }
         } else {
             var i = startIdx
-            while i < effective.count {
-                let entry = effective[i]
-                guard compareBytes(entry.key, end) < 0 else { break }
-                if compareBytes(entry.key, begin) >= 0 {
-                    results.append(entry)
-                    if limit > 0 && results.count >= limit { break }
-                }
+            while i < endIdx {
+                results.append(effective[i])
+                if limit > 0 && results.count >= limit { break }
                 i += 1
             }
         }
 
-        return KeyValueSequence(results)
+        return InMemoryRangeResult(results)
     }
 
     // MARK: - Write
@@ -170,9 +219,9 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
         writeBuffer.append(.clear(key: key))
     }
 
-    public func clearRange(begin: Bytes, end: Bytes) {
+    public func clearRange(beginKey: Bytes, endKey: Bytes) {
         guard !cancelled else { return }
-        writeBuffer.append(.clearRange(begin: begin, end: end))
+        writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
     }
 
     // MARK: - Transaction Management

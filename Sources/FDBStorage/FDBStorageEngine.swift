@@ -8,10 +8,21 @@ import FoundationDB
 public final class FDBStorageEngine: StorageEngine, @unchecked Sendable {
     public typealias TransactionType = FDBStorageTransaction
 
-    private let database: any DatabaseProtocol
+    public let database: any DatabaseProtocol
 
     public init(database: any DatabaseProtocol) {
         self.database = database
+    }
+
+    /// FDB クライアントライブラリの初期化（プロセスにつき1回）
+    public static func initialize() async throws {
+        try await FDBClient.initialize()
+    }
+
+    /// デフォルトクラスタに接続して FDBStorageEngine を生成する
+    public static func open() async throws -> FDBStorageEngine {
+        let db = try FDBClient.openDatabase()
+        return FDBStorageEngine(database: db)
     }
 
     public func createTransaction() throws -> FDBStorageTransaction {
@@ -29,10 +40,16 @@ public final class FDBStorageEngine: StorageEngine, @unchecked Sendable {
                 let result = try await operation(tx)
                 try await tx.commit()
                 return result
-            } catch let error as FDBError where error.isRetryable {
+            } catch let error as StorageError where error.isRetryable {
+                // StorageError retryable (converted from FDBError in commit/other ops)
                 tx.cancel()
                 if attempt < maxRetries - 1 { continue }
-                throw StorageError.backendError(error.description)
+                throw StorageError.backendError("Max retries exceeded: \(error)")
+            } catch let error as FDBError where error.isRetryable {
+                // Raw FDBError that escaped conversion (e.g. from user code calling fdbTransaction directly)
+                tx.cancel()
+                if attempt < maxRetries - 1 { continue }
+                throw StorageError.backendError("Max retries exceeded: \(error.description)")
             } catch let error as StorageError {
                 tx.cancel()
                 throw error
@@ -42,5 +59,9 @@ public final class FDBStorageEngine: StorageEngine, @unchecked Sendable {
             }
         }
         throw StorageError.transactionTooOld
+    }
+
+    public var directoryService: any DirectoryService {
+        FDBDirectoryService(database: database)
     }
 }

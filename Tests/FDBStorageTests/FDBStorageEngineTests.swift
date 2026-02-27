@@ -33,17 +33,17 @@ struct FDBStorageEngineTests {
 
     private func cleanup(engine: FDBStorageEngine, prefix: Bytes) async throws {
         try await engine.withTransaction { tx in
-            tx.clearRange(begin: prefix, end: prefix + [0xFF, 0xFF])
+            tx.clearRange(beginKey: prefix, endKey: prefix + [0xFF, 0xFF])
         }
     }
 
     private func collectRange(
-        _ tx: any Transaction,
+        _ tx: some Transaction,
         begin: Bytes, end: Bytes
     ) async throws -> [(key: Bytes, value: Bytes)] {
-        let seq = try await tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
+        let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
         var result: [(key: Bytes, value: Bytes)] = []
-        for try await item in seq { result.append(item) }
+        for try await (key, value) in seq { result.append((key: key, value: value)) }
         return result
     }
 
@@ -66,16 +66,12 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
+            let results = try await tx.collectRange(
                 begin: prefixedKey(prefix, [0x01]),
                 end: prefixedKey(prefix, [0x06]),
-                limit: 0,
                 reverse: true
             )
-            var values: [Bytes] = []
-            for try await item in results {
-                values.append(item.value)
-            }
+            let values = results.map { $0.1 }
             #expect(values == [[50], [40], [30], [20], [10]])
         }
 
@@ -93,20 +89,16 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
+            let collected = try await tx.collectRange(
                 begin: prefixedKey(prefix, [0x01]),
                 end: prefixedKey(prefix, [0x06]),
                 limit: 2,
                 reverse: true
             )
-            var collected: [(key: Bytes, value: Bytes)] = []
-            for try await item in results {
-                collected.append(item)
-            }
             // limit=2 applied AFTER reverse: [5]=50, [4]=40
             #expect(collected.count == 2)
-            #expect(collected[0].value == [50])
-            #expect(collected[1].value == [40])
+            #expect(collected[0].1 == [50])
+            #expect(collected[1].1 == [40])
         }
 
         try await cleanup(engine: engine, prefix: prefix)
@@ -123,20 +115,15 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
+            let collected = try await tx.collectRange(
                 begin: prefixedKey(prefix, [0x01]),
                 end: prefixedKey(prefix, [0x06]),
-                limit: 2,
-                reverse: false
+                limit: 2
             )
-            var collected: [(key: Bytes, value: Bytes)] = []
-            for try await item in results {
-                collected.append(item)
-            }
             // limit=2 forward: [1]=10, [2]=20
             #expect(collected.count == 2)
-            #expect(collected[0].value == [10])
-            #expect(collected[1].value == [20])
+            #expect(collected[0].1 == [10])
+            #expect(collected[1].1 == [20])
         }
 
         try await cleanup(engine: engine, prefix: prefix)
@@ -161,22 +148,18 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
+            let results = try await tx.collectRange(
                 begin: prefix,
-                end: prefix + [0xFF, 0xFF],
-                limit: 0,
-                reverse: false
+                end: prefix + [0xFF, 0xFF]
             )
-            var count = 0
             var prevKey: Bytes?
-            for try await item in results {
+            for (key, _) in results {
                 if let prev = prevKey {
-                    #expect(prev.lexicographicallyPrecedes(item.key))
+                    #expect(prev.lexicographicallyPrecedes(key))
                 }
-                prevKey = item.key
-                count += 1
+                prevKey = key
             }
-            #expect(count == 500)
+            #expect(results.count == 500)
         }
 
         try await cleanup(engine: engine, prefix: prefix)
@@ -194,23 +177,20 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
+            let results = try await tx.collectRange(
                 begin: prefix,
                 end: prefix + [0xFF, 0xFF],
-                limit: 0,
                 reverse: true
             )
-            var count = 0
             var prevKey: Bytes?
-            for try await item in results {
+            for (key, _) in results {
                 if let prev = prevKey {
                     // Descending order
-                    #expect(item.key.lexicographicallyPrecedes(prev))
+                    #expect(key.lexicographicallyPrecedes(prev))
                 }
-                prevKey = item.key
-                count += 1
+                prevKey = key
             }
-            #expect(count == 500)
+            #expect(results.count == 500)
         }
 
         try await cleanup(engine: engine, prefix: prefix)
@@ -441,8 +421,8 @@ struct FDBStorageEngineTests {
 
         try await engine.withTransaction { tx in
             tx.clearRange(
-                begin: prefixedKey(prefix, [0x02]),
-                end: prefixedKey(prefix, [0x05])
+                beginKey: prefixedKey(prefix, [0x02]),
+                endKey: prefixedKey(prefix, [0x05])
             )
         }
 

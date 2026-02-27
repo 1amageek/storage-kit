@@ -36,7 +36,7 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
-        tx.clearRange(begin: [0x01], end: [0x05])
+        tx.clearRange(beginKey: [0x01], endKey: [0x05])
         let value = try await tx.getValue(for: [0x02])
         #expect(value == nil)
     }
@@ -44,7 +44,7 @@ struct InMemoryEngineTests {
     @Test func clearRangeThenSet_setWins() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.clearRange(begin: [0x01], end: [0x05])
+        tx.clearRange(beginKey: [0x01], endKey: [0x05])
         tx.setValue([99], for: [0x03])
         let value = try await tx.getValue(for: [0x03])
         #expect(value == [99])
@@ -64,9 +64,9 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
-        tx.clearRange(begin: [0x01], end: [0x05])
+        tx.clearRange(beginKey: [0x01], endKey: [0x05])
         tx.setValue([2], for: [0x02])
-        tx.clearRange(begin: [0x01], end: [0x05])
+        tx.clearRange(beginKey: [0x01], endKey: [0x05])
         let value = try await tx.getValue(for: [0x02])
         #expect(value == nil)
     }
@@ -108,7 +108,7 @@ struct InMemoryEngineTests {
         }
 
         let tx = try engine.createTransaction()
-        tx.clearRange(begin: [0x01], end: [0x03])
+        tx.clearRange(beginKey: [0x01], endKey: [0x03])
         let cr1 = try await tx.getValue(for: [0x01])
         let cr2 = try await tx.getValue(for: [0x02])
         let cr3 = try await tx.getValue(for: [0x03])
@@ -143,7 +143,7 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key == begin → inside range → nil
         let value = try await tx.getValue(for: [0x02])
         #expect(value == nil)
@@ -153,7 +153,7 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x05])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key == end → outside range → value preserved
         let value = try await tx.getValue(for: [0x05])
         #expect(value == [1])
@@ -163,7 +163,7 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x04])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key < end → inside range → nil
         let value = try await tx.getValue(for: [0x04])
         #expect(value == nil)
@@ -173,7 +173,7 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key < begin → outside range → value preserved
         let value = try await tx.getValue(for: [0x01])
         #expect(value == [1])
@@ -183,7 +183,7 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x06])
-        tx.clearRange(begin: [0x02], end: [0x05])
+        tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key > end → outside range → value preserved
         let value = try await tx.getValue(for: [0x06])
         #expect(value == [1])
@@ -194,7 +194,7 @@ struct InMemoryEngineTests {
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01, 0xFF])
         tx.setValue([2], for: [0x02, 0x00])
-        tx.clearRange(begin: [0x02, 0x00], end: [0x03, 0x00])
+        tx.clearRange(beginKey: [0x02, 0x00], endKey: [0x03, 0x00])
         // [0x01, 0xFF] < begin → preserved
         let preservedValue = try await tx.getValue(for: [0x01, 0xFF])
         #expect(preservedValue == [1])
@@ -212,12 +212,12 @@ struct InMemoryEngineTests {
     // =========================================================================
 
     private func collectRange(
-        _ tx: any Transaction,
+        _ tx: some Transaction,
         begin: Bytes, end: Bytes
     ) async throws -> [(key: Bytes, value: Bytes)] {
-        let seq = try await tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
+        let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
         var result: [(key: Bytes, value: Bytes)] = []
-        for try await item in seq { result.append(item) }
+        for try await (key, value) in seq { result.append((key: key, value: value)) }
         return result
     }
 
@@ -249,7 +249,7 @@ struct InMemoryEngineTests {
         }
 
         let tx = try engine.createTransaction()
-        tx.clearRange(begin: [0x01], end: [0x04])
+        tx.clearRange(beginKey: [0x01], endKey: [0x04])
         tx.setValue([99], for: [0x02])
 
         // getValue: [0x01]=nil (clearRange), [0x02]=99 (set after clearRange), [0x03]=nil (clearRange)
@@ -277,7 +277,7 @@ struct InMemoryEngineTests {
 
         let tx = try engine.createTransaction()
         tx.setValue([99], for: [0x01])    // overwrite 0x01
-        tx.clearRange(begin: [0x01], end: [0x03])  // then clear entire range
+        tx.clearRange(beginKey: [0x01], endKey: [0x03])  // then clear entire range
 
         // getValue: both cleared by clearRange (which comes after set)
         let oc1 = try await tx.getValue(for: [0x01])
@@ -343,19 +343,15 @@ struct InMemoryEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
+            let collected = try await tx.collectRange(
                 begin: [0x01], end: [0x06], limit: 2, reverse: true
             )
-            var collected: [(key: Bytes, value: Bytes)] = []
-            for try await item in results {
-                collected.append(item)
-            }
             // Should be the last 2 items: [5]=50, [4]=40
             #expect(collected.count == 2)
-            #expect(collected[0].key == [0x05])
-            #expect(collected[0].value == [50])
-            #expect(collected[1].key == [0x04])
-            #expect(collected[1].value == [40])
+            #expect(collected[0].0 == [0x05])
+            #expect(collected[0].1 == [50])
+            #expect(collected[1].0 == [0x04])
+            #expect(collected[1].1 == [40])
         }
     }
 
@@ -426,7 +422,10 @@ struct InMemoryEngineTests {
         let tx = try engine.createTransaction()
         tx.cancel()
         do {
-            _ = try await tx.getRange(begin: [0x00], end: [0xFF], limit: 0, reverse: false)
+            let seq = tx.getRange(begin: [0x00], end: [0xFF], limit: 0, reverse: false)
+            for try await _ in seq {
+                Issue.record("Expected error")
+            }
             Issue.record("Expected error")
         } catch let error as StorageError {
             guard case .invalidOperation = error else {
@@ -457,7 +456,7 @@ struct InMemoryEngineTests {
         tx.cancel()
         tx.setValue([42], for: [0x01])
         tx.clear(key: [0x02])
-        tx.clearRange(begin: [0x03], end: [0x04])
+        tx.clearRange(beginKey: [0x03], endKey: [0x04])
         #expect(engine.count == 0)
     }
 
@@ -501,20 +500,18 @@ struct InMemoryEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.getRange(
-                begin: [0x00, 0x00], end: [0xFF, 0xFF], limit: 0, reverse: false
+            let results = try await tx.collectRange(
+                begin: [0x00, 0x00], end: [0xFF, 0xFF]
             )
             var prevKey: Bytes?
-            var count = 0
-            for try await item in results {
+            for (key, _) in results {
                 if let prev = prevKey {
                     // Verify ascending order via compareBytes
-                    #expect(prev.lexicographicallyPrecedes(item.key))
+                    #expect(prev.lexicographicallyPrecedes(key))
                 }
-                prevKey = item.key
-                count += 1
+                prevKey = key
             }
-            #expect(count == 500)
+            #expect(results.count == 500)
         }
     }
 

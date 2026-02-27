@@ -14,4 +14,14 @@ public enum StorageError: Error, Sendable {
 
     /// バックエンド固有のエラー
     case backendError(String)
+
+    /// このエラーがリトライ可能かどうか
+    public var isRetryable: Bool {
+        switch self {
+        case .transactionConflict, .transactionTooOld:
+            return true
+        case .keyNotFound, .invalidOperation, .backendError:
+            return false
+        }
+    }
 }

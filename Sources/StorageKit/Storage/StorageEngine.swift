@@ -15,4 +15,15 @@ public protocol StorageEngine: Sendable {
     func withTransaction<T: Sendable>(
         _ operation: (any Transaction) async throws -> T
     ) async throws -> T
+
+    /// 階層的名前空間管理サービス
+    ///
+    /// FDB: DirectoryLayer（動的プレフィックス割り当て）
+    /// 非 FDB: StaticDirectoryService（パスを Tuple エンコードで直接変換）
+    var directoryService: any DirectoryService { get }
+}
+
+extension StorageEngine {
+    /// デフォルト: StaticDirectoryService（パスを Tuple エンコードで直接 Subspace に変換）
+    public var directoryService: any DirectoryService { StaticDirectoryService() }
 }
