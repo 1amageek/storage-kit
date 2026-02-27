@@ -141,6 +141,10 @@ public protocol Transaction: Sendable {
 extension Transaction {
 
     /// Convenience with snapshot defaulting to false.
+    ///
+    /// Note: All Transaction conformers MUST implement `getValue(for:snapshot:)` directly.
+    /// This extension only provides a default argument — it does NOT provide an implementation.
+    /// Relying on this extension as a protocol witness would cause infinite recursion.
     public func getValue(for key: Bytes, snapshot: Bool = false) async throws -> Bytes? {
         try await getValue(for: key, snapshot: snapshot)
     }
@@ -293,9 +297,8 @@ extension Transaction {
         return nil
     }
 
-    /// Default: implements atomicOp via read-modify-write (correct for single-writer).
+    /// Default: no-op. Non-FDB backends should override if atomic operations are needed.
     public func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) {
-        // Default is no-op (single-writer backends can implement read-modify-write separately)
     }
 
     /// Default: no-op.

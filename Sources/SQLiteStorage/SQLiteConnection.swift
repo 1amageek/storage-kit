@@ -155,11 +155,35 @@ final class SQLiteConnection {
         limit: Int,
         reverse: Bool
     ) throws -> [(key: Bytes, value: Bytes)] {
+        let beginOp = beginInclusive ? ">=" : ">"
+        let endOp = endInclusive ? "<=" : "<"
+        return try getRangeWithOps(
+            begin: begin, beginOp: beginOp,
+            end: end, endOp: endOp,
+            limit: limit, reverse: reverse
+        )
+    }
+
+    /// Range query with explicit SQL comparison operators.
+    ///
+    /// - Parameters:
+    ///   - begin: The lower bound key.
+    ///   - beginOp: SQL comparison operator for begin (e.g., ">=", ">").
+    ///   - end: The upper bound key.
+    ///   - endOp: SQL comparison operator for end (e.g., "<", "<=").
+    ///   - limit: Maximum number of results (0 = unlimited).
+    ///   - reverse: If true, results are returned in descending order.
+    func getRangeWithOps(
+        begin: Bytes,
+        beginOp: String,
+        end: Bytes,
+        endOp: String,
+        limit: Int,
+        reverse: Bool
+    ) throws -> [(key: Bytes, value: Bytes)] {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
-        let beginOp = beginInclusive ? ">=" : ">"
-        let endOp = endInclusive ? "<=" : "<"
         let order = reverse ? "DESC" : "ASC"
         let limitClause = limit > 0 ? "LIMIT ?" : ""
         let sql = "SELECT key, value FROM kv_store WHERE key \(beginOp) ? AND key \(endOp) ? ORDER BY key \(order) \(limitClause)"

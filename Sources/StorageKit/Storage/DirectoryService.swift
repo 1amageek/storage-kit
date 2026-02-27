@@ -29,10 +29,14 @@ extension DirectoryService {
 ///
 /// Converts paths directly to Subspace via Tuple encoding.
 /// Does not perform dynamic prefix allocation like FDB's DirectoryLayer.
+/// Since the mapping is deterministic, `exists` always returns true
+/// and `remove` is a no-op.
 public struct StaticDirectoryService: DirectoryService, Sendable {
     public init() {}
 
     public func createOrOpen(path: [String]) async throws -> Subspace {
         Subspace(Tuple(path.map { $0 as any TupleElement }))
     }
+
+    public func exists(path: [String]) async throws -> Bool { true }
 }

@@ -39,9 +39,14 @@ public final class InMemoryEngine: StorageEngine, Sendable {
         _ operation: (any Transaction) async throws -> T
     ) async throws -> T {
         let tx = try createTransaction()
-        let result = try await operation(tx)
-        try await tx.commit()
-        return result
+        do {
+            let result = try await operation(tx)
+            try await tx.commit()
+            return result
+        } catch {
+            tx.cancel()
+            throw error
+        }
     }
 
     /// Current store size (for testing).
@@ -104,6 +109,7 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
     private let engine: InMemoryEngine
     private var snapshot: [(key: Bytes, value: Bytes)]
     private var writeBuffer: [WriteOp] = []
+    private var committed = false
     private var cancelled = false
 
     private enum WriteOp {
@@ -228,6 +234,7 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
 
     public func commit() async throws {
         guard !cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
+        guard !committed else { return }
 
         engine._store.withLock { currentStore in
             for op in writeBuffer {
@@ -248,10 +255,12 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
                 }
             }
         }
+        committed = true
         writeBuffer.removeAll()
     }
 
     public func cancel() {
+        guard !committed, !cancelled else { return }
         cancelled = true
         writeBuffer.removeAll()
     }

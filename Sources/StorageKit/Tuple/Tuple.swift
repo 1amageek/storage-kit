@@ -58,19 +58,29 @@ public struct Tuple: Sendable, Hashable, Equatable {
         self.storage = storage
     }
 
-    // MARK: - Subscript
+    // MARK: - Element Access
 
-    /// Access an element by index (returns nil if out of bounds).
-    public subscript(index: Int) -> (any TupleElement)? {
-        guard index >= 0 && index < storage.count else { return nil }
-        let encoded = storage[index].encoded
-        guard let first = encoded.first else { return nil }
-        var offset = 1
-        do {
-            return try Self.decodeElement(typeCode: first, bytes: encoded, at: &offset)
-        } catch {
-            return nil
+    /// Access an element by index with error propagation.
+    ///
+    /// - Parameter index: The element index.
+    /// - Throws: `TupleError` if the index is out of bounds or decoding fails.
+    public func element(at index: Int) throws -> any TupleElement {
+        guard index >= 0 && index < storage.count else {
+            throw TupleError.unexpectedEndOfData
         }
+        let encoded = storage[index].encoded
+        guard let first = encoded.first else {
+            throw TupleError.unexpectedEndOfData
+        }
+        var offset = 1
+        return try Self.decodeElement(typeCode: first, bytes: encoded, at: &offset)
+    }
+
+    /// Access an element by index (returns nil if out of bounds or decoding fails).
+    ///
+    /// Prefer `element(at:)` when error details are important.
+    public subscript(index: Int) -> (any TupleElement)? {
+        try? element(at: index)
     }
 
     // MARK: - Pack
@@ -129,9 +139,19 @@ public struct Tuple: Sendable, Hashable, Equatable {
         case intZero:
             return Int64(0)
 
-        case 0x0B..<intZero, (intZero + 1)...0x1D:
-            // Int64.decodeTuple reads bytes[offset - 1] as the type code
+        case 0x0B..<intZero:
+            // Negative integers: always Int64
             return try Int64.decodeTuple(from: bytes, at: &offset)
+
+        case (intZero + 1)...0x1D:
+            // Positive integers: try Int64 first, fall back to UInt64 for values > Int64.max
+            let savedOffset = offset
+            do {
+                return try Int64.decodeTuple(from: bytes, at: &offset)
+            } catch TupleError.integerOverflow {
+                offset = savedOffset
+                return try UInt64.decodeTuple(from: bytes, at: &offset)
+            }
 
         case TupleTypeCode.float.rawValue:
             return try Float.decodeTuple(from: bytes, at: &offset)

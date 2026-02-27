@@ -38,6 +38,12 @@ extension Int64: TupleElement {
             let n = Int(intZero - typeCode)
             guard offset + n <= bytes.count else { throw TupleError.unexpectedEndOfData }
 
+            // n=9 (type code 0x0B): extended range negative integer, exceeds Int64
+            if n > 8 {
+                offset += n
+                throw TupleError.integerOverflow
+            }
+
             if n == 8 {
                 // n=8: raw two's complement bit pattern (FDB official spec)
                 var bp = Bytes(repeating: 0, count: 8)
