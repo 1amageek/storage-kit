@@ -50,12 +50,9 @@ public final class FDBStorageEngine: StorageEngine, @unchecked Sendable {
                 tx.cancel()
                 if attempt < maxRetries - 1 { continue }
                 throw StorageError.backendError("Max retries exceeded: \(error.description)")
-            } catch let error as StorageError {
-                tx.cancel()
-                throw error
             } catch {
                 tx.cancel()
-                throw StorageError.backendError("\(error)")
+                throw error
             }
         }
         throw StorageError.transactionTooOld
