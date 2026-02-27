@@ -1,21 +1,21 @@
-/// 階層的名前空間管理サービス
+/// Hierarchical namespace management service.
 ///
-/// FDB の DirectoryLayer に相当する機能を抽象化。
-/// パスベースの名前空間を Subspace に変換する。
+/// Abstracts functionality equivalent to FDB's DirectoryLayer.
+/// Converts path-based namespaces to Subspace.
 public protocol DirectoryService: Sendable {
-    /// パスに対応する Subspace を作成または開く
+    /// Create or open a Subspace corresponding to a path.
     ///
-    /// - Parameter path: 階層パス（例: ["User", "email_index"]）
-    /// - Returns: パスに対応する Subspace
+    /// - Parameter path: Hierarchical path (e.g. ["User", "email_index"]).
+    /// - Returns: The Subspace corresponding to the path.
     func createOrOpen(path: [String]) async throws -> Subspace
 
-    /// パス配下のサブディレクトリ名を列挙する
+    /// List subdirectory names under a path.
     func list(path: [String]) async throws -> [String]
 
-    /// パスに対応するディレクトリを削除する
+    /// Remove the directory corresponding to a path.
     func remove(path: [String]) async throws
 
-    /// パスに対応するディレクトリが存在するか
+    /// Check whether a directory corresponding to a path exists.
     func exists(path: [String]) async throws -> Bool
 }
 
@@ -25,10 +25,10 @@ extension DirectoryService {
     public func exists(path: [String]) async throws -> Bool { false }
 }
 
-/// 静的ディレクトリサービス（非 FDB バックエンド用）
+/// Static directory service (for non-FDB backends).
 ///
-/// パスを Tuple エンコードして直接 Subspace に変換する。
-/// FDB DirectoryLayer のような動的プレフィックス割り当ては行わない。
+/// Converts paths directly to Subspace via Tuple encoding.
+/// Does not perform dynamic prefix allocation like FDB's DirectoryLayer.
 public struct StaticDirectoryService: DirectoryService, Sendable {
     public init() {}
 

@@ -14,12 +14,12 @@ public final class FDBStorageEngine: StorageEngine, @unchecked Sendable {
         self.database = database
     }
 
-    /// FDB クライアントライブラリの初期化（プロセスにつき1回）
+    /// Initialize the FDB client library (once per process).
     public static func initialize() async throws {
         try await FDBClient.initialize()
     }
 
-    /// デフォルトクラスタに接続して FDBStorageEngine を生成する
+    /// Connect to the default cluster and create an FDBStorageEngine.
     public static func open() async throws -> FDBStorageEngine {
         let db = try FDBClient.openDatabase()
         return FDBStorageEngine(database: db)

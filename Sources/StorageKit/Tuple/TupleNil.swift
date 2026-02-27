@@ -1,6 +1,6 @@
-/// Tuple 内の null 値を表現する型
+/// Type representing a null value within a Tuple.
 ///
-/// FDB Tuple Layer では null は型コード 0x00 の 1 バイトでエンコードされる。
+/// In the FDB Tuple Layer, null is encoded as a single byte with type code 0x00.
 public struct TupleNil: TupleElement, Sendable {
     public init() {}
 

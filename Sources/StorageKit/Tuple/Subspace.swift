@@ -1,11 +1,11 @@
 import Foundation
 
-/// Tuple ベースのキー空間プレフィックス管理
+/// Tuple-based key space prefix management.
 ///
-/// Subspace は共通プレフィックスを持つキー群を管理する。
-/// FoundationDB の Subspace と同一セマンティクス。
+/// Subspace manages groups of keys sharing a common prefix.
+/// Identical semantics to FoundationDB's Subspace.
 ///
-/// ## 使用例
+/// ## Usage example
 /// ```swift
 /// let root = Subspace(prefix: [])
 /// let users = root.subspace("users")
@@ -14,7 +14,7 @@ import Foundation
 /// ```
 public struct Subspace: Sendable, Hashable, Equatable {
 
-    /// このサブスペースのプレフィックスバイト列
+    /// The prefix byte array of this subspace.
     public let prefix: Bytes
 
     // MARK: - Initializers
@@ -23,36 +23,36 @@ public struct Subspace: Sendable, Hashable, Equatable {
         self.prefix = prefix
     }
 
-    /// Tuple のエンコード結果をプレフィックスとして使用
+    /// Use the encoded result of a Tuple as the prefix.
     public init(_ tuple: Tuple) {
         self.prefix = tuple.pack()
     }
 
-    /// 可変長引数で Tuple 要素からプレフィックスを構築
+    /// Build a prefix from Tuple elements using variadic arguments.
     public init(_ elements: any TupleElement...) {
         self.prefix = Tuple(elements).pack()
     }
 
     // MARK: - Subspace nesting
 
-    /// 追加要素でネストしたサブスペースを作成
+    /// Create a nested subspace with additional elements.
     public func subspace(_ elements: any TupleElement...) -> Subspace {
         Subspace(prefix: prefix + Tuple(elements).pack())
     }
 
-    /// subscript でネスト（subspace のエイリアス）
+    /// Nest via subscript (alias for subspace).
     public subscript(_ elements: any TupleElement...) -> Subspace {
         Subspace(prefix: prefix + Tuple(elements).pack())
     }
 
     // MARK: - Pack / Unpack
 
-    /// Tuple をこのサブスペースのプレフィックス付きでエンコード
+    /// Encode a Tuple with this subspace's prefix prepended.
     public func pack(_ tuple: Tuple) -> Bytes {
         prefix + tuple.pack()
     }
 
-    /// プレフィックスを除去して Tuple をデコード
+    /// Strip the prefix and decode a Tuple.
     public func unpack(_ key: Bytes) throws -> Tuple {
         guard contains(key) else {
             throw TupleError.prefixMismatch
@@ -64,7 +64,7 @@ public struct Subspace: Sendable, Hashable, Equatable {
 
     // MARK: - Contains
 
-    /// キーがこのサブスペースに含まれるか判定
+    /// Check whether a key is contained within this subspace.
     public func contains(_ key: Bytes) -> Bool {
         guard key.count >= prefix.count else { return false }
         return key.prefix(prefix.count) == prefix[...]
@@ -72,9 +72,9 @@ public struct Subspace: Sendable, Hashable, Equatable {
 
     // MARK: - Range
 
-    /// このサブスペースの全キー範囲を返す [prefix + 0x00, strinc(prefix))
+    /// Returns the full key range of this subspace [prefix + 0x00, strinc(prefix)).
     ///
-    /// prefix 自体は含まない。prefix の後に少なくとも 1 バイトの追加データを持つキーのみ。
+    /// Does not include the prefix itself. Only keys that have at least 1 byte of additional data after the prefix.
     public func range() -> (begin: Bytes, end: Bytes) {
         let begin = prefix + [0x00]
         let end: Bytes
@@ -86,16 +86,16 @@ public struct Subspace: Sendable, Hashable, Equatable {
         return (begin: begin, end: end)
     }
 
-    /// Tuple 範囲からキー範囲を生成
+    /// Generate a key range from a Tuple range.
     public func range(from start: Tuple, to end: Tuple) -> (begin: Bytes, end: Bytes) {
         let beginKey = prefix + start.pack()
         let endKey = prefix + end.pack()
         return (begin: beginKey, end: endKey)
     }
 
-    /// プレフィックスベースの範囲 [prefix, strinc(prefix))
+    /// Prefix-based range [prefix, strinc(prefix)).
     ///
-    /// prefix 自体も含む全てのキーを対象にする。
+    /// Targets all keys including the prefix itself.
     public func prefixRange() throws -> (begin: Bytes, end: Bytes) {
         let end = try strinc(prefix)
         return (begin: prefix, end: end)

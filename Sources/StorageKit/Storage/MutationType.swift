@@ -1,23 +1,23 @@
-/// アトミック操作の種別
+/// Types of atomic mutation operations.
 ///
-/// FDB のアトミックミューテーション型を抽象化。
+/// Abstracts FDB's atomic mutation types.
 public enum MutationType: Sendable {
-    /// 加算（リトルエンディアンの整数バイト列を加算）
+    /// Addition (adds little-endian integer byte arrays).
     case add
-    /// バージョンスタンプ付きキーを設定
+    /// Set key with versionstamp.
     case setVersionstampedKey
-    /// バージョンスタンプ付き値を設定
+    /// Set value with versionstamp.
     case setVersionstampedValue
-    /// ビット OR
+    /// Bitwise OR.
     case bitOr
-    /// ビット AND
+    /// Bitwise AND.
     case bitAnd
-    /// ビット XOR
+    /// Bitwise XOR.
     case bitXor
-    /// 最大値を設定（バイト列の辞書順比較）
+    /// Set to maximum value (lexicographic byte comparison).
     case max
-    /// 最小値を設定（バイト列の辞書順比較）
+    /// Set to minimum value (lexicographic byte comparison).
     case min
-    /// 比較して書き込み
+    /// Compare and clear.
     case compareAndClear
 }

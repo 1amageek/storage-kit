@@ -20,7 +20,7 @@ extension Int64: TupleElement {
             return 0
         }
 
-        // 正の整数: 型コード 0x15-0x1D
+        // Positive integer: type code 0x15-0x1D
         if typeCode > intZero && typeCode <= 0x1D {
             let n = Int(typeCode - intZero)
             guard offset + n <= bytes.count else { throw TupleError.unexpectedEndOfData }
@@ -33,13 +33,13 @@ extension Int64: TupleElement {
             return Int64(value)
         }
 
-        // 負の整数: 型コード 0x0B-0x13
+        // Negative integer: type code 0x0B-0x13
         if typeCode >= 0x0B && typeCode < intZero {
             let n = Int(intZero - typeCode)
             guard offset + n <= bytes.count else { throw TupleError.unexpectedEndOfData }
 
             if n == 8 {
-                // n=8: raw two's complement ビットパターン（FDB 公式仕様）
+                // n=8: raw two's complement bit pattern (FDB official spec)
                 var bp = Bytes(repeating: 0, count: 8)
                 for i in 0..<8 {
                     bp[i] = bytes[offset + i]
@@ -53,7 +53,7 @@ extension Int64: TupleElement {
                 return result
             }
 
-            // n < 8: sizeLimits 変換
+            // n < 8: sizeLimits conversion
             var raw: UInt64 = 0
             for i in 0..<n {
                 raw = (raw << 8) | UInt64(bytes[offset + i])
@@ -82,15 +82,15 @@ extension Int64: TupleElement {
     }
 
     private static func encodeNegative(_ value: Int64) -> Bytes {
-        // UInt64 空間で符号反転（Int64.min のオーバーフローを回避）
+        // Negate in UInt64 space (avoids overflow for Int64.min)
         let magnitude = 0 &- UInt64(bitPattern: value)
         let n = byteCount(for: magnitude)
         let typeCode = TupleTypeCode.intZero.rawValue - UInt8(n)
 
         if n == 8 {
-            // n=8: raw two's complement ビットパターン（FDB 公式仕様）
+            // n=8: raw two's complement bit pattern (FDB official spec)
             // Python: struct.pack(">q", value)
-            // Swift: UInt64(bitPattern: value) の big-endian 表現
+            // Swift: big-endian representation of UInt64(bitPattern: value)
             let raw = UInt64(bitPattern: value)
             var result = Bytes(repeating: 0, count: 9)
             result[0] = typeCode
@@ -102,9 +102,9 @@ extension Int64: TupleElement {
             return result
         }
 
-        // n < 8: sizeLimits 変換
+        // n < 8: sizeLimits conversion
         // Python: (size_limits[n] + value).to_bytes(n, 'big')
-        // sizeLimits[n-1] (StorageKit) == size_limits[n] (Python) なので limit - magnitude と同値
+        // sizeLimits[n-1] (StorageKit) == size_limits[n] (Python), so equivalent to limit - magnitude
         let limit = sizeLimits[n - 1]
         let encoded = limit - magnitude
         var result = Bytes(repeating: 0, count: n + 1)

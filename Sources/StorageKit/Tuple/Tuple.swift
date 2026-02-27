@@ -1,24 +1,24 @@
 import Foundation
 
-/// FDB Tuple Layer 互換の複合キー構造体
+/// Composite key struct compatible with the FDB Tuple Layer.
 ///
-/// 複数の型付き値をバイト列にエンコードし、辞書順 (lexicographic order) が
-/// 各要素の論理順と一致するバイナリフォーマットを生成する。
+/// Encodes multiple typed values into byte arrays, producing a binary format where
+/// lexicographic order matches the logical order of each element.
 ///
-/// ## 使用例
+/// ## Usage example
 /// ```swift
 /// let tuple = Tuple("users", Int64(42), "profile")
 /// let packed = tuple.pack()
 /// let unpacked = try Tuple.unpack(from: packed)
 /// ```
 ///
-/// ## 等値比較
-/// エンコード済みバイト列で比較する（FDB セマンティクス準拠）:
-/// - +0.0 ≠ -0.0 (異なるビットパターン)
-/// - NaN == NaN (同じビットパターン)
+/// ## Equality comparison
+/// Compared via encoded byte arrays (FDB semantics compliant):
+/// - +0.0 != -0.0 (different bit patterns)
+/// - NaN == NaN (same bit pattern)
 public struct Tuple: Sendable, Hashable, Equatable {
 
-    /// 型消去された要素を保持する内部ラッパー
+    /// Internal wrapper that holds type-erased elements.
     private struct AnyElement: Sendable, Hashable {
         let encoded: Bytes
 
@@ -37,10 +37,10 @@ public struct Tuple: Sendable, Hashable, Equatable {
 
     private let storage: [AnyElement]
 
-    /// 要素数
+    /// Number of elements.
     public var count: Int { storage.count }
 
-    /// 空かどうか
+    /// Whether the tuple is empty.
     public var isEmpty: Bool { storage.isEmpty }
 
     // MARK: - Initializers
@@ -53,14 +53,14 @@ public struct Tuple: Sendable, Hashable, Equatable {
         self.storage = elements.map { AnyElement($0) }
     }
 
-    /// 内部用: AnyElement 配列から直接構築
+    /// Internal: construct directly from an AnyElement array.
     private init(storage: [AnyElement]) {
         self.storage = storage
     }
 
     // MARK: - Subscript
 
-    /// インデックスアクセスで要素を取得（範囲外は nil）
+    /// Access an element by index (returns nil if out of bounds).
     public subscript(index: Int) -> (any TupleElement)? {
         guard index >= 0 && index < storage.count else { return nil }
         let encoded = storage[index].encoded
@@ -75,7 +75,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
 
     // MARK: - Pack
 
-    /// 全要素をバイト列にエンコード
+    /// Encode all elements into a byte array.
     public func pack() -> Bytes {
         var result = Bytes()
         for element in storage {
@@ -86,9 +86,9 @@ public struct Tuple: Sendable, Hashable, Equatable {
 
     // MARK: - Unpack
 
-    /// バイト列から要素配列をデコード
+    /// Decode an array of elements from a byte array.
     ///
-    /// FDB 実装と同じ単一パス方式: 各デコーダが inout offset を直接更新する。
+    /// Same single-pass approach as the FDB implementation: each decoder directly updates the inout offset.
     public static func unpack(from bytes: Bytes) throws -> [any TupleElement] {
         var elements: [any TupleElement] = []
         var offset = 0
@@ -104,12 +104,12 @@ public struct Tuple: Sendable, Hashable, Equatable {
         return elements
     }
 
-    /// 型コードに基づいて 1 要素をデコードし、offset を更新する
+    /// Decode a single element based on the type code and update the offset.
     ///
     /// - Parameters:
-    ///   - typeCode: 既に読み取り済みの型コードバイト
-    ///   - bytes: 全バイト列
-    ///   - offset: 型コードの次のバイト位置（デコード後に更新される）
+    ///   - typeCode: The already-read type code byte.
+    ///   - bytes: The full byte array.
+    ///   - offset: The byte position after the type code (updated after decoding).
     private static func decodeElement(typeCode: UInt8, bytes: Bytes, at offset: inout Int) throws -> any TupleElement {
         let intZero = TupleTypeCode.intZero.rawValue
 
@@ -130,7 +130,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
             return Int64(0)
 
         case 0x0B..<intZero, (intZero + 1)...0x1D:
-            // Int64.decodeTuple は bytes[offset - 1] を型コードとして読む
+            // Int64.decodeTuple reads bytes[offset - 1] as the type code
             return try Int64.decodeTuple(from: bytes, at: &offset)
 
         case TupleTypeCode.float.rawValue:
@@ -155,10 +155,10 @@ public struct Tuple: Sendable, Hashable, Equatable {
 
     // MARK: - Nested Tuple
 
-    /// Nested Tuple のエンコード（型コード 0x05）
+    /// Encode a Nested Tuple (type code 0x05).
     ///
-    /// 内部要素をエンコードし、結果の 0x00 バイトを 0x00 0xFF にエスケープ、
-    /// 最後に 0x00 終端を付加する。
+    /// Encodes internal elements, escapes 0x00 bytes in the result as 0x00 0xFF,
+    /// and appends a 0x00 terminator at the end.
     public func encodeNested() -> Bytes {
         var result: Bytes = [TupleTypeCode.nested.rawValue]
         for element in storage {
@@ -176,10 +176,10 @@ public struct Tuple: Sendable, Hashable, Equatable {
         return result
     }
 
-    /// Nested Tuple のデコード
+    /// Decode a Nested Tuple.
     ///
-    /// null-escape パターン (0x00 + 0xFF) を戻しながら内部バイトを収集し、
-    /// 非エスケープの 0x00 で終端を検出する。depth 追跡は不要。
+    /// Collects internal bytes while restoring the null-escape pattern (0x00 + 0xFF),
+    /// and detects termination at a non-escaped 0x00. No depth tracking is needed.
     private static func decodeNestedTuple(from bytes: Bytes, at offset: inout Int) throws -> Tuple {
         var innerBytes = Bytes()
         while offset < bytes.count {
@@ -217,14 +217,14 @@ extension Tuple: TupleElement {
 // MARK: - Append
 
 extension Tuple {
-    /// 要素を追加した新しい Tuple を返す
+    /// Return a new Tuple with an element appended.
     public func appending(_ element: any TupleElement) -> Tuple {
         var newStorage = storage
         newStorage.append(AnyElement(element))
         return Tuple(storage: newStorage)
     }
 
-    /// 別の Tuple の全要素を追加した新しい Tuple を返す
+    /// Return a new Tuple with all elements of another Tuple appended.
     public func appending(_ other: Tuple) -> Tuple {
         Tuple(storage: storage + other.storage)
     }

@@ -1,9 +1,9 @@
 import StorageKit
 import Foundation
 
-/// SQLite 用の getRange 結果型
+/// Range result type for SQLite.
 ///
-/// 配列ベースの AsyncSequence。ゼロコピーで結果を返す。
+/// Array-based AsyncSequence. Returns results with zero-copy.
 public struct SQLiteRangeResult: AsyncSequence, Sendable {
     public typealias Element = (Bytes, Bytes)
 

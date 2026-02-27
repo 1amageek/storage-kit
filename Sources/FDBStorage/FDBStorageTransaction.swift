@@ -3,11 +3,11 @@ import FoundationDB
 
 /// StorageKit.Transaction adapter for FoundationDB transactions.
 ///
-/// ## ゼロコピー設計
-/// `RangeResult = FDB.AsyncKVSequence` を直接返す。
-/// 中間ラッパー・クロージャ・Task なし。
+/// ## Zero-copy design
+/// Returns `RangeResult = FDB.AsyncKVSequence` directly.
+/// No intermediate wrappers, closures, or Tasks.
 ///
-/// ## FDB 固有機能へのアクセス
+/// ## Accessing FDB-specific features
 /// ```swift
 /// if let fdbTx = transaction as? FDBStorageTransaction {
 ///     fdbTx.fdbTransaction.setReadVersion(cachedVersion)
@@ -15,7 +15,7 @@ import FoundationDB
 /// ```
 public final class FDBStorageTransaction: Transaction, @unchecked Sendable {
 
-    /// ゼロコピー: FDB.AsyncKVSequence をそのまま返す
+    /// Zero-copy: returns FDB.AsyncKVSequence as-is.
     public typealias RangeResult = FDB.AsyncKVSequence
 
     /// Direct access to the underlying FDB transaction.
@@ -25,7 +25,7 @@ public final class FDBStorageTransaction: Transaction, @unchecked Sendable {
         self.fdbTransaction = fdbTransaction
     }
 
-    // MARK: - Type Conversion（struct コピーのみ、Bytes は CoW）
+    // MARK: - Type Conversion (struct copy only, Bytes are CoW)
 
     private func toFDB(_ ks: KeySelector) -> FDB.KeySelector {
         FDB.KeySelector(key: ks.key, orEqual: ks.orEqual, offset: ks.offset)
@@ -66,10 +66,10 @@ public final class FDBStorageTransaction: Transaction, @unchecked Sendable {
         try await fdbTransaction.getKey(selector: toFDB(selector), snapshot: snapshot)
     }
 
-    /// ゼロコピー: FDB.AsyncKVSequence を直接返す
+    /// Zero-copy: returns FDB.AsyncKVSequence directly.
     ///
-    /// Existential opening パターンで `any TransactionProtocol` の extension メソッドを呼び出す。
-    /// Swift 5.7+ の暗黙 existential opening により、具象型の extension メソッドにアクセス可能。
+    /// Uses the existential opening pattern to call extension methods on `any TransactionProtocol`.
+    /// Swift 5.7+ implicit existential opening allows access to concrete type extension methods.
     public func getRange(
         from begin: KeySelector,
         to end: KeySelector,

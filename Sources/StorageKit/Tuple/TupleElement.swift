@@ -1,4 +1,4 @@
-/// FDB Tuple Layer バイナリエンコーディング仕様に完全準拠した型コード
+/// Type codes fully compliant with the FDB Tuple Layer binary encoding specification.
 ///
 /// Reference: https://github.com/apple/foundationdb/blob/main/design/tuple.md
 public enum TupleTypeCode: UInt8, Sendable {
@@ -32,13 +32,13 @@ public enum TupleTypeCode: UInt8, Sendable {
     case uuid           = 0x30
 }
 
-/// StorageKit のバイト列型（FDB.Bytes と同等）
+/// Byte array type for StorageKit (equivalent to FDB.Bytes).
 public typealias Bytes = [UInt8]
 
-/// strinc アルゴリズム: バイト列の辞書順で次の接頭辞を返す
+/// strinc algorithm: returns the next prefix in lexicographic order.
 ///
-/// 末尾の 0xFF バイトを除去し、最後のバイトをインクリメントする。
-/// Range scan の終了キー生成に使用。
+/// Strips trailing 0xFF bytes and increments the last byte.
+/// Used for generating end keys in range scans.
 ///
 /// Reference: FoundationDB strinc specification
 public func strinc(_ bytes: Bytes) throws -> Bytes {
@@ -53,23 +53,23 @@ public func strinc(_ bytes: Bytes) throws -> Bytes {
     return result
 }
 
-/// Tuple Layer のエンコード/デコード用プロトコル
+/// Protocol for encoding/decoding with the Tuple Layer.
 ///
-/// FDB Tuple Layer のバイナリフォーマットに従い、各型をバイト列に変換・復元する。
-/// エンコード結果は辞書順 (lexicographic order) が値の論理順と一致する。
+/// Converts each type to/from byte arrays following the FDB Tuple Layer binary format.
+/// The encoded result preserves lexicographic order matching the logical order of values.
 public protocol TupleElement: Sendable, Hashable {
-    /// この値を FDB Tuple Layer 形式のバイト列にエンコード
+    /// Encode this value into a byte array in FDB Tuple Layer format.
     func encodeTuple() -> Bytes
 
-    /// バイト列の指定位置からこの型の値をデコード
+    /// Decode a value of this type from a byte array at the specified position.
     ///
     /// - Parameters:
-    ///   - bytes: エンコード済みバイト列
-    ///   - offset: 読み取り開始位置（型コードの次のバイト）。デコード後に更新される。
+    ///   - bytes: The encoded byte array.
+    ///   - offset: The read start position (the byte after the type code). Updated after decoding.
     static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Self
 }
 
-/// Tuple Layer のエラー型
+/// Error type for the Tuple Layer.
 public enum TupleError: Error, Sendable {
     case unexpectedEndOfData
     case invalidTypeCode(UInt8)
@@ -80,10 +80,10 @@ public enum TupleError: Error, Sendable {
     case prefixMismatch
 }
 
-/// 各型のバイト数上限テーブル（整数の可変長エンコードで使用）
+/// Byte count limit table for each type (used in variable-length integer encoding).
 ///
 /// sizeLimits[n] = 2^(8*(n+1)) - 1
-/// n バイトで表現可能な最大値を返す
+/// Returns the maximum value representable in n bytes.
 package let sizeLimits: [UInt64] = [
     0xFF,                       // 1 byte
     0xFFFF,                     // 2 bytes

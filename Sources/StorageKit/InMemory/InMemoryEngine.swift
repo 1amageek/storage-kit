@@ -1,8 +1,8 @@
 import Synchronization
 
-/// バイト列の辞書順比較
+/// Lexicographic comparison of byte arrays.
 ///
-/// - Returns: 負: lhs < rhs, 0: lhs == rhs, 正: lhs > rhs
+/// - Returns: Negative: lhs < rhs, 0: lhs == rhs, Positive: lhs > rhs.
 package func compareBytes(_ lhs: Bytes, _ rhs: Bytes) -> Int {
     let minLen = min(lhs.count, rhs.count)
     for i in 0..<minLen {
@@ -13,17 +13,17 @@ package func compareBytes(_ lhs: Bytes, _ rhs: Bytes) -> Int {
     return lhs.count - rhs.count
 }
 
-/// テストとクライアント単体利用のためのインメモリ KV ストレージ
+/// In-memory KV storage for testing and standalone client use.
 ///
-/// ソート済み配列ベースで辞書順 (lexicographic order) を維持する。
-/// Range scan は二分探索で開始位置を特定し、end まで順次走査する。
+/// Maintains lexicographic order using a sorted array.
+/// Range scans locate the start position via binary search and iterate to end.
 ///
-/// ## スレッドセーフティ
-/// Mutex で排他制御（I/O なし、メモリアクセスのみ）。
+/// ## Thread safety
+/// Uses Mutex for exclusive access (no I/O, memory access only).
 public final class InMemoryEngine: StorageEngine, Sendable {
     public typealias TransactionType = InMemoryTransaction
 
-    /// ソート済みの KV ストア（内部バッファ）
+    /// Sorted KV store (internal buffer).
     let _store: Mutex<[(key: Bytes, value: Bytes)]>
 
     public init() {
@@ -44,15 +44,15 @@ public final class InMemoryEngine: StorageEngine, Sendable {
         return result
     }
 
-    /// 現在のストアサイズ（テスト用）
+    /// Current store size (for testing).
     public var count: Int {
         _store.withLock { $0.count }
     }
 }
 
-/// InMemoryEngine 用の getRange 結果型
+/// Range result type for InMemoryEngine.
 ///
-/// 配列ベースの AsyncSequence。ゼロコピーで結果を返す。
+/// Array-based AsyncSequence. Returns results with zero copy.
 public struct InMemoryRangeResult: AsyncSequence, Sendable {
     public typealias Element = (Bytes, Bytes)
 
@@ -93,10 +93,10 @@ public struct InMemoryRangeResult: AsyncSequence, Sendable {
     }
 }
 
-/// InMemoryEngine のトランザクション実装
+/// Transaction implementation for InMemoryEngine.
 ///
-/// 読み取りスナップショット + 書き込みバッファ方式。
-/// commit 時にメインストアに反映する。
+/// Uses a read snapshot + write buffer approach.
+/// Applies changes to the main store on commit.
 public final class InMemoryTransaction: Transaction, @unchecked Sendable {
 
     public typealias RangeResult = InMemoryRangeResult
@@ -122,7 +122,7 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
     public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
         guard !cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
 
-        // 書き込みバッファを逆順に確認（最新の操作が優先）
+        // Check write buffer in reverse order (latest operation takes priority)
         for op in writeBuffer.reversed() {
             switch op {
             case .set(let k, let v) where k == key:
@@ -137,7 +137,7 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
             }
         }
 
-        // スナップショットから検索（二分探索）
+        // Search from snapshot (binary search)
         if let index = binarySearch(self.snapshot, for: key) {
             return self.snapshot[index].value
         }

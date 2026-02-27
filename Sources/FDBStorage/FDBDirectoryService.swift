@@ -1,10 +1,10 @@
 import StorageKit
 import FoundationDB
 
-/// FDB DirectoryLayer を使ったディレクトリサービス
+/// Directory service using FDB DirectoryLayer.
 ///
-/// FDB の DirectoryLayer は高レベル代入子（HCA）を使って
-/// 短いプレフィックスを動的に割り当てる。
+/// FDB's DirectoryLayer uses the High Contention Allocator (HCA)
+/// to dynamically assign short prefixes.
 public final class FDBDirectoryService: DirectoryService, @unchecked Sendable {
 
     private let database: any DatabaseProtocol

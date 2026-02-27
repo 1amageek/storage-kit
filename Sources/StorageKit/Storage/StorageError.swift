@@ -1,21 +1,21 @@
-/// StorageEngine のエラー型
+/// Error type for StorageEngine.
 public enum StorageError: Error, Sendable {
-    /// トランザクションコンフリクト（リトライ可能）
+    /// Transaction conflict (retryable).
     case transactionConflict
 
-    /// トランザクションが古い（リトライ可能）
+    /// Transaction too old (retryable).
     case transactionTooOld
 
-    /// キーが見つからない
+    /// Key not found.
     case keyNotFound
 
-    /// 無効な操作
+    /// Invalid operation.
     case invalidOperation(String)
 
-    /// バックエンド固有のエラー
+    /// Backend-specific error.
     case backendError(String)
 
-    /// このエラーがリトライ可能かどうか
+    /// Whether this error is retryable.
     public var isRetryable: Bool {
         switch self {
         case .transactionConflict, .transactionTooOld:

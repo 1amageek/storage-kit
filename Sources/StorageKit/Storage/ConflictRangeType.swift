@@ -1,4 +1,4 @@
-/// コンフリクト範囲の種別
+/// Type of conflict range.
 public enum ConflictRangeType: Sendable {
     case read
     case write

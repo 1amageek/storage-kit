@@ -1,53 +1,53 @@
-/// KV トランザクションの抽象プロトコル
+/// Abstract protocol for KV transactions.
 ///
-/// FDB の TransactionProtocol と API 互換のシグネチャを持つ。
-/// database-framework は `any Transaction` 経由でこのプロトコルを使用する。
+/// Has API-compatible signatures with FDB's TransactionProtocol.
+/// database-framework uses this protocol via `any Transaction`.
 ///
-/// ## ゼロコピー設計
-/// `getRange` は associated type `RangeResult` を返す。
-/// 具象型使用時はバックエンド固有の AsyncSequence がそのまま返り、ラッパーなし。
-/// `any Transaction` 経由時は existential dispatch のみ（データコピーなし）。
+/// ## Zero-copy design
+/// `getRange` returns an associated type `RangeResult`.
+/// When using concrete types, the backend-specific AsyncSequence is returned directly without wrapping.
+/// When accessed via `any Transaction`, only existential dispatch occurs (no data copying).
 ///
-/// ## バックエンド実装ガイド
-/// 必須メソッド: `getValue`, `getRange`, `setValue`, `clear`, `clearRange`, `commit`, `cancel`
-/// その他は extension でデフォルト実装を提供（非 FDB バックエンドは自動対応）。
+/// ## Backend implementation guide
+/// Required methods: `getValue`, `getRange`, `setValue`, `clear`, `clearRange`, `commit`, `cancel`.
+/// Others have default implementations provided via extension (non-FDB backends are automatically covered).
 public protocol Transaction: Sendable {
 
-    // MARK: - Associated type（ゼロコピー getRange）
+    // MARK: - Associated type (zero-copy getRange)
 
-    /// getRange が返す AsyncSequence の具象型
+    /// Concrete type of the AsyncSequence returned by getRange.
     ///
-    /// FDB: `FDB.AsyncKVSequence`（遅延バッチ取得）
-    /// SQLite: カーソルベース AsyncSequence
-    /// InMemory: 配列ベース AsyncSequence
+    /// FDB: `FDB.AsyncKVSequence` (lazy batch fetching)
+    /// SQLite: cursor-based AsyncSequence
+    /// InMemory: array-based AsyncSequence
     associatedtype RangeResult: AsyncSequence & Sendable
         where RangeResult.Element == (Bytes, Bytes)
 
     // MARK: - Read
 
-    /// キーに対応する値を取得（存在しない場合は nil）
+    /// Get the value for a key (returns nil if the key does not exist).
     ///
     /// - Parameters:
-    ///   - key: 取得するキー
-    ///   - snapshot: true の場合、snapshot 読み取り（FDB: コンフリクト範囲に追加しない）
+    ///   - key: The key to retrieve.
+    ///   - snapshot: If true, performs a snapshot read (FDB: does not add to conflict range).
     func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes?
 
-    /// KeySelector で指定された位置のキーを取得
+    /// Get the key at the position specified by a KeySelector.
     ///
     /// - Parameters:
-    ///   - selector: キー選択条件
-    ///   - snapshot: true の場合、snapshot 読み取り
+    ///   - selector: The key selection criteria.
+    ///   - snapshot: If true, performs a snapshot read.
     func getKey(selector: KeySelector, snapshot: Bool) async throws -> Bytes?
 
-    /// 範囲スキャン（遅延評価）
+    /// Range scan (lazily evaluated).
     ///
     /// - Parameters:
-    ///   - begin: 開始位置の KeySelector
-    ///   - end: 終了位置の KeySelector
-    ///   - limit: 最大取得件数（0 は無制限）
-    ///   - reverse: true の場合、逆順スキャン
-    ///   - snapshot: true の場合、snapshot 読み取り
-    ///   - streamingMode: バッチサイズ最適化ヒント
+    ///   - begin: The KeySelector for the start position.
+    ///   - end: The KeySelector for the end position.
+    ///   - limit: Maximum number of entries to fetch (0 means unlimited).
+    ///   - reverse: If true, scans in reverse order.
+    ///   - snapshot: If true, performs a snapshot read.
+    ///   - streamingMode: Hint for batch size optimization.
     func getRange(
         from begin: KeySelector,
         to end: KeySelector,
@@ -59,97 +59,97 @@ public protocol Transaction: Sendable {
 
     // MARK: - Write
 
-    /// キーに値を設定（既存の値は上書き）
+    /// Set a value for a key (overwrites existing value).
     func setValue(_ value: Bytes, for key: Bytes)
 
-    /// キーを削除
+    /// Delete a key.
     func clear(key: Bytes)
 
-    /// 範囲内の全キーを削除
+    /// Delete all keys within a range.
     ///
     /// - Parameters:
-    ///   - beginKey: 開始キー（含む）
-    ///   - endKey: 終了キー（含まない）
+    ///   - beginKey: Start key (inclusive).
+    ///   - endKey: End key (exclusive).
     func clearRange(beginKey: Bytes, endKey: Bytes)
 
     // MARK: - Atomic Operations
 
-    /// アトミック操作を実行
+    /// Perform an atomic operation.
     ///
     /// - Parameters:
-    ///   - key: 対象キー
-    ///   - param: 操作パラメータ（操作依存のバイト列）
-    ///   - mutationType: 操作種別
+    ///   - key: The target key.
+    ///   - param: Operation parameter (operation-dependent byte array).
+    ///   - mutationType: The type of mutation operation.
     func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType)
 
     // MARK: - Transaction Control
 
-    /// トランザクションをコミット
+    /// Commit the transaction.
     func commit() async throws
 
-    /// トランザクションをキャンセル（未コミットの変更を破棄）
+    /// Cancel the transaction (discards uncommitted changes).
     func cancel()
 
     // MARK: - Version Management
 
-    /// 読み取りバージョンを設定（キャッシュからの復元等）
+    /// Set the read version (e.g. restoring from cache).
     func setReadVersion(_ version: Int64)
 
-    /// このトランザクションの読み取りバージョンを取得
+    /// Get the read version of this transaction.
     func getReadVersion() async throws -> Int64
 
-    /// コミット済みバージョンを取得（commit 後のみ有効）
+    /// Get the committed version (only valid after commit).
     func getCommittedVersion() throws -> Int64
 
     // MARK: - Transaction Options
 
-    /// トランザクションオプションを設定（値なし）
+    /// Set a transaction option (no value).
     func setOption(forOption option: TransactionOption) throws
 
-    /// トランザクションオプションを設定（バイト値）
+    /// Set a transaction option (byte value).
     func setOption(to value: Bytes?, forOption option: TransactionOption) throws
 
-    /// トランザクションオプションを設定（整数値）
+    /// Set a transaction option (integer value).
     func setOption(to value: Int, forOption option: TransactionOption) throws
 
     // MARK: - Conflict Range
 
-    /// コンフリクト範囲を追加
+    /// Add a conflict range.
     ///
     /// - Parameters:
-    ///   - beginKey: 開始キー（含む）
-    ///   - endKey: 終了キー（含まない）
-    ///   - type: read または write
+    ///   - beginKey: Start key (inclusive).
+    ///   - endKey: End key (exclusive).
+    ///   - type: read or write.
     func addConflictRange(beginKey: Bytes, endKey: Bytes, type: ConflictRangeType) throws
 
     // MARK: - Statistics
 
-    /// キー範囲の推定バイトサイズを取得
+    /// Get the estimated byte size of a key range.
     func getEstimatedRangeSizeBytes(beginKey: Bytes, endKey: Bytes) async throws -> Int
 
-    /// キー範囲を指定サイズのチャンクに分割するスプリットポイントを取得
+    /// Get split points that divide a key range into chunks of the specified size.
     func getRangeSplitPoints(beginKey: Bytes, endKey: Bytes, chunkSize: Int) async throws -> [[UInt8]]
 
     // MARK: - Versionstamp
 
-    /// バージョンスタンプを取得（commit 後のみ有効）
+    /// Get the versionstamp (only valid after commit).
     func getVersionstamp() async throws -> Bytes?
 }
 
-// MARK: - Convenience（デフォルトパラメータ）
+// MARK: - Convenience (default parameters)
 
 extension Transaction {
 
-    /// snapshot デフォルト false
+    /// Convenience with snapshot defaulting to false.
     public func getValue(for key: Bytes, snapshot: Bool = false) async throws -> Bytes? {
         try await getValue(for: key, snapshot: snapshot)
     }
 
-    /// KeySelector ベースの getRange にデフォルト値を提供
+    /// Provides default values for the KeySelector-based getRange.
     ///
-    /// プロトコル要件の getRange(from:to:limit:reverse:snapshot:streamingMode:) に
-    /// デフォルト引数を追加する。呼び出し時に省略されたパラメータはここで補完され、
-    /// 実際のプロトコル実装（各バックエンド）にフル引数で委譲される。
+    /// Adds default arguments to the protocol requirement getRange(from:to:limit:reverse:snapshot:streamingMode:).
+    /// Parameters omitted at the call site are filled in here and delegated with full arguments
+    /// to the actual protocol implementation (each backend).
     public func getRange(
         from begin: KeySelector, to end: KeySelector,
         limit: Int = 0, reverse: Bool = false,
@@ -162,7 +162,7 @@ extension Transaction {
         )
     }
 
-    /// Bytes ベースの getRange convenience（KeySelector に変換）
+    /// Bytes-based getRange convenience (converts to KeySelector internally).
     public func getRange(
         begin: Bytes, end: Bytes,
         limit: Int = 0, reverse: Bool = false,
@@ -176,9 +176,9 @@ extension Transaction {
         )
     }
 
-    // MARK: - FDB Legacy 互換 overloads
+    // MARK: - FDB Legacy compatible overloads
 
-    /// FDB TransactionProtocol 互換: beginSelector/endSelector ラベル
+    /// FDB TransactionProtocol compatible: beginSelector/endSelector labels.
     public func getRange(
         beginSelector: KeySelector, endSelector: KeySelector,
         snapshot: Bool = false
@@ -190,7 +190,7 @@ extension Transaction {
         )
     }
 
-    /// FDB TransactionProtocol 互換: beginKey/endKey ラベル
+    /// FDB TransactionProtocol compatible: beginKey/endKey labels.
     public func getRange(
         beginKey: Bytes, endKey: Bytes,
         snapshot: Bool = false
@@ -203,12 +203,12 @@ extension Transaction {
         )
     }
 
-    // MARK: - Collecting（any Transaction 経由でも型安全）
+    // MARK: - Collecting (type-safe even via any Transaction)
 
-    /// `any Transaction` 経由でも型安全に使える collecting convenience
+    /// A collecting convenience that is type-safe even via `any Transaction`.
     ///
-    /// associated type RangeResult はプロトコル existential 経由で Element 型が失われるが、
-    /// このメソッドは内部で concrete self を使うため型が完全に解決される。
+    /// The associated type RangeResult loses its Element type through protocol existential,
+    /// but this method uses concrete self internally so the type is fully resolved.
     public func collectRange(
         from begin: KeySelector, to end: KeySelector,
         limit: Int = 0, reverse: Bool = false,
@@ -239,12 +239,12 @@ extension Transaction {
         )
     }
 
-    // MARK: - ForEach（any Transaction 経由でも型安全なイテレーション）
+    // MARK: - ForEach (type-safe range iteration even via any Transaction)
 
-    /// `any Transaction` 経由でも型安全に範囲イテレーションを行う
+    /// Performs type-safe range iteration even via `any Transaction`.
     ///
-    /// プロトコル extension 内では Self が具象型なので、associated type RangeResult の
-    /// Element が (Bytes, Bytes) として解決される。
+    /// Within a protocol extension, Self is a concrete type, so the associated type RangeResult's
+    /// Element is resolved as (Bytes, Bytes).
     public func forEachInRange(
         from begin: KeySelector, to end: KeySelector,
         limit: Int = 0, reverse: Bool = false,
@@ -260,9 +260,9 @@ extension Transaction {
         }
     }
 
-    // MARK: - setOption String 互換
+    // MARK: - setOption String compatible
 
-    /// FDB 互換: 文字列値でオプション設定
+    /// FDB compatible: set option with a string value.
     public func setOption(to value: String, forOption option: TransactionOption) throws {
         try setOption(to: Bytes(value.utf8), forOption: option)
     }
@@ -270,15 +270,15 @@ extension Transaction {
 
 // MARK: - Default Implementations
 
-/// 非 FDB バックエンド向けのデフォルト実装
+/// Default implementations for non-FDB backends.
 ///
-/// 基本メソッド（getValue, getRange, setValue, clear, clearRange, commit, cancel）は
-/// 各バックエンドが実装必須。それ以外はデフォルトで動作する。
+/// Basic methods (getValue, getRange, setValue, clear, clearRange, commit, cancel)
+/// must be implemented by each backend. The rest work with defaults.
 extension Transaction {
 
-    /// デフォルト: getKey を getRange で実装（snapshot デフォルト false）
+    /// Default: implements getKey via getRange (snapshot defaults to false).
     public func getKey(selector: KeySelector, snapshot: Bool = false) async throws -> Bytes? {
-        // firstGreaterOrEqual / firstGreaterThan: 開始キーから1件取得
+        // firstGreaterOrEqual / firstGreaterThan: fetch 1 entry from the start key
         let seq = getRange(
             from: selector,
             to: KeySelector(key: [0xFF], orEqual: true, offset: 1),
@@ -293,38 +293,38 @@ extension Transaction {
         return nil
     }
 
-    /// デフォルト: atomicOp を read-modify-write で実装（single-writer では正しい）
+    /// Default: implements atomicOp via read-modify-write (correct for single-writer).
     public func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) {
-        // デフォルトは no-op（single-writer バックエンドは read-modify-write を別途実装可能）
+        // Default is no-op (single-writer backends can implement read-modify-write separately)
     }
 
-    /// デフォルト: no-op
+    /// Default: no-op.
     public func setReadVersion(_ version: Int64) {}
 
-    /// デフォルト: 0 を返す
+    /// Default: returns 0.
     public func getReadVersion() async throws -> Int64 { 0 }
 
-    /// デフォルト: 0 を返す
+    /// Default: returns 0.
     public func getCommittedVersion() throws -> Int64 { 0 }
 
-    /// デフォルト: no-op
+    /// Default: no-op.
     public func setOption(forOption option: TransactionOption) throws {}
 
-    /// デフォルト: no-op
+    /// Default: no-op.
     public func setOption(to value: Bytes?, forOption option: TransactionOption) throws {}
 
-    /// デフォルト: no-op
+    /// Default: no-op.
     public func setOption(to value: Int, forOption option: TransactionOption) throws {}
 
-    /// デフォルト: no-op（single-writer は conflict なし）
+    /// Default: no-op (single-writer has no conflicts).
     public func addConflictRange(beginKey: Bytes, endKey: Bytes, type: ConflictRangeType) throws {}
 
-    /// デフォルト: 0 を返す
+    /// Default: returns 0.
     public func getEstimatedRangeSizeBytes(beginKey: Bytes, endKey: Bytes) async throws -> Int { 0 }
 
-    /// デフォルト: 空配列を返す
+    /// Default: returns an empty array.
     public func getRangeSplitPoints(beginKey: Bytes, endKey: Bytes, chunkSize: Int) async throws -> [[UInt8]] { [] }
 
-    /// デフォルト: nil を返す
+    /// Default: returns nil.
     public func getVersionstamp() async throws -> Bytes? { nil }
 }

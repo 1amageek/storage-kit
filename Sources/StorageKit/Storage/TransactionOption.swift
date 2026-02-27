@@ -1,20 +1,20 @@
-/// トランザクションオプション
+/// Transaction options.
 ///
-/// FDB のトランザクションオプションを抽象化した型。
-/// 非 FDB バックエンドではデフォルトで無視される。
+/// An abstraction of FDB's transaction options.
+/// Ignored by default in non-FDB backends.
 public enum TransactionOption: Sendable {
-    /// トランザクションのタイムアウト（ミリ秒）
+    /// Transaction timeout (in milliseconds).
     case timeout(milliseconds: Int)
-    /// バッチ優先度（バックグラウンド処理用）
+    /// Batch priority (for background processing).
     case priorityBatch
-    /// システム即時優先度（メタデータ操作用）
+    /// System immediate priority (for metadata operations).
     case prioritySystemImmediate
-    /// 読み取り低優先度
+    /// Low read priority.
     case readPriorityLow
-    /// 読み取り高優先度
+    /// High read priority.
     case readPriorityHigh
-    /// システムキーへのアクセスを許可
+    /// Allow access to system keys.
     case accessSystemKeys
-    /// サーバーサイドキャッシュを無効化
+    /// Disable server-side cache.
     case readServerSideCacheDisable
 }

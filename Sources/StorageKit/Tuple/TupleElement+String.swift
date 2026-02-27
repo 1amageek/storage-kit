@@ -3,7 +3,7 @@ import Foundation
 // MARK: - String
 
 extension String: TupleElement {
-    /// null-terminated + 0x00 → 0x00 0xFF エスケープ
+    /// Null-terminated encoding with 0x00 escaped as 0x00 0xFF.
     public func encodeTuple() -> Bytes {
         var result: Bytes = [TupleTypeCode.string.rawValue]
         for byte in self.utf8 {
@@ -30,7 +30,7 @@ extension String: TupleElement {
 // MARK: - Bytes ([UInt8])
 
 extension Array: TupleElement where Element == UInt8 {
-    /// null-terminated + 0x00 → 0x00 0xFF エスケープ（String と同一アルゴリズム）
+    /// Null-terminated encoding with 0x00 escaped as 0x00 0xFF (same algorithm as String).
     public func encodeTuple() -> Bytes {
         var result: Bytes = [TupleTypeCode.bytes.rawValue]
         for byte in self {
@@ -50,10 +50,10 @@ extension Array: TupleElement where Element == UInt8 {
     }
 }
 
-/// null-terminated + null-escape バイト列のデコード共通処理
+/// Common decoding logic for null-terminated + null-escaped byte arrays.
 ///
-/// - 0x00 の後に 0xFF が続く場合: エスケープされた 0x00（データに含まれる null バイト）
-/// - 0x00 の後に 0xFF が続かない場合: 終端（terminator）
+/// - 0x00 followed by 0xFF: escaped 0x00 (a null byte contained in the data).
+/// - 0x00 not followed by 0xFF: terminator.
 package func decodeNullTerminated(from bytes: Bytes, at offset: inout Int) throws -> Bytes {
     var result = Bytes()
     while offset < bytes.count {

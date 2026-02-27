@@ -3,22 +3,22 @@ import Foundation
 // MARK: - Float
 
 extension Float: TupleElement {
-    /// IEEE 754 big-endian エンコード
+    /// IEEE 754 big-endian encoding.
     ///
-    /// 正の値: 全ビット反転 → 辞書順が数値順と一致
-    /// 負の値: 符号ビットのみ反転 → 負の辞書順が正しくなる
+    /// Positive values: flip the sign bit so lexicographic order matches numeric order.
+    /// Negative values: flip all bits so negative lexicographic order is correct.
     ///
-    /// FDB 仕様: 正の場合は符号ビット反転、負の場合は全ビット反転
+    /// FDB spec: flip sign bit for positive, flip all bits for negative.
     public func encodeTuple() -> Bytes {
         var bits = self.bitPattern.bigEndian
         var rawBytes = withUnsafeBytes(of: &bits) { Array($0) }
         if self.sign == .minus {
-            // 負の値（-0.0 含む）: 全ビット反転
+            // Negative values (including -0.0): flip all bits
             for i in 0..<rawBytes.count {
                 rawBytes[i] = ~rawBytes[i]
             }
         } else {
-            // 正の値（+0.0, +Inf, NaN 含む）: 符号ビットのみ反転
+            // Positive values (including +0.0, +Inf, NaN): flip sign bit only
             rawBytes[0] ^= 0x80
         }
         return [TupleTypeCode.float.rawValue] + rawBytes
@@ -30,10 +30,10 @@ extension Float: TupleElement {
         offset += 4
 
         if rawBytes[0] & 0x80 != 0 {
-            // 正の値: 符号ビットのみ戻す
+            // Positive value: restore sign bit only
             rawBytes[0] ^= 0x80
         } else {
-            // 負の値: 全ビット反転を戻す
+            // Negative value: restore by flipping all bits back
             for i in 0..<rawBytes.count {
                 rawBytes[i] = ~rawBytes[i]
             }
@@ -46,7 +46,7 @@ extension Float: TupleElement {
 // MARK: - Double
 
 extension Double: TupleElement {
-    /// IEEE 754 big-endian エンコード（Float と同じアルゴリズム、8 バイト）
+    /// IEEE 754 big-endian encoding (same algorithm as Float, 8 bytes).
     public func encodeTuple() -> Bytes {
         var bits = self.bitPattern.bigEndian
         var rawBytes = withUnsafeBytes(of: &bits) { Array($0) }

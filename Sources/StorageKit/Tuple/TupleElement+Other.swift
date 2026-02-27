@@ -24,7 +24,7 @@ extension Bool: TupleElement {
 // MARK: - UUID
 
 extension UUID: TupleElement {
-    /// 型コード 0x30 + 16 バイト (canonical byte order)
+    /// Type code 0x30 + 16 bytes (canonical byte order).
     public func encodeTuple() -> Bytes {
         let u = self.uuid
         return [TupleTypeCode.uuid.rawValue,
@@ -48,7 +48,7 @@ extension UUID: TupleElement {
 // MARK: - Date
 
 extension Date: TupleElement {
-    /// Double (timeIntervalSince1970) としてエンコード
+    /// Encoded as a Double (timeIntervalSince1970).
     public func encodeTuple() -> Bytes {
         self.timeIntervalSince1970.encodeTuple()
     }
