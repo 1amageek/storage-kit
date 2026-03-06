@@ -18,8 +18,11 @@ public protocol StorageEngine: Sendable {
 
     /// Hierarchical namespace management service.
     ///
-    /// FDB: DirectoryLayer (dynamic prefix allocation).
-    /// Non-FDB: StaticDirectoryService (directly converts paths via Tuple encoding).
+    /// Higher-level frameworks (e.g. database-kit) call this property to resolve
+    /// model directory paths into `Subspace` instances, regardless of the backend.
+    ///
+    /// - FDB: `FDBDirectoryService` — dynamic prefix allocation via DirectoryLayer.
+    /// - SQLite / InMemory: `StaticDirectoryService` — deterministic Tuple encoding.
     var directoryService: any DirectoryService { get }
 
     /// Release resources held by this engine.
@@ -31,7 +34,11 @@ public protocol StorageEngine: Sendable {
 }
 
 extension StorageEngine {
-    /// Default: StaticDirectoryService (directly converts paths to Subspace via Tuple encoding).
+    /// Default: `StaticDirectoryService`.
+    ///
+    /// Non-FDB backends use this default. The deterministic Tuple encoding
+    /// ensures that callers (e.g. database-kit) can resolve directory paths
+    /// without backend-specific logic.
     public var directoryService: any DirectoryService { StaticDirectoryService() }
 
     public func shutdown() {}
