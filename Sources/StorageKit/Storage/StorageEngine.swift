@@ -21,9 +21,18 @@ public protocol StorageEngine: Sendable {
     /// FDB: DirectoryLayer (dynamic prefix allocation).
     /// Non-FDB: StaticDirectoryService (directly converts paths via Tuple encoding).
     var directoryService: any DirectoryService { get }
+
+    /// Release resources held by this engine.
+    ///
+    /// Called when the engine is no longer needed.
+    /// Implementations should be idempotent (safe to call multiple times).
+    /// Default implementation is a no-op.
+    func shutdown()
 }
 
 extension StorageEngine {
     /// Default: StaticDirectoryService (directly converts paths to Subspace via Tuple encoding).
     public var directoryService: any DirectoryService { StaticDirectoryService() }
+
+    public func shutdown() {}
 }

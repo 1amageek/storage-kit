@@ -168,6 +168,9 @@ public struct Tuple: Sendable, Hashable, Equatable {
         case TupleTypeCode.uuid.rawValue:
             return try UUID.decodeTuple(from: bytes, at: &offset)
 
+        case TupleTypeCode.versionstamp.rawValue:
+            return try Versionstamp.decodeTuple(from: bytes, at: &offset)
+
         default:
             throw TupleError.invalidTypeCode(typeCode)
         }

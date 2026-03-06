@@ -6,6 +6,13 @@ import Foundation
 /// Uses a `WITHOUT ROWID` table for efficient BLOB primary key B-tree storage.
 /// SQLite is single-writer, so transactions are serialized with `NSLock`.
 ///
+/// ## Nested Transaction Safety
+///
+/// SQLite does not support concurrent transactions on a single connection.
+/// This engine uses `ActiveTransactionScope` (TaskLocal) to detect nested
+/// `withTransaction()` / `createTransaction()` calls and reuse the existing
+/// transaction instead of acquiring a new lock (which would deadlock).
+///
 /// ## Usage
 /// ```swift
 /// // File-based
@@ -35,6 +42,11 @@ public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
     }
 
     public func createTransaction() throws -> SQLiteStorageTransaction {
+        // Detect nested call via TaskLocal — return child transaction (no lock, no BEGIN)
+        if let existing = ActiveTransactionScope.current as? SQLiteStorageTransaction {
+            return SQLiteStorageTransaction(connection: existing.connection, lock: nil)
+        }
+
         lock.lock()
         guard let conn = connection else {
             lock.unlock()
@@ -52,14 +64,21 @@ public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
     public func withTransaction<T: Sendable>(
         _ operation: (any Transaction) async throws -> T
     ) async throws -> T {
+        // Detect nested call via TaskLocal — reuse existing transaction
+        if let existing = ActiveTransactionScope.current {
+            return try await operation(existing)
+        }
+
         let tx = try createTransaction()
-        do {
-            let result = try await operation(tx)
-            try await tx.commit()
-            return result
-        } catch {
-            tx.cancel()
-            throw error
+        return try await ActiveTransactionScope.$current.withValue(tx) {
+            do {
+                let result = try await operation(tx)
+                try await tx.commit()
+                return result
+            } catch {
+                tx.cancel()
+                throw error
+            }
         }
     }
 
@@ -69,5 +88,9 @@ public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
         defer { lock.unlock() }
         connection?.close()
         connection = nil
+    }
+
+    public func shutdown() {
+        close()
     }
 }

@@ -50,12 +50,20 @@ public struct SQLiteRangeResult: AsyncSequence, Sendable {
 /// so writes are buffered and flushed on commit.
 /// `getValue` checks the buffer in reverse order to provide read-your-writes semantics.
 /// `getRange` flushes the buffer before executing the SQL query.
+///
+/// ## Nested Transaction Support
+///
+/// When `lock` is nil, this transaction is a nested child created by
+/// `TransactionContext` detection. In this mode:
+/// - `commit()` flushes the write buffer but does not execute COMMIT or release a lock
+/// - `cancel()` discards the write buffer but does not execute ROLLBACK or release a lock
+/// - The parent transaction controls the actual SQLite transaction lifecycle
 public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
 
     public typealias RangeResult = SQLiteRangeResult
 
-    private let connection: SQLiteConnection
-    private let lock: NSLock
+    let connection: SQLiteConnection
+    private let lock: NSLock?
     private var writeBuffer: [WriteOp] = []
     private var committed = false
     private var cancelled = false
@@ -66,7 +74,7 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
         case clearRange(begin: Bytes, end: Bytes)
     }
 
-    init(connection: SQLiteConnection, lock: NSLock) {
+    init(connection: SQLiteConnection, lock: NSLock?) {
         self.connection = connection
         self.lock = lock
     }
@@ -205,15 +213,23 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
             throw StorageError.invalidOperation("Transaction cancelled")
         }
         guard !committed else { return }
-        do {
+
+        if lock != nil {
+            // Top-level transaction: flush buffer, COMMIT, release lock
+            do {
+                try flushWriteBuffer()
+                try connection.execute("COMMIT")
+                committed = true
+                releaseLock()
+            } catch {
+                try? connection.execute("ROLLBACK")
+                releaseLock()
+                throw error
+            }
+        } else {
+            // Nested transaction: flush buffer only (writes become part of parent TX)
             try flushWriteBuffer()
-            try connection.execute("COMMIT")
             committed = true
-            releaseLock()
-        } catch {
-            try? connection.execute("ROLLBACK")
-            releaseLock()
-            throw error
         }
     }
 
@@ -221,14 +237,19 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
         guard !committed, !cancelled else { return }
         cancelled = true
         writeBuffer.removeAll()
-        try? connection.execute("ROLLBACK")
-        releaseLock()
+
+        if lock != nil {
+            // Top-level transaction: ROLLBACK and release lock
+            try? connection.execute("ROLLBACK")
+            releaseLock()
+        }
+        // Nested transaction: just discard buffer (parent controls ROLLBACK)
     }
 
     // MARK: - Internal
 
     private nonisolated func releaseLock() {
-        lock.unlock()
+        lock?.unlock()
     }
 
     private func flushWriteBuffer() throws {

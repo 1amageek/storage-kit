@@ -61,7 +61,7 @@ final class SQLiteConnection {
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
-            throw StorageError.backendError("SQLite insert failed: \(currentErrorMessage)")
+            throw StorageError.backendError("SQLite insert failed (\(rc)): \(currentErrorMessage)")
         }
     }
 
@@ -243,8 +243,11 @@ final class SQLiteConnection {
     }
 
     private func extractBlob(_ stmt: OpaquePointer?, column: Int32) -> Bytes? {
-        guard let blob = sqlite3_column_blob(stmt, column) else { return nil }
+        let colType = sqlite3_column_type(stmt, column)
+        guard colType != SQLITE_NULL else { return nil }
         let count = Int(sqlite3_column_bytes(stmt, column))
+        if count == 0 { return [] }
+        guard let blob = sqlite3_column_blob(stmt, column) else { return [] }
         return Array(UnsafeBufferPointer(start: blob.assumingMemoryBound(to: UInt8.self), count: count))
     }
 }

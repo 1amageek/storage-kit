@@ -30,6 +30,7 @@ public enum TupleTypeCode: UInt8, Sendable {
     case boolFalse      = 0x26
     case boolTrue       = 0x27
     case uuid           = 0x30
+    case versionstamp   = 0x33
 }
 
 /// Byte array type for StorageKit (equivalent to FDB.Bytes).
