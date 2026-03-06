@@ -5,24 +5,40 @@ import FoundationDB
 ///
 /// Wraps FDB's `DatabaseProtocol` and provides StorageKit's unified interface.
 /// Retry logic is based on FDB's `isRetryable` error classification.
+///
+/// ## Usage
+/// ```swift
+/// // Default cluster (handles FDBClient initialization internally)
+/// let engine = try await FDBStorageEngine(configuration: .init())
+///
+/// // Specific database instance
+/// let engine = try await FDBStorageEngine(configuration: .init(database: db))
+/// ```
 public final class FDBStorageEngine: StorageEngine, Sendable {
+
+    public struct Configuration: Sendable {
+        nonisolated(unsafe) let database: (any DatabaseProtocol)?
+
+        /// Use the default cluster. FDB client library is initialized automatically.
+        public init() {
+            self.database = nil
+        }
+
+        /// Use a specific database instance.
+        public init(database: any DatabaseProtocol) {
+            self.database = database
+        }
+    }
+
     public typealias TransactionType = FDBStorageTransaction
 
     nonisolated(unsafe) public let database: any DatabaseProtocol
 
-    public init(database: any DatabaseProtocol) {
-        self.database = database
-    }
-
-    /// Initialize the FDB client library (once per process).
-    public static func initialize() async throws {
-        try await FDBClient.initialize()
-    }
-
-    /// Connect to the default cluster and create an FDBStorageEngine.
-    public static func open() async throws -> FDBStorageEngine {
-        let db = try FDBClient.openDatabase()
-        return FDBStorageEngine(database: db)
+    public init(configuration: Configuration) async throws {
+        if !FDBClient.isInitialized {
+            try await FDBClient.initialize()
+        }
+        self.database = try configuration.database ?? FDBClient.openDatabase()
     }
 
     public func createTransaction() throws -> FDBStorageTransaction {

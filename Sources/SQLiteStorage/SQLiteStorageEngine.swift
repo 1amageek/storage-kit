@@ -17,27 +17,38 @@ import Synchronization
 /// ## Usage
 /// ```swift
 /// // File-based
-/// let engine = try SQLiteStorageEngine(path: "/path/to/db.sqlite")
+/// let engine = try SQLiteStorageEngine(configuration: .file("/path/to/db.sqlite"))
 ///
 /// // In-memory (for testing)
-/// let engine = try SQLiteStorageEngine()
+/// let engine = try SQLiteStorageEngine(configuration: .inMemory)
 /// ```
 public final class SQLiteStorageEngine: StorageEngine, Sendable {
+
+    public struct Configuration: Sendable {
+        public var path: String
+
+        public init(path: String) {
+            self.path = path
+        }
+
+        /// File-based database.
+        public static func file(_ path: String) -> Configuration {
+            Configuration(path: path)
+        }
+
+        /// In-memory database (for testing).
+        public static var inMemory: Configuration {
+            Configuration(path: ":memory:")
+        }
+    }
+
     public typealias TransactionType = SQLiteStorageTransaction
 
     private let transactionLock = NSLock()
     private let _connection: Mutex<SQLiteConnection?>
 
-    /// Opens a file-based database.
-    public init(path: String) throws {
-        let conn = try SQLiteConnection(path: path)
-        try conn.initialize()
-        self._connection = Mutex(conn)
-    }
-
-    /// Opens an in-memory database (for testing).
-    public init() throws {
-        let conn = try SQLiteConnection(path: ":memory:")
+    public init(configuration: Configuration) throws {
+        let conn = try SQLiteConnection(path: configuration.path)
         try conn.initialize()
         self._connection = Mutex(conn)
     }

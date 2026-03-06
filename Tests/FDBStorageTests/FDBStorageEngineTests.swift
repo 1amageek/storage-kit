@@ -11,15 +11,8 @@ import FoundationDB
 @Suite("FDBStorageEngine Tests")
 struct FDBStorageEngineTests {
 
-    init() async throws {
-        if !FDBClient.isInitialized {
-            try await FDBClient.initialize()
-        }
-    }
-
-    private func makeEngine() throws -> FDBStorageEngine {
-        let database = try FDBClient.openDatabase()
-        return FDBStorageEngine(database: database)
+    private func makeEngine() async throws -> FDBStorageEngine {
+        try await FDBStorageEngine(configuration: .init())
     }
 
     private func testPrefix() -> Bytes {
@@ -56,7 +49,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func reverse_resultsInDescendingOrder() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -79,7 +72,7 @@ struct FDBStorageEngineTests {
     }
 
     @Test func reverseThenLimit_takesLastNItems() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -105,7 +98,7 @@ struct FDBStorageEngineTests {
     }
 
     @Test func forwardLimit_takesFirstNItems() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -137,7 +130,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func largeScan_collectsAllBatches() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -166,7 +159,7 @@ struct FDBStorageEngineTests {
     }
 
     @Test func largeScan_reverseCollectsAllBatches() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -205,7 +198,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func commit_persistsData() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
 
@@ -222,7 +215,7 @@ struct FDBStorageEngineTests {
     }
 
     @Test func cancel_discardsData() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
 
@@ -244,7 +237,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func readYourWrites_setValue() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
 
@@ -258,7 +251,7 @@ struct FDBStorageEngineTests {
     }
 
     @Test func readYourWrites_clearThenGet() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
 
@@ -274,7 +267,7 @@ struct FDBStorageEngineTests {
     }
 
     @Test func readYourWrites_setInRangeScan() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -300,7 +293,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func range_beginInclusive_endExclusive() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -326,7 +319,7 @@ struct FDBStorageEngineTests {
     }
 
     @Test func range_empty() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -353,7 +346,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func withTransaction_autoCommits() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
 
@@ -370,7 +363,7 @@ struct FDBStorageEngineTests {
     }
 
     @Test func withTransaction_errorCausesRollback() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
 
@@ -396,7 +389,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func fdbTransactionAccess() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let tx = try engine.createTransaction()
         // Verify the underlying FDB transaction is accessible
         _ = tx.fdbTransaction
@@ -408,7 +401,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func clearRange_boundaryVerification() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -447,7 +440,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func keyOrdering_preserved() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
@@ -474,7 +467,7 @@ struct FDBStorageEngineTests {
     // =========================================================================
 
     @Test func subspaceRangeIsolation() async throws {
-        let engine = try makeEngine()
+        let engine = try await makeEngine()
         let prefix = testPrefix()
         let spaceA = Subspace(prefix + Array("alpha".utf8))
         let spaceB = Subspace(prefix + Array("beta".utf8))

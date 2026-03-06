@@ -21,12 +21,18 @@ package func compareBytes(_ lhs: Bytes, _ rhs: Bytes) -> Int {
 /// ## Thread safety
 /// Uses Mutex for exclusive access (no I/O, memory access only).
 public final class InMemoryEngine: StorageEngine, Sendable {
+
+    /// No configuration needed for in-memory storage.
+    public struct Configuration: Sendable {
+        public init() {}
+    }
+
     public typealias TransactionType = InMemoryTransaction
 
     /// Sorted KV store (internal buffer).
     let _store: Mutex<[(key: Bytes, value: Bytes)]>
 
-    public init() {
+    public init(configuration: Configuration = .init()) {
         self._store = Mutex([])
     }
 

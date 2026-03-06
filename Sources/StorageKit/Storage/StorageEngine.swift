@@ -2,8 +2,27 @@
 ///
 /// Each backend (FoundationDB, SQLite, InMemory) conforms to this protocol.
 /// Provides transaction creation and execution with retry logic.
+///
+/// ## Initialization
+///
+/// All engines use a unified `Configuration`-based initialization:
+/// ```swift
+/// let engine = try await SomeEngine(configuration: .init(...))
+/// ```
+/// Non-async backends satisfy the `async throws` requirement
+/// without actually suspending or throwing.
 public protocol StorageEngine: Sendable {
+    /// Backend-specific configuration type.
+    associatedtype Configuration: Sendable
+
     associatedtype TransactionType: Transaction
+
+    /// Create an engine with the given configuration.
+    ///
+    /// `async` because some backends (e.g. FDB) require asynchronous
+    /// library initialization. Non-async implementations satisfy this
+    /// requirement without suspending.
+    init(configuration: Configuration) async throws
 
     /// Create a new transaction.
     func createTransaction() throws -> TransactionType

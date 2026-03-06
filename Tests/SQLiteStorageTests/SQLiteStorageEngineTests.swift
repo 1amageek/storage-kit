@@ -15,7 +15,7 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     @Test func setThenClear_clearWins() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01])
         tx.clear(key: [0x01])
@@ -25,7 +25,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func setThenClearThenSet_lastSetWins() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01])
         tx.clear(key: [0x01])
@@ -36,7 +36,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func setThenClearRange_clearRangeWins() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
         tx.clearRange(beginKey: [0x01], endKey: [0x05])
@@ -46,7 +46,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func clearRangeThenSet_setWins() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.clearRange(beginKey: [0x01], endKey: [0x05])
         tx.setValue([99], for: [0x03])
@@ -56,7 +56,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func multipleOverwrites_lastWins() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01])
         tx.setValue([2], for: [0x01])
@@ -67,7 +67,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func setClearRangeSetClearRange_lastClearRangeWins() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
         tx.clearRange(beginKey: [0x01], endKey: [0x05])
@@ -79,7 +79,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func bufferOverridesSQLiteValue() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { tx in
             tx.setValue([10], for: [0x01])
@@ -93,7 +93,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func clearInBufferHidesSQLiteValue() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { tx in
             tx.setValue([10], for: [0x01])
@@ -107,7 +107,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func noMatchInBufferFallsThroughToSQLite() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { tx in
             tx.setValue([10], for: [0x01])
@@ -129,7 +129,7 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     @Test func clearRange_beginInclusive() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x02])
         tx.clearRange(beginKey: [0x02], endKey: [0x05])
@@ -139,7 +139,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func clearRange_endExclusive() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x05])
         tx.clearRange(beginKey: [0x02], endKey: [0x05])
@@ -149,7 +149,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func clearRange_justBeforeEnd() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x04])
         tx.clearRange(beginKey: [0x02], endKey: [0x05])
@@ -159,7 +159,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func clearRange_justBeforeBegin() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01])
         tx.clearRange(beginKey: [0x02], endKey: [0x05])
@@ -169,7 +169,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func clearRange_multiByteKeyBoundary() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01, 0xFF])
         tx.setValue([2], for: [0x02, 0x00])
@@ -185,7 +185,7 @@ struct SQLiteStorageEngineTests {
 
     // Also verify clearRange boundary on committed SQLite data
     @Test func clearRange_boundaryOnSQLiteData() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { tx in
             tx.setValue([1], for: [0x01])
@@ -233,7 +233,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func flush_getValueAfterFlushReadsSQLite() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
 
         // Buffer has set(0x01, [10])
@@ -249,7 +249,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func flush_writesAfterFlushAreBuffered() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
 
         tx.setValue([10], for: [0x01])
@@ -271,7 +271,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func flush_multipleFlushesAreIdempotent() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
 
         tx.setValue([10], for: [0x01])
@@ -291,7 +291,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func flush_clearAfterFlushThenGetRange() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
 
         tx.setValue([10], for: [0x01])
@@ -312,7 +312,7 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     @Test func consistency_setClearSet() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([1], for: [0x01])
         tx.clear(key: [0x01])
@@ -328,7 +328,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func consistency_clearRangeThenSet() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { tx in
             tx.setValue([10], for: [0x01])
@@ -356,7 +356,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func consistency_overwriteAndClearRange() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { tx in
             tx.setValue([10], for: [0x01])
@@ -386,7 +386,7 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     @Test func commitPersists() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         let tx1 = try engine.createTransaction()
         tx1.setValue([42], for: [0x01])
@@ -399,7 +399,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func cancelRollsBack() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         let tx = try engine.createTransaction()
         tx.setValue([42], for: [0x01])
@@ -412,7 +412,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func commitAfterCancel_throws() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.cancel()
         do {
@@ -427,7 +427,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func doubleCommit_isNoOp() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([42], for: [0x01])
         try await tx.commit()
@@ -436,7 +436,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func cancelAfterCommit_isNoOp() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.setValue([42], for: [0x01])
         try await tx.commit()
@@ -451,7 +451,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func cancelledTransactionThrowsOnRead() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.cancel()
         do {
@@ -466,7 +466,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func cancelledTransactionThrowsOnGetRange() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.cancel()
         do {
@@ -484,7 +484,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func writesAfterCancelAreSilentlyIgnored() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let tx = try engine.createTransaction()
         tx.cancel()
         tx.setValue([42], for: [0x01])
@@ -497,7 +497,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func withTransaction_errorCausesRollback() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         struct TestError: Error {}
 
         do {
@@ -521,7 +521,7 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     @Test func sequentialTransactions() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         // Multiple sequential transactions should work
         // (each acquires and releases the lock)
@@ -538,7 +538,7 @@ struct SQLiteStorageEngineTests {
     }
 
     @Test func closeThenCreateTransaction_throws() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         engine.close()
         do {
             _ = try engine.createTransaction()
@@ -561,7 +561,7 @@ struct SQLiteStorageEngineTests {
         defer { try? FileManager.default.removeItem(atPath: dbPath) }
 
         do {
-            let engine = try SQLiteStorageEngine(path: dbPath)
+            let engine = try SQLiteStorageEngine(configuration: .file(dbPath))
             try await engine.withTransaction { tx in
                 tx.setValue([1, 2, 3], for: [0x01])
             }
@@ -569,7 +569,7 @@ struct SQLiteStorageEngineTests {
         }
 
         do {
-            let engine = try SQLiteStorageEngine(path: dbPath)
+            let engine = try SQLiteStorageEngine(configuration: .file(dbPath))
             try await engine.withTransaction { tx in
                 let persistedData = try await tx.getValue(for: [0x01])
                 #expect(persistedData == [1, 2, 3])
@@ -583,7 +583,7 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     @Test func getRange_reverseThenLimit() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
@@ -609,7 +609,7 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     @Test func blobOrderingMatchesLexicographic() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { tx in
             // Insert keys that test SQLite's BLOB ordering
@@ -634,7 +634,7 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
 
     @Test func subspaceRangeIsolation() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let spaceA = Subspace("alpha")
         let spaceB = Subspace("beta")
 

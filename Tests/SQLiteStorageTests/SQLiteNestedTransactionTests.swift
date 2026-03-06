@@ -15,7 +15,7 @@ struct SQLiteNestedTransactionTests {
     // =========================================================================
 
     @Test func nestedWithTransaction_reusesExistingTransaction() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
             outerTx.setValue([10], for: [0x01])
@@ -44,7 +44,7 @@ struct SQLiteNestedTransactionTests {
     }
 
     @Test func nestedWithTransaction_errorInInner_propagatesToOuter() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         struct InnerError: Error {}
 
         do {
@@ -69,7 +69,7 @@ struct SQLiteNestedTransactionTests {
     }
 
     @Test func nestedCreateTransaction_returnsChildTransaction() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
             outerTx.setValue([10], for: [0x01])
@@ -86,7 +86,7 @@ struct SQLiteNestedTransactionTests {
     }
 
     @Test func multipleSequentialNestedTransactions() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
             outerTx.setValue([10], for: [0x01])
@@ -120,7 +120,7 @@ struct SQLiteNestedTransactionTests {
     // =========================================================================
 
     @Test func shutdown_closesConnection() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         try await engine.withTransaction { tx in
             tx.setValue([42], for: [0x01])
         }
@@ -140,13 +140,13 @@ struct SQLiteNestedTransactionTests {
     }
 
     @Test func shutdown_idempotent() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         engine.shutdown()
         engine.shutdown() // Second call should not crash
     }
 
     @Test func close_thenWithTransaction_throws() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         engine.close()
 
         do {
@@ -187,7 +187,7 @@ struct SQLiteNestedTransactionTests {
     // =========================================================================
 
     @Test func sqliteEngine_directoryServiceIsStatic() async throws {
-        let engine = try SQLiteStorageEngine()
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
         let service = engine.directoryService
         #expect(service is StaticDirectoryService)
         engine.close()
