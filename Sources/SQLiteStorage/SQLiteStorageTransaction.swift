@@ -1,5 +1,6 @@
 import StorageKit
 import Foundation
+import Synchronization
 
 /// Range result type for SQLite.
 ///
@@ -58,17 +59,22 @@ public struct SQLiteRangeResult: AsyncSequence, Sendable {
 /// - `commit()` flushes the write buffer but does not execute COMMIT or release a lock
 /// - `cancel()` discards the write buffer but does not execute ROLLBACK or release a lock
 /// - The parent transaction controls the actual SQLite transaction lifecycle
-public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
+public final class SQLiteStorageTransaction: Transaction, Sendable {
 
     public typealias RangeResult = SQLiteRangeResult
 
-    let connection: SQLiteConnection
+    /// Externally synchronized by engine's transaction lock.
+    nonisolated(unsafe) let connection: SQLiteConnection
     private let lock: NSLock?
-    private var writeBuffer: [WriteOp] = []
-    private var committed = false
-    private var cancelled = false
 
-    private enum WriteOp {
+    private struct MutableState: Sendable {
+        var writeBuffer: [WriteOp] = []
+        var committed = false
+        var cancelled = false
+    }
+    private let _state: Mutex<MutableState>
+
+    private enum WriteOp: Sendable {
         case set(key: Bytes, value: Bytes)
         case clear(key: Bytes)
         case clearRange(begin: Bytes, end: Bytes)
@@ -77,13 +83,17 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
     init(connection: SQLiteConnection, lock: NSLock?) {
         self.connection = connection
         self.lock = lock
+        self._state = Mutex(MutableState())
     }
 
     // MARK: - Read
 
     public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
-        guard !cancelled else {
-            throw StorageError.invalidOperation("Transaction cancelled")
+        let writeBuffer = try _state.withLock { state in
+            guard !state.cancelled else {
+                throw StorageError.invalidOperation("Transaction cancelled")
+            }
+            return state.writeBuffer
         }
 
         // Check write buffer in reverse order (read-your-writes)
@@ -112,6 +122,7 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
         snapshot: Bool,
         streamingMode: StreamingMode
     ) -> SQLiteRangeResult {
+        let cancelled = _state.withLock { $0.cancelled }
         guard !cancelled else {
             return SQLiteRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
         }
@@ -192,34 +203,43 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
     // MARK: - Write
 
     public func setValue(_ value: Bytes, for key: Bytes) {
-        guard !cancelled else { return }
-        writeBuffer.append(.set(key: key, value: value))
+        _state.withLock { state in
+            guard !state.cancelled else { return }
+            state.writeBuffer.append(.set(key: key, value: value))
+        }
     }
 
     public func clear(key: Bytes) {
-        guard !cancelled else { return }
-        writeBuffer.append(.clear(key: key))
+        _state.withLock { state in
+            guard !state.cancelled else { return }
+            state.writeBuffer.append(.clear(key: key))
+        }
     }
 
     public func clearRange(beginKey: Bytes, endKey: Bytes) {
-        guard !cancelled else { return }
-        writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
+        _state.withLock { state in
+            guard !state.cancelled else { return }
+            state.writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
+        }
     }
 
     // MARK: - Transaction Management
 
     public func commit() async throws {
-        guard !cancelled else {
-            throw StorageError.invalidOperation("Transaction cancelled")
+        let shouldProceed = try _state.withLock { state -> Bool in
+            guard !state.cancelled else {
+                throw StorageError.invalidOperation("Transaction cancelled")
+            }
+            return !state.committed
         }
-        guard !committed else { return }
+        guard shouldProceed else { return }
 
         if lock != nil {
             // Top-level transaction: flush buffer, COMMIT, release lock
             do {
                 try flushWriteBuffer()
                 try connection.execute("COMMIT")
-                committed = true
+                _state.withLock { $0.committed = true }
                 releaseLock()
             } catch {
                 try? connection.execute("ROLLBACK")
@@ -229,14 +249,18 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
         } else {
             // Nested transaction: flush buffer only (writes become part of parent TX)
             try flushWriteBuffer()
-            committed = true
+            _state.withLock { $0.committed = true }
         }
     }
 
     public func cancel() {
-        guard !committed, !cancelled else { return }
-        cancelled = true
-        writeBuffer.removeAll()
+        let shouldCancel = _state.withLock { state -> Bool in
+            guard !state.committed, !state.cancelled else { return false }
+            state.cancelled = true
+            state.writeBuffer.removeAll()
+            return true
+        }
+        guard shouldCancel else { return }
 
         if lock != nil {
             // Top-level transaction: ROLLBACK and release lock
@@ -253,7 +277,8 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
     }
 
     private func flushWriteBuffer() throws {
-        for op in writeBuffer {
+        let ops = _state.withLock { $0.writeBuffer }
+        for op in ops {
             switch op {
             case .set(let key, let value):
                 try connection.insertOrReplace(key: key, value: value)
@@ -263,7 +288,7 @@ public final class SQLiteStorageTransaction: Transaction, @unchecked Sendable {
                 try connection.deleteRange(begin: begin, end: end)
             }
         }
-        writeBuffer.removeAll()
+        _state.withLock { $0.writeBuffer.removeAll() }
     }
 }
 

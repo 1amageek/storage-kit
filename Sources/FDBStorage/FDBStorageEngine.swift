@@ -5,10 +5,10 @@ import FoundationDB
 ///
 /// Wraps FDB's `DatabaseProtocol` and provides StorageKit's unified interface.
 /// Retry logic is based on FDB's `isRetryable` error classification.
-public final class FDBStorageEngine: StorageEngine, @unchecked Sendable {
+public final class FDBStorageEngine: StorageEngine, Sendable {
     public typealias TransactionType = FDBStorageTransaction
 
-    public let database: any DatabaseProtocol
+    nonisolated(unsafe) public let database: any DatabaseProtocol
 
     public init(database: any DatabaseProtocol) {
         self.database = database

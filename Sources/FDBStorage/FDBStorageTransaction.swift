@@ -13,7 +13,7 @@ import FoundationDB
 ///     fdbTx.fdbTransaction.setReadVersion(cachedVersion)
 /// }
 /// ```
-public final class FDBStorageTransaction: Transaction, @unchecked Sendable {
+public final class FDBStorageTransaction: Transaction, Sendable {
 
     /// Zero-copy: returns FDB.AsyncKVSequence as-is.
     public typealias RangeResult = FDB.AsyncKVSequence

@@ -5,9 +5,9 @@ import FoundationDB
 ///
 /// FDB's DirectoryLayer uses the High Contention Allocator (HCA)
 /// to dynamically assign short prefixes.
-public final class FDBDirectoryService: DirectoryService, @unchecked Sendable {
+public final class FDBDirectoryService: DirectoryService, Sendable {
 
-    private let database: any DatabaseProtocol
+    nonisolated(unsafe) private let database: any DatabaseProtocol
 
     public init(database: any DatabaseProtocol) {
         self.database = database

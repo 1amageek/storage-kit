@@ -1,5 +1,6 @@
 import StorageKit
 import Foundation
+import Synchronization
 
 /// SQLite backend StorageEngine implementation.
 ///
@@ -21,24 +22,24 @@ import Foundation
 /// // In-memory (for testing)
 /// let engine = try SQLiteStorageEngine()
 /// ```
-public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
+public final class SQLiteStorageEngine: StorageEngine, Sendable {
     public typealias TransactionType = SQLiteStorageTransaction
 
-    private let lock = NSLock()
-    private var connection: SQLiteConnection?
+    private let transactionLock = NSLock()
+    private let _connection: Mutex<SQLiteConnection?>
 
     /// Opens a file-based database.
     public init(path: String) throws {
         let conn = try SQLiteConnection(path: path)
         try conn.initialize()
-        self.connection = conn
+        self._connection = Mutex(conn)
     }
 
     /// Opens an in-memory database (for testing).
     public init() throws {
         let conn = try SQLiteConnection(path: ":memory:")
         try conn.initialize()
-        self.connection = conn
+        self._connection = Mutex(conn)
     }
 
     public func createTransaction() throws -> SQLiteStorageTransaction {
@@ -47,18 +48,18 @@ public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
             return SQLiteStorageTransaction(connection: existing.connection, lock: nil)
         }
 
-        lock.lock()
-        guard let conn = connection else {
-            lock.unlock()
+        transactionLock.lock()
+        guard let conn = _connection.withLock({ $0 }) else {
+            transactionLock.unlock()
             throw StorageError.invalidOperation("Database closed")
         }
         do {
             try conn.execute("BEGIN IMMEDIATE")
         } catch {
-            lock.unlock()
+            transactionLock.unlock()
             throw error
         }
-        return SQLiteStorageTransaction(connection: conn, lock: lock)
+        return SQLiteStorageTransaction(connection: conn, lock: transactionLock)
     }
 
     public func withTransaction<T: Sendable>(
@@ -84,10 +85,12 @@ public final class SQLiteStorageEngine: StorageEngine, @unchecked Sendable {
 
     /// Closes the database connection.
     public func close() {
-        lock.lock()
-        defer { lock.unlock() }
-        connection?.close()
-        connection = nil
+        transactionLock.lock()
+        defer { transactionLock.unlock() }
+        _connection.withLock { conn in
+            conn?.close()
+            conn = nil
+        }
     }
 
     public func shutdown() {

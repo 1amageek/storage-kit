@@ -102,17 +102,21 @@ public struct InMemoryRangeResult: AsyncSequence, Sendable {
 ///
 /// Uses a read snapshot + write buffer approach.
 /// Applies changes to the main store on commit.
-public final class InMemoryTransaction: Transaction, @unchecked Sendable {
+public final class InMemoryTransaction: Transaction, Sendable {
 
     public typealias RangeResult = InMemoryRangeResult
 
     private let engine: InMemoryEngine
-    private var snapshot: [(key: Bytes, value: Bytes)]
-    private var writeBuffer: [WriteOp] = []
-    private var committed = false
-    private var cancelled = false
+    private let snapshot: [(key: Bytes, value: Bytes)]
 
-    private enum WriteOp {
+    private struct MutableState: Sendable {
+        var writeBuffer: [WriteOp] = []
+        var committed = false
+        var cancelled = false
+    }
+    private let _state: Mutex<MutableState>
+
+    private enum WriteOp: Sendable {
         case set(key: Bytes, value: Bytes)
         case clear(key: Bytes)
         case clearRange(begin: Bytes, end: Bytes)
@@ -121,12 +125,16 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
     init(engine: InMemoryEngine, snapshot: [(key: Bytes, value: Bytes)]) {
         self.engine = engine
         self.snapshot = snapshot
+        self._state = Mutex(MutableState())
     }
 
     // MARK: - Read
 
     public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
-        guard !cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
+        let writeBuffer = try _state.withLock { state in
+            guard !state.cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
+            return state.writeBuffer
+        }
 
         // Check write buffer in reverse order (latest operation takes priority)
         for op in writeBuffer.reversed() {
@@ -158,6 +166,7 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
         snapshot: Bool,
         streamingMode: StreamingMode
     ) -> InMemoryRangeResult {
+        let (cancelled, writeBuffer) = _state.withLock { ($0.cancelled, $0.writeBuffer) }
         guard !cancelled else {
             return InMemoryRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
         }
@@ -216,28 +225,42 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
     // MARK: - Write
 
     public func setValue(_ value: Bytes, for key: Bytes) {
-        guard !cancelled else { return }
-        writeBuffer.append(.set(key: key, value: value))
+        _state.withLock { state in
+            guard !state.cancelled else { return }
+            state.writeBuffer.append(.set(key: key, value: value))
+        }
     }
 
     public func clear(key: Bytes) {
-        guard !cancelled else { return }
-        writeBuffer.append(.clear(key: key))
+        _state.withLock { state in
+            guard !state.cancelled else { return }
+            state.writeBuffer.append(.clear(key: key))
+        }
     }
 
     public func clearRange(beginKey: Bytes, endKey: Bytes) {
-        guard !cancelled else { return }
-        writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
+        _state.withLock { state in
+            guard !state.cancelled else { return }
+            state.writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
+        }
     }
 
     // MARK: - Transaction Management
 
     public func commit() async throws {
-        guard !cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
-        guard !committed else { return }
+        let ops = try _state.withLock { state -> [WriteOp] in
+            guard !state.cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
+            guard !state.committed else { return [] }
+            state.committed = true
+            let ops = state.writeBuffer
+            state.writeBuffer.removeAll()
+            return ops
+        }
+
+        guard !ops.isEmpty else { return }
 
         engine._store.withLock { currentStore in
-            for op in writeBuffer {
+            for op in ops {
                 switch op {
                 case .set(let key, let value):
                     if let idx = binarySearch(currentStore, for: key) {
@@ -255,14 +278,14 @@ public final class InMemoryTransaction: Transaction, @unchecked Sendable {
                 }
             }
         }
-        committed = true
-        writeBuffer.removeAll()
     }
 
     public func cancel() {
-        guard !committed, !cancelled else { return }
-        cancelled = true
-        writeBuffer.removeAll()
+        _state.withLock { state in
+            guard !state.committed, !state.cancelled else { return }
+            state.cancelled = true
+            state.writeBuffer.removeAll()
+        }
     }
 
     // MARK: - Binary Search
