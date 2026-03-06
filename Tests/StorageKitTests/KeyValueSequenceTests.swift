@@ -84,11 +84,11 @@ struct KeyValueSequenceTests {
     }
 
     // =========================================================================
-    // MARK: - InMemoryRangeResult Error Path
+    // MARK: - KeyValueRangeResult Error Path
     // =========================================================================
 
-    @Test func inMemoryRangeResult_errorThrowsOnIteration() async throws {
-        let result = InMemoryRangeResult(error: StorageError.invalidOperation("test error"))
+    @Test func rangeResult_errorThrowsOnIteration() async throws {
+        let result = KeyValueRangeResult(error: StorageError.invalidOperation("test error"))
 
         do {
             for try await _ in result {
@@ -104,8 +104,8 @@ struct KeyValueSequenceTests {
         }
     }
 
-    @Test func inMemoryRangeResult_normalIteration() async throws {
-        let result = InMemoryRangeResult([
+    @Test func rangeResult_normalIteration() async throws {
+        let result = KeyValueRangeResult([
             (key: [0x01] as Bytes, value: [10] as Bytes),
             (key: [0x02] as Bytes, value: [20] as Bytes),
         ])
@@ -117,8 +117,8 @@ struct KeyValueSequenceTests {
         #expect(keys == [[0x01], [0x02]])
     }
 
-    @Test func inMemoryRangeResult_emptyResults() async throws {
-        let result = InMemoryRangeResult([])
+    @Test func rangeResult_emptyResults() async throws {
+        let result = KeyValueRangeResult([])
 
         var count = 0
         for try await _ in result {

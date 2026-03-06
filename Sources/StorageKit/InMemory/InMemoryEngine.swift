@@ -2,7 +2,7 @@ import Synchronization
 
 /// In-memory KV storage for testing and standalone client use.
 ///
-/// Maintains lexicographic order using a sorted array.
+/// Maintains lexicographic order via `SortedKeyValueStore`.
 /// Range scans locate the start position via binary search and iterate to end.
 ///
 /// ## Thread safety
@@ -17,14 +17,14 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     public typealias TransactionType = InMemoryTransaction
 
     /// Sorted KV store (internal buffer).
-    let _store: Mutex<[(key: Bytes, value: Bytes)]>
+    let _store: Mutex<SortedKeyValueStore>
 
     public init(configuration: Configuration = .init()) {
-        self._store = Mutex([])
+        self._store = Mutex(SortedKeyValueStore())
     }
 
     public func createTransaction() throws -> InMemoryTransaction {
-        let snapshot = _store.withLock { Array($0) }
+        let snapshot = _store.withLock { SortedKeyValueStore($0.entries) }
         return InMemoryTransaction(engine: self, snapshot: snapshot)
     }
 
@@ -48,59 +48,16 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     }
 }
 
-/// Range result type for InMemoryEngine.
-///
-/// Array-based AsyncSequence. Returns results with zero copy.
-public struct InMemoryRangeResult: AsyncSequence, Sendable {
-    public typealias Element = (Bytes, Bytes)
-
-    private let results: [(key: Bytes, value: Bytes)]
-    private let error: (any Error)?
-
-    init(_ results: [(key: Bytes, value: Bytes)]) {
-        self.results = results
-        self.error = nil
-    }
-
-    init(error: any Error) {
-        self.results = []
-        self.error = error
-    }
-
-    public func makeAsyncIterator() -> Iterator {
-        Iterator(results: results, error: error)
-    }
-
-    public struct Iterator: AsyncIteratorProtocol {
-        private let results: [(key: Bytes, value: Bytes)]
-        private let error: (any Error)?
-        private var index: Int = 0
-
-        init(results: [(key: Bytes, value: Bytes)], error: (any Error)?) {
-            self.results = results
-            self.error = error
-        }
-
-        public mutating func next() async throws -> (Bytes, Bytes)? {
-            if let error { throw error }
-            guard index < results.count else { return nil }
-            let entry = results[index]
-            index += 1
-            return (entry.key, entry.value)
-        }
-    }
-}
-
 /// Transaction implementation for InMemoryEngine.
 ///
 /// Uses a read snapshot + write buffer approach.
 /// Applies changes to the main store on commit.
 public final class InMemoryTransaction: Transaction, Sendable {
 
-    public typealias RangeResult = InMemoryRangeResult
+    public typealias RangeResult = KeyValueRangeResult
 
     private let engine: InMemoryEngine
-    private let snapshot: [(key: Bytes, value: Bytes)]
+    private let snapshot: SortedKeyValueStore
 
     private struct MutableState: Sendable {
         var writeBuffer: [WriteOp] = []
@@ -115,7 +72,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
         case clearRange(begin: Bytes, end: Bytes)
     }
 
-    init(engine: InMemoryEngine, snapshot: [(key: Bytes, value: Bytes)]) {
+    init(engine: InMemoryEngine, snapshot: SortedKeyValueStore) {
         self.engine = engine
         self.snapshot = snapshot
         self._state = Mutex(MutableState())
@@ -145,10 +102,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
         }
 
         // Search from snapshot (binary search)
-        if let index = binarySearch(self.snapshot, for: key) {
-            return self.snapshot[index].value
-        }
-        return nil
+        return self.snapshot.get(key)
     }
 
     public func getRange(
@@ -158,10 +112,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
         reverse: Bool,
         snapshot: Bool,
         streamingMode: StreamingMode
-    ) -> InMemoryRangeResult {
+    ) -> KeyValueRangeResult {
         let (cancelled, writeBuffer) = _state.withLock { ($0.cancelled, $0.writeBuffer) }
         guard !cancelled else {
-            return InMemoryRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
+            return KeyValueRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
         }
 
         // Build effective store by applying write buffer to snapshot
@@ -169,50 +123,38 @@ public final class InMemoryTransaction: Transaction, Sendable {
         for op in writeBuffer {
             switch op {
             case .set(let key, let value):
-                if let idx = binarySearch(effective, for: key) {
-                    effective[idx] = (key: key, value: value)
-                } else {
-                    let idx = insertionPoint(effective, for: key)
-                    effective.insert((key: key, value: value), at: idx)
-                }
+                effective.set(key, value)
             case .clear(let key):
-                if let idx = binarySearch(effective, for: key) {
-                    effective.remove(at: idx)
-                }
+                effective.delete(key)
             case .clearRange(let rangeBegin, let rangeEnd):
-                effective.removeAll { compareBytes($0.key, rangeBegin) >= 0 && compareBytes($0.key, rangeEnd) < 0 }
+                effective.deleteRange(begin: rangeBegin, end: rangeEnd)
             }
         }
 
         // Resolve KeySelectors using FDB-compatible algorithm
-        let allKeys = effective.map(\.key)
+        let allKeys = effective.keys
         let startIdx = begin.resolve(in: allKeys)
         let endIdx = end.resolve(in: allKeys)
 
         guard startIdx < endIdx else {
-            return InMemoryRangeResult([])
+            return KeyValueRangeResult([])
         }
 
         // Collect entries in the resolved range [startIdx, endIdx)
-        var results: [(key: Bytes, value: Bytes)] = []
+        let slice = effective.slice(startIdx..<endIdx)
+        var results: [(key: Bytes, value: Bytes)]
 
         if reverse {
-            var i = endIdx - 1
-            while i >= startIdx {
-                results.append(effective[i])
-                if limit > 0 && results.count >= limit { break }
-                i -= 1
-            }
+            results = Array(slice.reversed())
         } else {
-            var i = startIdx
-            while i < endIdx {
-                results.append(effective[i])
-                if limit > 0 && results.count >= limit { break }
-                i += 1
-            }
+            results = Array(slice)
         }
 
-        return InMemoryRangeResult(results)
+        if limit > 0 && results.count > limit {
+            results = Array(results.prefix(limit))
+        }
+
+        return KeyValueRangeResult(results)
     }
 
     // MARK: - Write
@@ -252,22 +194,15 @@ public final class InMemoryTransaction: Transaction, Sendable {
 
         guard !ops.isEmpty else { return }
 
-        engine._store.withLock { currentStore in
+        engine._store.withLock { store in
             for op in ops {
                 switch op {
                 case .set(let key, let value):
-                    if let idx = binarySearch(currentStore, for: key) {
-                        currentStore[idx] = (key: key, value: value)
-                    } else {
-                        let idx = insertionPoint(currentStore, for: key)
-                        currentStore.insert((key: key, value: value), at: idx)
-                    }
+                    store.set(key, value)
                 case .clear(let key):
-                    if let idx = binarySearch(currentStore, for: key) {
-                        currentStore.remove(at: idx)
-                    }
+                    store.delete(key)
                 case .clearRange(let begin, let end):
-                    currentStore.removeAll { compareBytes($0.key, begin) >= 0 && compareBytes($0.key, end) < 0 }
+                    store.deleteRange(begin: begin, end: end)
                 }
             }
         }
@@ -279,34 +214,5 @@ public final class InMemoryTransaction: Transaction, Sendable {
             state.cancelled = true
             state.writeBuffer.removeAll()
         }
-    }
-
-    // MARK: - Binary Search
-
-    private func binarySearch(_ array: [(key: Bytes, value: Bytes)], for key: Bytes) -> Int? {
-        var low = 0
-        var high = array.count - 1
-        while low <= high {
-            let mid = low + (high - low) / 2
-            let cmp = compareBytes(array[mid].key, key)
-            if cmp == 0 { return mid }
-            if cmp < 0 { low = mid + 1 }
-            else { high = mid - 1 }
-        }
-        return nil
-    }
-
-    private func insertionPoint(_ array: [(key: Bytes, value: Bytes)], for key: Bytes) -> Int {
-        var low = 0
-        var high = array.count
-        while low < high {
-            let mid = low + (high - low) / 2
-            if compareBytes(array[mid].key, key) < 0 {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return low
     }
 }

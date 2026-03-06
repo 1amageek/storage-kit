@@ -163,11 +163,11 @@ struct SQLiteNestedTransactionTests {
     }
 
     // =========================================================================
-    // MARK: - SQLiteRangeResult Error Path
+    // MARK: - KeyValueRangeResult Error Path (via SQLite)
     // =========================================================================
 
-    @Test func sqliteRangeResult_errorThrowsOnIteration() async throws {
-        let result = SQLiteRangeResult(error: StorageError.backendError("test"))
+    @Test func rangeResult_errorThrowsOnIteration() async throws {
+        let result = KeyValueRangeResult(error: StorageError.backendError("test"))
 
         do {
             for try await _ in result {

@@ -2,49 +2,6 @@ import StorageKit
 import Foundation
 import Synchronization
 
-/// Range result type for SQLite.
-///
-/// Array-based AsyncSequence. Returns results with zero-copy.
-public struct SQLiteRangeResult: AsyncSequence, Sendable {
-    public typealias Element = (Bytes, Bytes)
-
-    private let results: [(key: Bytes, value: Bytes)]
-    private let error: (any Error)?
-
-    init(_ results: [(key: Bytes, value: Bytes)]) {
-        self.results = results
-        self.error = nil
-    }
-
-    init(error: any Error) {
-        self.results = []
-        self.error = error
-    }
-
-    public func makeAsyncIterator() -> Iterator {
-        Iterator(results: results, error: error)
-    }
-
-    public struct Iterator: AsyncIteratorProtocol {
-        private let results: [(key: Bytes, value: Bytes)]
-        private let error: (any Error)?
-        private var index: Int = 0
-
-        init(results: [(key: Bytes, value: Bytes)], error: (any Error)?) {
-            self.results = results
-            self.error = error
-        }
-
-        public mutating func next() async throws -> (Bytes, Bytes)? {
-            if let error { throw error }
-            guard index < results.count else { return nil }
-            let entry = results[index]
-            index += 1
-            return (entry.key, entry.value)
-        }
-    }
-}
-
 /// StorageKit.Transaction implementation for SQLite.
 ///
 /// Write operations (`setValue`/`clear`/`clearRange`) are non-throwing per the protocol,
@@ -61,7 +18,7 @@ public struct SQLiteRangeResult: AsyncSequence, Sendable {
 /// - The parent transaction controls the actual SQLite transaction lifecycle
 public final class SQLiteStorageTransaction: Transaction, Sendable {
 
-    public typealias RangeResult = SQLiteRangeResult
+    public typealias RangeResult = KeyValueRangeResult
 
     /// Externally synchronized by engine's transaction lock.
     nonisolated(unsafe) let connection: SQLiteConnection
@@ -121,10 +78,10 @@ public final class SQLiteStorageTransaction: Transaction, Sendable {
         reverse: Bool,
         snapshot: Bool,
         streamingMode: StreamingMode
-    ) -> SQLiteRangeResult {
+    ) -> KeyValueRangeResult {
         let cancelled = _state.withLock { $0.cancelled }
         guard !cancelled else {
-            return SQLiteRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
+            return KeyValueRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
         }
 
         // Resolve KeySelectors to SQL boundary conditions.
@@ -146,9 +103,9 @@ public final class SQLiteStorageTransaction: Transaction, Sendable {
                 end: endKey, endOp: endOp,
                 limit: limit, reverse: reverse
             )
-            return SQLiteRangeResult(results)
+            return KeyValueRangeResult(results)
         } catch {
-            return SQLiteRangeResult(error: error)
+            return KeyValueRangeResult(error: error)
         }
     }
 
