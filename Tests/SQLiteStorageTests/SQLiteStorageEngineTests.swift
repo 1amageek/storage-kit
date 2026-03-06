@@ -650,4 +650,102 @@ struct SQLiteStorageEngineTests {
             #expect(range.count == 2)
         }
     }
+
+    // =========================================================================
+    // MARK: - Lock Release Safety (Regression)
+    //
+    // The transaction lock (NSLock) must always be released after commit or
+    // cancel, even when errors occur. Without `defer { releaseLock() }`,
+    // a failed flushWriteBuffer() would leave the lock held, deadlocking
+    // all subsequent transactions.
+    // =========================================================================
+
+    @Test func lockReleasedAfterWithTransactionError() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+        struct TestError: Error {}
+
+        // First transaction throws — lock must be released
+        do {
+            try await engine.withTransaction { tx in
+                tx.setValue([1], for: [0x01])
+                throw TestError()
+            }
+        } catch is TestError {}
+
+        // Second transaction must succeed (proves lock was released)
+        try await engine.withTransaction { tx in
+            tx.setValue([2], for: [0x02])
+        }
+
+        try await engine.withTransaction { tx in
+            let value = try await tx.getValue(for: [0x02])
+            #expect(value == [2])
+        }
+    }
+
+    @Test func lockReleasedAfterCancel() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        let tx1 = try engine.createTransaction()
+        tx1.setValue([1], for: [0x01])
+        tx1.cancel()
+
+        // Must not deadlock — lock should have been released by cancel
+        let tx2 = try engine.createTransaction()
+        tx2.setValue([2], for: [0x02])
+        try await tx2.commit()
+
+        let tx3 = try engine.createTransaction()
+        let value = try await tx3.getValue(for: [0x02])
+        #expect(value == [2])
+        try await tx3.commit()
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func lockReleasedUnderConcurrentAccess() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        // Multiple concurrent withTransaction calls must all complete
+        // without deadlocking (each acquires and releases the lock)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for i: UInt8 in 0..<20 {
+                group.addTask {
+                    try await engine.withTransaction { tx in
+                        tx.setValue([i], for: [i])
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+
+        try await engine.withTransaction { tx in
+            let range = try await collectRange(tx, begin: [0x00], end: [0xFF])
+            #expect(range.count == 20)
+        }
+    }
+
+    @Test func lockReleasedAfterMultipleErrorsInSequence() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+        struct TestError: Error {}
+
+        // Three consecutive failing transactions
+        for _ in 0..<3 {
+            do {
+                try await engine.withTransaction { tx in
+                    tx.setValue([1], for: [0x01])
+                    throw TestError()
+                }
+            } catch is TestError {}
+        }
+
+        // Must still work after repeated failures
+        try await engine.withTransaction { tx in
+            tx.setValue([99], for: [0x01])
+        }
+
+        try await engine.withTransaction { tx in
+            let value = try await tx.getValue(for: [0x01])
+            #expect(value == [99])
+        }
+    }
 }

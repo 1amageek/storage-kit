@@ -236,14 +236,13 @@ public final class SQLiteStorageTransaction: Transaction, Sendable {
 
         if lock != nil {
             // Top-level transaction: flush buffer, COMMIT, release lock
+            defer { releaseLock() }
             do {
                 try flushWriteBuffer()
                 try connection.execute("COMMIT")
                 _state.withLock { $0.committed = true }
-                releaseLock()
             } catch {
                 try? connection.execute("ROLLBACK")
-                releaseLock()
                 throw error
             }
         } else {
@@ -290,16 +289,4 @@ public final class SQLiteStorageTransaction: Transaction, Sendable {
         }
         _state.withLock { $0.writeBuffer.removeAll() }
     }
-}
-
-// MARK: - Byte Comparison
-
-private func compareBytes(_ lhs: Bytes, _ rhs: Bytes) -> Int {
-    let minLen = min(lhs.count, rhs.count)
-    for i in 0..<minLen {
-        if lhs[i] != rhs[i] {
-            return Int(lhs[i]) - Int(rhs[i])
-        }
-    }
-    return lhs.count - rhs.count
 }

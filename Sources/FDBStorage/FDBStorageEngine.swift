@@ -30,13 +30,30 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         }
     }
 
+    /// Serializes FDB client library initialization to prevent TOCTOU races.
+    ///
+    /// `FDBClient.initialize()` throws if called twice. Without serialization,
+    /// concurrent `init(configuration:)` calls could both observe `isInitialized == false`
+    /// and race into `initialize()`.
+    private static let initGuard = InitializationGuard()
+
+    private actor InitializationGuard {
+        private var initialized = false
+
+        func ensureInitialized() async throws {
+            guard !initialized else { return }
+            try await FDBClient.initialize()
+            initialized = true
+        }
+    }
+
     public typealias TransactionType = FDBStorageTransaction
 
     nonisolated(unsafe) public let database: any DatabaseProtocol
 
     public init(configuration: Configuration) async throws {
         if !FDBClient.isInitialized {
-            try await FDBClient.initialize()
+            try await Self.initGuard.ensureInitialized()
         }
         self.database = try configuration.database ?? FDBClient.openDatabase()
     }
