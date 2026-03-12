@@ -8,9 +8,11 @@ let package = Package(
         .library(name: "StorageKit", targets: ["StorageKit"]),
         .library(name: "FDBStorage", targets: ["FDBStorage"]),
         .library(name: "SQLiteStorage", targets: ["SQLiteStorage"]),
+        .library(name: "PostgreSQLStorage", targets: ["PostgreSQLStorage"]),
     ],
     dependencies: [
         .package(url: "https://github.com/1amageek/fdb-swift-bindings.git", branch: "feature/directory-layer"),
+        .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
     ],
     targets: [
         .target(
@@ -30,6 +32,13 @@ let package = Package(
                 "StorageKit",
             ]
         ),
+        .target(
+            name: "PostgreSQLStorage",
+            dependencies: [
+                "StorageKit",
+                .product(name: "PostgresNIO", package: "postgres-nio"),
+            ]
+        ),
         .testTarget(
             name: "StorageKitTests",
             dependencies: ["StorageKit"]
@@ -44,6 +53,10 @@ let package = Package(
         .testTarget(
             name: "SQLiteStorageTests",
             dependencies: ["SQLiteStorage"]
+        ),
+        .testTarget(
+            name: "PostgreSQLStorageTests",
+            dependencies: ["PostgreSQLStorage"]
         ),
     ]
 )
