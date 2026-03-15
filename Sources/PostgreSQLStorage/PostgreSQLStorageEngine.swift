@@ -127,6 +127,9 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         }
 
         let maxRetries = configuration.maxRetries
+        guard maxRetries > 0 else {
+            throw StorageError.invalidOperation("maxRetries must be greater than 0")
+        }
         for attempt in 0..<maxRetries {
             do {
                 let result: T = try await client.withConnection { [configuration, logger] conn in
@@ -175,7 +178,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                 throw mapped
             }
         }
-        throw StorageError.transactionTooOld
+        // Unreachable when maxRetries > 0 — all loop iterations either return or throw.
+        throw StorageError.backendError("Transaction failed after \(maxRetries) attempts")
     }
 
     // DirectoryService: uses StaticDirectoryService (default from protocol extension)

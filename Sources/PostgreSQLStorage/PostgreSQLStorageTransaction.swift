@@ -79,18 +79,20 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
     }
 
     /// Nested transaction init (used by `createTransaction` when ActiveTransactionScope is active).
-    /// Shares the parent's connection and merges writes on commit.
+    /// Delegates connection access to the parent rather than copying a snapshot.
+    /// This ensures the nested transaction sees the parent's connection even if
+    /// the parent acquires it lazily after the nested transaction is created.
     init(
         parent: PostgreSQLStorageTransaction,
         logger: Logger
     ) {
-        self.currentConnection = parent.currentConnection
+        self.currentConnection = nil
         self.parent = parent
         self.client = nil
         self.beginStatement = nil
         self.isNested = true
         self.logger = logger
-        self._state = Mutex(MutableState(connectionAcquired: parent.currentConnection != nil))
+        self._state = Mutex(MutableState())
     }
 
     /// Lazy connection init (used by `createTransaction`).
@@ -112,11 +114,30 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
 
     // MARK: - Lazy Connection Acquisition
 
-    /// Acquire a connection from the pool if not already connected.
-    /// Issues BEGIN on the new connection.
+    /// Acquire a connection, delegating to parent for nested transactions.
+    ///
+    /// For nested transactions, the parent is responsible for connection lifecycle.
+    /// For top-level lazy transactions, acquires from the pool on first call.
+    ///
+    /// The connection is "parked" inside `withConnection` via a checked continuation
+    /// until `releaseConnection()` is called from `commit()` or `cancel()`.
+    /// `connectionRelease` is set BEFORE the outer continuation resumes to prevent
+    /// a race where `releaseConnection()` is called before `connectionRelease` is assigned.
     private func ensureConnection() async throws -> PostgresConnection {
         if let conn = currentConnection {
             return conn
+        }
+
+        // Nested: delegate to parent. The parent will acquire lazily if needed.
+        if let parent {
+            return try await parent.ensureConnection()
+        }
+
+        // Pre-check: already cancelled?
+        try _state.withLock { state in
+            guard !state.cancelled else {
+                throw StorageError.invalidOperation("Transaction cancelled")
+            }
         }
 
         guard let client else {
@@ -126,16 +147,17 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
         }
 
         // Acquire a connection from the pool.
-        // We use withCheckedContinuation to "park" the withConnection scope
-        // until commit/cancel releases it.
+        // connectionRelease is assigned inside the withCheckedContinuation closure
+        // (which runs synchronously) BEFORE resuming the outer continuation.
+        // This guarantees connectionRelease is set before any code that might
+        // call releaseConnection() has a chance to run.
         let conn: PostgresConnection = try await withCheckedThrowingContinuation { continuation in
-            Task {
+            Task { [self] in
                 do {
-                    try await client.withConnection { [weak self] conn -> Void in
-                        continuation.resume(returning: conn)
-                        // Block here until commit/cancel signals release
+                    try await client.withConnection { conn -> Void in
                         await withCheckedContinuation { releaseContinuation in
-                            self?.connectionRelease = releaseContinuation
+                            self.connectionRelease = releaseContinuation
+                            continuation.resume(returning: conn)
                         }
                     }
                 } catch {
@@ -144,15 +166,33 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
             }
         }
 
+        // Post-check: cancelled during connection acquisition?
+        let wasCancelled = _state.withLock { state -> Bool in
+            if state.cancelled { return true }
+            state.connectionAcquired = true
+            return false
+        }
+
+        if wasCancelled {
+            releaseConnection()
+            throw StorageError.invalidOperation("Transaction cancelled")
+        }
+
         self.currentConnection = conn
-        _state.withLock { $0.connectionAcquired = true }
 
         // Issue BEGIN
         if let beginStatement {
-            try await conn.query(
-                PostgresQuery(unsafeSQL: beginStatement),
-                logger: logger
-            )
+            do {
+                try await conn.query(
+                    PostgresQuery(unsafeSQL: beginStatement),
+                    logger: logger
+                )
+            } catch {
+                self.currentConnection = nil
+                _state.withLock { $0.connectionAcquired = false }
+                releaseConnection()
+                throw error
+            }
         }
 
         return conn
@@ -221,8 +261,7 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
         let (endKey, endOp) = Self.resolveEndForSQL(end)
         let logger = self.logger
 
-        return PostgreSQLRangeResult { [weak self] in
-            guard let self else { return [] }
+        return PostgreSQLRangeResult { [self] in
 
             let conn = try await self.ensureConnection()
 
@@ -304,19 +343,22 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
         guard shouldProceed else { return }
 
         if isNested {
-            // Nested: flush to connection if available, otherwise merge into parent's buffer
-            if let conn = currentConnection {
-                try await flushWriteBuffer(connection: conn)
-            } else if let parent {
-                // Parent has lazy connection (not yet acquired).
-                // Transfer our buffered writes into parent so they are flushed when parent commits.
-                let writes = _state.withLock { state -> [WriteOp] in
-                    let ops = state.writeBuffer
-                    state.writeBuffer.removeAll()
-                    return ops
-                }
-                if !writes.isEmpty {
-                    parent._state.withLock { $0.writeBuffer.append(contentsOf: writes) }
+            // Nested: delegate connection access to parent.
+            // If parent has a connection, flush directly to the shared connection.
+            // If parent hasn't acquired a connection yet (lazy), transfer writes
+            // to parent's buffer so they are flushed when parent commits.
+            if let parent {
+                if let conn = parent.currentConnection {
+                    try await flushWriteBuffer(connection: conn)
+                } else {
+                    let writes = _state.withLock { state -> [WriteOp] in
+                        let ops = state.writeBuffer
+                        state.writeBuffer.removeAll()
+                        return ops
+                    }
+                    if !writes.isEmpty {
+                        parent._state.withLock { $0.writeBuffer.append(contentsOf: writes) }
+                    }
                 }
             }
             _state.withLock { $0.committed = true }
@@ -357,22 +399,26 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
     }
 
     public func cancel() {
-        let (shouldCancel, wasLazilyAcquired) = _state.withLock { state -> (Bool, Bool) in
-            guard !state.committed, !state.cancelled else { return (false, false) }
+        let shouldCancel = _state.withLock { state -> Bool in
+            guard !state.committed, !state.cancelled else { return false }
             state.cancelled = true
             state.writeBuffer.removeAll()
-            return (true, state.connectionAcquired)
+            return true
         }
         guard shouldCancel else { return }
 
-        if wasLazilyAcquired, let conn = currentConnection, client != nil {
-            // Lazily acquired connection — issue ROLLBACK and release
-            Task {
-                _ = try? await conn.query("ROLLBACK", logger: logger)
-                releaseConnection()
+        // Only top-level lazy transactions own the connection lifecycle.
+        // Nested transactions delegate to parent. Eager transactions (from
+        // withTransaction) are managed by the engine.
+        // ROLLBACK must complete BEFORE releasing the connection back to
+        // the pool. Otherwise another transaction could receive the
+        // connection while ROLLBACK is still in-flight.
+        if !isNested, let conn = currentConnection, client != nil {
+            Task { [self] in
+                _ = try? await conn.query("ROLLBACK", logger: self.logger)
+                self.releaseConnection()
             }
         }
-        // For eager connections (from withTransaction): parent handles ROLLBACK
     }
 
     // MARK: - Internal (called by engine's withTransaction)
@@ -383,16 +429,20 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
             try await conn.query("COMMIT", logger: logger)
             _state.withLock { $0.committed = true }
         } catch {
+            _state.withLock { $0.cancelled = true }
             _ = try? await conn.query("ROLLBACK", logger: logger)
             throw error
         }
     }
 
     func rollbackInternal(connection conn: PostgresConnection) async throws {
-        _state.withLock { state in
+        let shouldRollback = _state.withLock { state -> Bool in
+            guard !state.committed, !state.cancelled else { return false }
             state.writeBuffer.removeAll()
             state.cancelled = true
+            return true
         }
+        guard shouldRollback else { return }
         _ = try? await conn.query("ROLLBACK", logger: logger)
     }
 
@@ -468,13 +518,13 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
                 }
             }
 
-            let addend: Int64
-            if param.count >= 8 {
-                addend = param.withUnsafeBytes { ptr in
-                    ptr.loadUnaligned(as: Int64.self)
-                }
-            } else {
-                addend = 0
+            guard param.count >= 8 else {
+                throw StorageError.invalidOperation(
+                    "atomicOp(.add) requires param of at least 8 bytes, got \(param.count)"
+                )
+            }
+            let addend = param.withUnsafeBytes { ptr in
+                ptr.loadUnaligned(as: Int64.self)
             }
 
             let result = currentValue &+ addend

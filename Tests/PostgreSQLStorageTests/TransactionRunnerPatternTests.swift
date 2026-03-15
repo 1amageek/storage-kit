@@ -897,5 +897,243 @@ struct TransactionRunnerPatternTests {
 
         #expect(orders.count == 5)
     }
+    // =========================================================================
+    // MARK: - Regression: Nested TX from lazy parent (Fix #1)
+    // =========================================================================
+
+    /// Verifies that a nested transaction created from a lazy parent
+    /// can perform reads by delegating ensureConnection() to the parent.
+    ///
+    /// Regression: previously, nested TX copied parent.currentConnection
+    /// at init time (nil for lazy parent) and could not acquire a connection.
+    @Test func nestedTransaction_lazyParent_readDelegation() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let key = itemKey(type: "LazyNested", id: "ln-1")
+
+        // Pre-populate data
+        let setup = try engine.createTransaction()
+        setup.setValue(Array("lazy-nested-data".utf8), for: key)
+        try await setup.commit()
+
+        // Create lazy parent (no async ops yet — no connection acquired)
+        let parentTx = try engine.createTransaction()
+        try await ActiveTransactionScope.$current.withValue(parentTx) {
+            // Create nested TX before parent has acquired a connection
+            let nestedTx = try engine.createTransaction()
+
+            // Read through nested TX — triggers parent.ensureConnection()
+            let result = try await nestedTx.getValue(for: key)
+            #expect(result != nil)
+            #expect(String(bytes: result!, encoding: .utf8) == "lazy-nested-data")
+
+            try await nestedTx.commit()
+            try await parentTx.commit()
+        }
+    }
+
+    /// Verifies that nested TX writes are transferred to lazy parent's buffer
+    /// when neither has a connection, and flushed on parent commit.
+    ///
+    /// Regression: previously, nested commit checked self.currentConnection
+    /// (always nil after fix) instead of parent.currentConnection.
+    @Test func nestedTransaction_lazyParent_writeTransfer() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let key = itemKey(type: "LazyNested", id: "ln-2")
+
+        // Create lazy parent, nested writes before any connection
+        let parentTx = try engine.createTransaction()
+        try await ActiveTransactionScope.$current.withValue(parentTx) {
+            let nestedTx = try engine.createTransaction()
+            nestedTx.setValue(Array("transferred-write".utf8), for: key)
+            try await nestedTx.commit() // transfers to parent buffer
+
+            try await parentTx.commit() // acquires connection, flushes, commits
+        }
+
+        // Verify data was persisted
+        let readTx = try engine.createTransaction()
+        let result = try await readTx.getValue(for: key)
+        try await readTx.commit()
+
+        #expect(String(bytes: result!, encoding: .utf8) == "transferred-write")
+    }
+
+    /// Verifies nested TX can read and write through a lazy parent
+    /// in the same transaction.
+    @Test func nestedTransaction_lazyParent_readThenWrite() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let readKey = itemKey(type: "LazyNested", id: "ln-3-read")
+        let writeKey = itemKey(type: "LazyNested", id: "ln-3-write")
+
+        // Pre-populate
+        let setup = try engine.createTransaction()
+        setup.setValue(Array("existing-data".utf8), for: readKey)
+        try await setup.commit()
+
+        let parentTx = try engine.createTransaction()
+        try await ActiveTransactionScope.$current.withValue(parentTx) {
+            let nestedTx = try engine.createTransaction()
+
+            // Read (triggers parent connection acquisition)
+            let result = try await nestedTx.getValue(for: readKey)
+            #expect(result != nil)
+
+            // Write (buffered in nested)
+            nestedTx.setValue(Array("new-data".utf8), for: writeKey)
+
+            try await nestedTx.commit() // flush to parent's connection
+            try await parentTx.commit()
+        }
+
+        // Verify write was persisted
+        let readTx = try engine.createTransaction()
+        let result = try await readTx.getValue(for: writeKey)
+        try await readTx.commit()
+        #expect(String(bytes: result!, encoding: .utf8) == "new-data")
+    }
+
+    // =========================================================================
+    // MARK: - Regression: cancel() connection lifecycle (Fix #3)
+    // =========================================================================
+
+    /// Verifies that cancelling a lazy transaction that never acquired
+    /// a connection is a clean no-op (no crash, no leak).
+    @Test func cancel_lazyTransaction_noConnection() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let tx = try engine.createTransaction()
+        tx.setValue(Array("data".utf8), for: [0xF0, 0x01])
+        tx.cancel()
+
+        // Verify: buffer was discarded, engine still functional
+        try await engine.withTransaction { tx in
+            tx.setValue(Array("after-cancel".utf8), for: [0xF0, 0x02])
+        }
+
+        let verifyTx = try engine.createTransaction()
+        let result = try await verifyTx.getValue(for: [0xF0, 0x02])
+        try await verifyTx.commit()
+        #expect(result != nil)
+    }
+
+    /// Verifies that cancelling a lazy transaction that HAS acquired
+    /// a connection properly rolls back and releases it.
+    @Test func cancel_lazyTransaction_withConnection() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let key = itemKey(type: "CancelTest", id: "ct-1")
+
+        let tx = try engine.createTransaction()
+        // Force connection acquisition via read
+        _ = try await tx.getValue(for: key)
+        tx.setValue(Array("should-be-rolled-back".utf8), for: key)
+        tx.cancel()
+
+        // Allow cancel's Task to complete
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Verify: data was NOT persisted, connection was returned to pool
+        let readTx = try engine.createTransaction()
+        let result = try await readTx.getValue(for: key)
+        try await readTx.commit()
+        #expect(result == nil)
+    }
+
+    // =========================================================================
+    // MARK: - Regression: atomicOp(.add) param validation (Fix #5)
+    // =========================================================================
+
+    /// Verifies that atomicOp(.add) with a short param (< 8 bytes)
+    /// throws an explicit error instead of silently using 0.
+    @Test func atomicOp_shortParam_throwsError() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let counterKey: Bytes = [SubspacePrefix.schema, 0xF0, 0x01]
+
+        let tx = try engine.createTransaction()
+        tx.atomicOp(key: counterKey, param: [0x01, 0x02, 0x03], mutationType: .add)
+
+        // commit triggers flush which executes the atomic op — should throw
+        do {
+            try await tx.commit()
+            Issue.record("Expected commit to throw for short atomicOp param")
+        } catch let error as StorageError {
+            guard case .invalidOperation(let message) = error else {
+                Issue.record("Expected invalidOperation, got \(error)")
+                return
+            }
+            #expect(message.contains("8 bytes"))
+        }
+    }
+
+    // =========================================================================
+    // MARK: - Regression: withTransaction maxRetries=0 (Fix #7)
+    // =========================================================================
+
+    /// Verifies that maxRetries=0 is rejected with a clear error.
+    @Test func withTransaction_zeroMaxRetries_throws() async throws {
+        guard let host = ProcessInfo.processInfo.environment["POSTGRES_TEST_HOST"] else {
+            throw PostgreSQLTestSkipError()
+        }
+        let config = PostgreSQLConfiguration(
+            host: host,
+            port: ProcessInfo.processInfo.environment["POSTGRES_TEST_PORT"]
+                .flatMap(Int.init) ?? 5432,
+            username: ProcessInfo.processInfo.environment["POSTGRES_TEST_USER"] ?? "postgres",
+            password: ProcessInfo.processInfo.environment["POSTGRES_TEST_PASSWORD"] ?? "",
+            database: ProcessInfo.processInfo.environment["POSTGRES_TEST_DB"] ?? "storage_kit_test",
+            maxRetries: 0
+        )
+        let engine = try await PostgreSQLStorageEngine(configuration: config)
+        defer { engine.shutdown() }
+
+        do {
+            try await engine.withTransaction { _ in }
+            Issue.record("Expected withTransaction to throw for maxRetries=0")
+        } catch let error as StorageError {
+            guard case .invalidOperation(let message) = error else {
+                Issue.record("Expected invalidOperation, got \(error)")
+                return
+            }
+            #expect(message.contains("maxRetries"))
+        }
+    }
+
+    // =========================================================================
+    // MARK: - Regression: rollbackInternal idempotence (Fix #6)
+    // =========================================================================
+
+    /// Verifies that an error in the operation leads to a clean rollback
+    /// without double-ROLLBACK issues.
+    @Test func withTransaction_operationError_cleanRollback() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let key = itemKey(type: "RollbackTest", id: "rb-1")
+
+        do {
+            try await engine.withTransaction { tx in
+                tx.setValue(Array("should-not-persist".utf8), for: key)
+                throw StorageError.invalidOperation("simulated error")
+            }
+        } catch {
+            // Expected
+        }
+
+        // Verify the data was NOT persisted
+        try await engine.withTransaction { tx in
+            let result = try await tx.getValue(for: key)
+            #expect(result == nil)
+        }
+    }
 }
 } // extension AllPostgreSQLTests
