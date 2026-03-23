@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
@@ -9,6 +9,12 @@ let package = Package(
         .library(name: "FDBStorage", targets: ["FDBStorage"]),
         .library(name: "SQLiteStorage", targets: ["SQLiteStorage"]),
         .library(name: "PostgreSQLStorage", targets: ["PostgreSQLStorage"]),
+    ],
+    traits: [
+        .default(enabledTraits: ["FoundationDB", "SQLite"]),
+        .trait(name: "FoundationDB"),
+        .trait(name: "SQLite"),
+        .trait(name: "PostgreSQL"),
     ],
     dependencies: [
         .package(url: "https://github.com/1amageek/fdb-swift-bindings.git", branch: "feature/directory-layer"),
@@ -24,12 +30,18 @@ let package = Package(
             dependencies: [
                 "StorageKit",
                 .product(name: "FoundationDB", package: "fdb-swift-bindings"),
+            ],
+            swiftSettings: [
+                .define("STORAGE_FOUNDATIONDB", .when(traits: ["FoundationDB"])),
             ]
         ),
         .target(
             name: "SQLiteStorage",
             dependencies: [
                 "StorageKit",
+            ],
+            swiftSettings: [
+                .define("STORAGE_SQLITE", .when(traits: ["SQLite"])),
             ]
         ),
         .target(
@@ -37,6 +49,9 @@ let package = Package(
             dependencies: [
                 "StorageKit",
                 .product(name: "PostgresNIO", package: "postgres-nio"),
+            ],
+            swiftSettings: [
+                .define("STORAGE_POSTGRESQL", .when(traits: ["PostgreSQL"])),
             ]
         ),
         .testTarget(
