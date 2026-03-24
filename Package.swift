@@ -17,7 +17,7 @@ let package = Package(
         .trait(name: "PostgreSQL"),
     ],
     dependencies: [
-        .package(url: "https://github.com/1amageek/fdb-swift-bindings.git", branch: "feature/directory-layer"),
+        .package(url: "https://github.com/1amageek/fdb-swift-bindings.git", from: "0.1.0"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
     ],
     targets: [
