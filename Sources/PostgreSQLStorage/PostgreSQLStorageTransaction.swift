@@ -423,14 +423,21 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
 
     // MARK: - Internal (called by engine's withTransaction)
 
-    func commitInternal(connection conn: PostgresConnection) async throws {
+    func commitInternal(
+        connection conn: PostgresConnection,
+        skipCommitStatement: Bool = false
+    ) async throws {
         do {
             try await flushWriteBuffer(connection: conn)
-            try await conn.query("COMMIT", logger: logger)
+            if !skipCommitStatement {
+                try await conn.query("COMMIT", logger: logger)
+            }
             _state.withLock { $0.committed = true }
         } catch {
             _state.withLock { $0.cancelled = true }
-            _ = try? await conn.query("ROLLBACK", logger: logger)
+            if !skipCommitStatement {
+                _ = try? await conn.query("ROLLBACK", logger: logger)
+            }
             throw error
         }
     }

@@ -182,6 +182,38 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         throw StorageError.backendError("Transaction failed after \(maxRetries) attempts")
     }
 
+    /// Execute an operation in auto-commit mode (no BEGIN/COMMIT).
+    ///
+    /// Each SQL statement issued by the transaction commits individually.
+    /// Write buffer is flushed directly to the connection without transaction wrapping.
+    /// This saves 2 SQL round-trips compared to `withTransaction()`.
+    public func withAutoCommit<T: Sendable>(
+        _ operation: (any Transaction) async throws -> T
+    ) async throws -> T {
+        // Nested: reuse existing transaction (already inside BEGIN/COMMIT)
+        if let existing = ActiveTransactionScope.current {
+            return try await operation(existing)
+        }
+
+        return try await client.withConnection { [logger] conn in
+            // No BEGIN — PostgreSQL auto-commits each statement
+            let tx = PostgreSQLStorageTransaction(
+                connection: conn,
+                isNested: false,
+                logger: logger
+            )
+
+            return try await ActiveTransactionScope.$current.withValue(tx) {
+                let result = try await operation(tx)
+
+                // Flush any buffered writes (each executes as auto-commit)
+                try await tx.commitInternal(connection: conn, skipCommitStatement: true)
+
+                return result
+            }
+        }
+    }
+
     // DirectoryService: uses StaticDirectoryService (default from protocol extension)
 
     public func shutdown() {

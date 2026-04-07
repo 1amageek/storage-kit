@@ -50,6 +50,23 @@ public protocol StorageEngine: Sendable {
     /// Implementations should be idempotent (safe to call multiple times).
     /// Default implementation is a no-op.
     func shutdown()
+
+    /// Execute an operation in auto-commit mode (no explicit BEGIN/COMMIT).
+    ///
+    /// Each SQL statement commits individually via PostgreSQL's default
+    /// auto-commit behavior. This eliminates 2 round-trips (BEGIN + COMMIT)
+    /// compared to `withTransaction()`.
+    ///
+    /// Suitable for:
+    /// - Single read operations (no transactional guarantee needed)
+    /// - Single write operations (atomicity via single SQL statement)
+    ///
+    /// NOT suitable for:
+    /// - Multi-statement operations requiring atomicity
+    /// - Operations that need read-your-writes across multiple keys
+    func withAutoCommit<T: Sendable>(
+        _ operation: (any Transaction) async throws -> T
+    ) async throws -> T
 }
 
 extension StorageEngine {
@@ -61,4 +78,11 @@ extension StorageEngine {
     public var directoryService: any DirectoryService { StaticDirectoryService() }
 
     public func shutdown() {}
+
+    /// Default: falls back to `withTransaction()`.
+    public func withAutoCommit<T: Sendable>(
+        _ operation: (any Transaction) async throws -> T
+    ) async throws -> T {
+        try await withTransaction(operation)
+    }
 }
