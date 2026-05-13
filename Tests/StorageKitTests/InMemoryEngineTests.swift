@@ -410,7 +410,7 @@ struct InMemoryEngineTests {
             _ = try await tx.getValue(for: [0x01])
             Issue.record("Expected error")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -428,7 +428,7 @@ struct InMemoryEngineTests {
             }
             Issue.record("Expected error")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -443,7 +443,7 @@ struct InMemoryEngineTests {
             try await tx.commit()
             Issue.record("Expected error")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }

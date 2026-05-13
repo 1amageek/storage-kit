@@ -96,11 +96,11 @@ struct KeyValueSequenceTests {
             }
             Issue.record("Expected error to be thrown")
         } catch let error as StorageError {
-            guard case .invalidOperation(let msg) = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
-            #expect(msg == "test error")
+            #expect(error.message == "test error")
         }
     }
 

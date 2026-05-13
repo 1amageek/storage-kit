@@ -16,7 +16,7 @@ final class SQLiteConnection {
         guard rc == SQLITE_OK, let opened = dbPointer else {
             let message = dbPointer.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
             sqlite3_close(dbPointer)
-            throw StorageError.backendError("SQLite open failed: \(message)")
+            throw SQLiteErrorMapper.map(rc: rc, operation: .open, message: message)
         }
         self.db = opened
     }
@@ -33,7 +33,7 @@ final class SQLiteConnection {
     }
 
     /// Executes a SQL statement without parameter bindings.
-    func execute(_ sql: String) throws {
+    func execute(_ sql: String, operation: StorageOperation = .execute) throws {
         guard let db else {
             throw StorageError.invalidOperation("Database closed")
         }
@@ -42,7 +42,7 @@ final class SQLiteConnection {
         if rc != SQLITE_OK {
             let message = errorMessage.map { String(cString: $0) } ?? "Unknown error"
             sqlite3_free(errorMessage)
-            throw StorageError.backendError("SQLite exec failed: \(message)")
+            throw SQLiteErrorMapper.map(rc: rc, operation: operation, message: message)
         }
     }
 
@@ -61,7 +61,7 @@ final class SQLiteConnection {
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
-            throw StorageError.backendError("SQLite insert failed (\(rc)): \(currentErrorMessage)")
+            throw SQLiteErrorMapper.map(rc: rc, operation: .write, message: currentErrorMessage)
         }
     }
 
@@ -83,7 +83,7 @@ final class SQLiteConnection {
         } else if rc == SQLITE_DONE {
             return nil
         } else {
-            throw StorageError.backendError("SQLite get failed: \(currentErrorMessage)")
+            throw SQLiteErrorMapper.map(rc: rc, operation: .read, message: currentErrorMessage)
         }
     }
 
@@ -101,7 +101,7 @@ final class SQLiteConnection {
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
-            throw StorageError.backendError("SQLite delete failed: \(currentErrorMessage)")
+            throw SQLiteErrorMapper.map(rc: rc, operation: .delete, message: currentErrorMessage)
         }
     }
 
@@ -120,7 +120,7 @@ final class SQLiteConnection {
 
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE else {
-            throw StorageError.backendError("SQLite deleteRange failed: \(currentErrorMessage)")
+            throw SQLiteErrorMapper.map(rc: rc, operation: .deleteRange, message: currentErrorMessage)
         }
     }
 
@@ -198,12 +198,18 @@ final class SQLiteConnection {
         }
 
         var results: [(key: Bytes, value: Bytes)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        var rc = sqlite3_step(stmt)
+        while rc == SQLITE_ROW {
             guard let key = extractBlob(stmt, column: 0),
                   let value = extractBlob(stmt, column: 1) else {
+                rc = sqlite3_step(stmt)
                 continue
             }
             results.append((key: key, value: value))
+            rc = sqlite3_step(stmt)
+        }
+        if rc != SQLITE_DONE {
+            throw SQLiteErrorMapper.map(rc: rc, operation: .rangeRead, message: currentErrorMessage)
         }
         return results
     }
@@ -227,7 +233,7 @@ final class SQLiteConnection {
         }
         let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
         guard rc == SQLITE_OK else {
-            throw StorageError.backendError("SQLite prepare failed: \(currentErrorMessage)")
+            throw SQLiteErrorMapper.map(rc: rc, operation: .prepare, message: currentErrorMessage)
         }
     }
 
@@ -256,3 +262,27 @@ final class SQLiteConnection {
 
 /// Equivalent to the C macro `((sqlite3_destructor_type)-1)` for SQLITE_TRANSIENT.
 private let SQLITE_TRANSIENT_PTR = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+private enum SQLiteErrorMapper {
+    static func map(rc: Int32, operation: StorageOperation, message: String) -> StorageError {
+        let code: StorageError.Code
+        switch rc {
+        case SQLITE_BUSY, SQLITE_LOCKED:
+            code = .transactionBusy
+        case SQLITE_CORRUPT, SQLITE_NOTADB:
+            code = .dataCorruption
+        case SQLITE_FULL, SQLITE_NOMEM, SQLITE_IOERR:
+            code = .resourceUnavailable
+        default:
+            code = .backendFailure
+        }
+
+        return StorageError(
+            code: code,
+            operation: operation,
+            backend: .sqlite,
+            message: "SQLite \(operation.rawValue) failed",
+            underlyingDescription: "rc=\(rc): \(message)"
+        )
+    }
+}

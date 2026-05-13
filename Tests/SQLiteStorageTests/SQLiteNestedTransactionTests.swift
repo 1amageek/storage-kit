@@ -132,7 +132,7 @@ struct SQLiteNestedTransactionTests {
             _ = try engine.createTransaction()
             Issue.record("Expected error after shutdown")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -155,7 +155,7 @@ struct SQLiteNestedTransactionTests {
             }
             Issue.record("Expected error after close")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -175,7 +175,7 @@ struct SQLiteNestedTransactionTests {
             }
             Issue.record("Expected error to be thrown")
         } catch let error as StorageError {
-            guard case .backendError = error else {
+            guard error.code == .backendFailure else {
                 Issue.record("Expected backendError, got \(error)")
                 return
             }

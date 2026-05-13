@@ -628,7 +628,7 @@ struct PostgreSQLStorageTests {
             }
             Issue.record("Expected error")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -649,7 +649,7 @@ struct PostgreSQLStorageTests {
             }
             Issue.record("Expected error")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -944,7 +944,7 @@ struct PostgreSQLStorageTests {
             }
             Issue.record("Expected error to be thrown")
         } catch let error as StorageError {
-            guard case .backendError = error else {
+            guard error.code == .backendFailure else {
                 Issue.record("Expected backendError, got \(error)")
                 return
             }
@@ -1167,7 +1167,7 @@ struct PostgreSQLStorageTests {
             }
             Issue.record("Expected error for unsupported atomicOp")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -1190,7 +1190,7 @@ struct PostgreSQLStorageTests {
             }
             Issue.record("Expected error for versionstamp")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -1204,7 +1204,7 @@ struct PostgreSQLStorageTests {
     @Test func mapError_storageErrorPassthrough() {
         let original = StorageError.transactionConflict
         let mapped = PostgreSQLStorageEngine.mapError(original)
-        if case .transactionConflict = mapped {
+        if mapped.code == .transactionConflict {
             // pass
         } else {
             Issue.record("Expected passthrough, got \(mapped)")
@@ -1214,7 +1214,7 @@ struct PostgreSQLStorageTests {
     @Test func mapError_unknownErrorWrapped() {
         struct UnknownError: Error {}
         let mapped = PostgreSQLStorageEngine.mapError(UnknownError())
-        if case .backendError = mapped {
+        if mapped.code == .backendFailure {
             // pass
         } else {
             Issue.record("Expected backendError, got \(mapped)")

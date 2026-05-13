@@ -32,13 +32,15 @@ public final class InMemoryEngine: StorageEngine, Sendable {
         _ operation: (any Transaction) async throws -> T
     ) async throws -> T {
         let tx = try createTransaction()
-        do {
-            let result = try await operation(tx)
-            try await tx.commit()
-            return result
-        } catch {
-            tx.cancel()
-            throw error
+        return try await ActiveTransactionScope.$current.withValue(tx) {
+            do {
+                let result = try await operation(tx)
+                try await tx.commit()
+                return result
+            } catch {
+                tx.cancel()
+                throw error
+            }
         }
     }
 

@@ -1067,20 +1067,20 @@ struct TransactionRunnerPatternTests {
             try await tx.commit()
             Issue.record("Expected commit to throw for short atomicOp param")
         } catch let error as StorageError {
-            guard case .invalidOperation(let message) = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
-            #expect(message.contains("8 bytes"))
+            #expect(error.message.contains("8 bytes"))
         }
     }
 
     // =========================================================================
-    // MARK: - Regression: withTransaction maxRetries=0 (Fix #7)
+    // MARK: - Transaction convenience does not own retries
     // =========================================================================
 
-    /// Verifies that maxRetries=0 is rejected with a clear error.
-    @Test func withTransaction_zeroMaxRetries_throws() async throws {
+    /// Verifies that legacy maxRetries no longer gates the backend convenience.
+    @Test func withTransaction_zeroMaxRetries_stillRunsOnce() async throws {
         guard let host = ProcessInfo.processInfo.environment["POSTGRES_TEST_HOST"] else {
             throw PostgreSQLTestSkipError()
         }
@@ -1096,15 +1096,8 @@ struct TransactionRunnerPatternTests {
         let engine = try await PostgreSQLStorageEngine(configuration: config)
         defer { engine.shutdown() }
 
-        do {
-            try await engine.withTransaction { _ in }
-            Issue.record("Expected withTransaction to throw for maxRetries=0")
-        } catch let error as StorageError {
-            guard case .invalidOperation(let message) = error else {
-                Issue.record("Expected invalidOperation, got \(error)")
-                return
-            }
-            #expect(message.contains("maxRetries"))
+        try await engine.withTransaction { tx in
+            tx.setValue([1], for: [0xFA, 0x01])
         }
     }
 

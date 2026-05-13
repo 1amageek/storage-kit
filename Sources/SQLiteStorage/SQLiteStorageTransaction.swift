@@ -196,11 +196,16 @@ public final class SQLiteStorageTransaction: Transaction, Sendable {
             defer { releaseLock() }
             do {
                 try flushWriteBuffer()
-                try connection.execute("COMMIT")
+                try connection.execute("COMMIT", operation: .commit)
                 _state.withLock { $0.committed = true }
-            } catch {
-                try? connection.execute("ROLLBACK")
-                throw error
+            } catch let originalError {
+                do {
+                    try connection.execute("ROLLBACK", operation: .rollback)
+                } catch {
+                    // Preserve the original commit/write error. Rollback failure is
+                    // secondary because the transaction lock is still released below.
+                }
+                throw originalError
             }
         } else {
             // Nested transaction: flush buffer only (writes become part of parent TX)
@@ -220,7 +225,11 @@ public final class SQLiteStorageTransaction: Transaction, Sendable {
 
         if lock != nil {
             // Top-level transaction: ROLLBACK and release lock
-            try? connection.execute("ROLLBACK")
+            do {
+                try connection.execute("ROLLBACK", operation: .rollback)
+            } catch {
+                // Cancellation is best-effort because Transaction.cancel() cannot throw.
+            }
             releaseLock()
         }
         // Nested transaction: just discard buffer (parent controls ROLLBACK)

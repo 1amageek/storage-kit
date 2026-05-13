@@ -4,7 +4,8 @@ import FoundationDB
 /// FoundationDB backend StorageEngine implementation.
 ///
 /// Wraps FDB's `DatabaseProtocol` and provides StorageKit's unified interface.
-/// Retry logic is based on FDB's `isRetryable` error classification.
+/// Transaction retry is owned by higher-level runners. This engine only creates
+/// transactions and classifies backend errors.
 ///
 /// ## Usage
 /// ```swift
@@ -59,36 +60,33 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
     }
 
     public func createTransaction() throws -> FDBStorageTransaction {
-        let fdbTx = try database.createTransaction()
-        return FDBStorageTransaction(fdbTx)
+        do {
+            let fdbTx = try database.createTransaction()
+            return FDBStorageTransaction(fdbTx)
+        } catch let error as FDBError {
+            throw FDBStorageTransaction.convertFDBError(error, operation: .beginTransaction)
+        } catch {
+            throw FDBStorageTransaction.convertBackendError(error, operation: .beginTransaction)
+        }
     }
 
     public func withTransaction<T: Sendable>(
         _ operation: (any Transaction) async throws -> T
     ) async throws -> T {
-        let maxRetries = 100
-        for attempt in 0..<maxRetries {
-            let tx = try createTransaction()
+        let tx = try createTransaction()
+        return try await ActiveTransactionScope.$current.withValue(tx) {
             do {
                 let result = try await operation(tx)
                 try await tx.commit()
                 return result
-            } catch let error as StorageError where error.isRetryable {
-                // StorageError retryable (converted from FDBError in commit/other ops)
+            } catch let error as FDBError {
                 tx.cancel()
-                if attempt < maxRetries - 1 { continue }
-                throw StorageError.backendError("Max retries exceeded: \(error)")
-            } catch let error as FDBError where error.isRetryable {
-                // Raw FDBError that escaped conversion (e.g. from user code calling fdbTransaction directly)
-                tx.cancel()
-                if attempt < maxRetries - 1 { continue }
-                throw StorageError.backendError("Max retries exceeded: \(error.description)")
+                throw FDBStorageTransaction.convertFDBError(error, operation: .commit)
             } catch {
                 tx.cancel()
                 throw error
             }
         }
-        throw StorageError.transactionTooOld
     }
 
     public var directoryService: any DirectoryService {

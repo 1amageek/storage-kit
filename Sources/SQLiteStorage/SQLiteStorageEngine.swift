@@ -65,7 +65,7 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
             throw StorageError.invalidOperation("Database closed")
         }
         do {
-            try conn.execute("BEGIN IMMEDIATE")
+            try conn.execute("BEGIN IMMEDIATE", operation: .beginTransaction)
         } catch {
             transactionLock.unlock()
             throw error

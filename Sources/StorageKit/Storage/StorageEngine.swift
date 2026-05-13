@@ -1,7 +1,7 @@
 /// Abstract protocol for KV storage backends.
 ///
 /// Each backend (FoundationDB, SQLite, InMemory) conforms to this protocol.
-/// Provides transaction creation and execution with retry logic.
+/// Provides transaction creation and low-level execution hooks.
 ///
 /// ## Initialization
 ///
@@ -27,14 +27,6 @@ public protocol StorageEngine: Sendable {
     /// Create a new transaction.
     func createTransaction() throws -> TransactionType
 
-    /// Execute a transaction with retry logic.
-    ///
-    /// Automatically retries on transaction conflict.
-    /// Automatically commits when the closure completes successfully.
-    func withTransaction<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
-    ) async throws -> T
-
     /// Hierarchical namespace management service.
     ///
     /// Higher-level frameworks (e.g. database-kit) call this property to resolve
@@ -51,15 +43,15 @@ public protocol StorageEngine: Sendable {
     /// Default implementation is a no-op.
     func shutdown()
 
-    /// Execute an operation in auto-commit mode (no explicit BEGIN/COMMIT).
+    /// Execute a low-level operation in auto-commit mode (no explicit BEGIN/COMMIT).
     ///
     /// Each SQL statement commits individually via PostgreSQL's default
     /// auto-commit behavior. This eliminates 2 round-trips (BEGIN + COMMIT)
     /// compared to `withTransaction()`.
     ///
     /// Suitable for:
-    /// - Single read operations (no transactional guarantee needed)
-    /// - Single write operations (atomicity via single SQL statement)
+    /// - Single read operations that do not need a transaction runner
+    /// - Backend-specific low-level probes
     ///
     /// NOT suitable for:
     /// - Multi-statement operations requiring atomicity
@@ -79,7 +71,28 @@ extension StorageEngine {
 
     public func shutdown() {}
 
-    /// Default: falls back to `withTransaction()`.
+    /// Execute a transaction once.
+    ///
+    /// Automatically commits when the closure completes successfully.
+    /// Higher-level frameworks own retry policy and should create a fresh
+    /// transaction for each attempt.
+    public func withTransaction<T: Sendable>(
+        _ operation: (any Transaction) async throws -> T
+    ) async throws -> T {
+        let transaction = try createTransaction()
+        return try await ActiveTransactionScope.$current.withValue(transaction) {
+            do {
+                let result = try await operation(transaction)
+                try await transaction.commit()
+                return result
+            } catch {
+                transaction.cancel()
+                throw error
+            }
+        }
+    }
+
+    /// Default: runs the operation through a one-shot transaction.
     public func withAutoCommit<T: Sendable>(
         _ operation: (any Transaction) async throws -> T
     ) async throws -> T {

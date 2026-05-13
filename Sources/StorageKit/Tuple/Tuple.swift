@@ -80,7 +80,11 @@ public struct Tuple: Sendable, Hashable, Equatable {
     ///
     /// Prefer `element(at:)` when error details are important.
     public subscript(index: Int) -> (any TupleElement)? {
-        try? element(at: index)
+        do {
+            return try element(at: index)
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Pack

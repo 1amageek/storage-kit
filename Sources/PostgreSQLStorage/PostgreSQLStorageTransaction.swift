@@ -191,7 +191,7 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
                 self.currentConnection = nil
                 _state.withLock { $0.connectionAcquired = false }
                 releaseConnection()
-                throw error
+                throw mapBackendError(error, operation: .beginTransaction)
             }
         }
 
@@ -202,6 +202,21 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
     private func releaseConnection() {
         connectionRelease?.resume()
         connectionRelease = nil
+    }
+
+    private func mapBackendError(_ error: any Error, operation: StorageOperation) -> StorageError {
+        PostgreSQLStorageEngine.mapError(error, operation: operation)
+    }
+
+    private func rollbackBestEffort(connection conn: PostgresConnection, reason: String) async {
+        do {
+            try await conn.query("ROLLBACK", logger: logger)
+        } catch {
+            logger.warning("PostgreSQL rollback failed", metadata: [
+                "reason": "\(reason)",
+                "error": "\(error)"
+            ])
+        }
     }
 
     // MARK: - Read
@@ -229,15 +244,21 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
             }
         }
 
-        let conn = try await ensureConnection()
+        do {
+            let conn = try await ensureConnection()
 
-        let keyBuf = ByteBuffer(bytes: key)
-        let rows = try await conn.query(
-            "SELECT value FROM kv_store WHERE key = \(keyBuf)",
-            logger: logger
-        )
-        for try await (value,) in rows.decode(ByteBuffer.self) {
-            return Array(value.readableBytesView)
+            let keyBuf = ByteBuffer(bytes: key)
+            let rows = try await conn.query(
+                "SELECT value FROM kv_store WHERE key = \(keyBuf)",
+                logger: logger
+            )
+            for try await (value,) in rows.decode(ByteBuffer.self) {
+                return Array(value.readableBytesView)
+            }
+        } catch let error as StorageError {
+            throw error
+        } catch {
+            throw mapBackendError(error, operation: .read)
         }
         return nil
     }
@@ -262,40 +283,43 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
         let logger = self.logger
 
         return PostgreSQLRangeResult { [self] in
+            do {
+                let conn = try await self.ensureConnection()
 
-            let conn = try await self.ensureConnection()
+                // Flush write buffer before range scan
+                try await self.flushWriteBuffer(connection: conn)
 
-            // Flush write buffer before range scan
-            try await self.flushWriteBuffer(connection: conn)
+                let order = reverse ? "DESC" : "ASC"
+                let beginBuf = ByteBuffer(bytes: beginKey)
+                let endBuf = ByteBuffer(bytes: endKey)
 
-            let order = reverse ? "DESC" : "ASC"
-            let beginBuf = ByteBuffer(bytes: beginKey)
-            let endBuf = ByteBuffer(bytes: endKey)
+                // Build SQL with safe parameter binding.
+                let sql: String
+                if limit > 0 {
+                    sql = "SELECT key, value FROM kv_store WHERE key \(beginOp) $1 AND key \(endOp) $2 ORDER BY key \(order) LIMIT \(limit)"
+                } else {
+                    sql = "SELECT key, value FROM kv_store WHERE key \(beginOp) $1 AND key \(endOp) $2 ORDER BY key \(order)"
+                }
 
-            // Build SQL with safe parameter binding
-            // Operators are controlled strings from resolveBeginForSQL/resolveEndForSQL
-            // (always one of: >=, >, <, <=) — safe to embed in SQL
-            let sql: String
-            if limit > 0 {
-                sql = "SELECT key, value FROM kv_store WHERE key \(beginOp) $1 AND key \(endOp) $2 ORDER BY key \(order) LIMIT \(limit)"
-            } else {
-                sql = "SELECT key, value FROM kv_store WHERE key \(beginOp) $1 AND key \(endOp) $2 ORDER BY key \(order)"
+                var bindings = PostgresBindings()
+                bindings.append(beginBuf, context: .default)
+                bindings.append(endBuf, context: .default)
+                let query = PostgresQuery(unsafeSQL: sql, binds: bindings)
+
+                let rows = try await conn.query(query, logger: logger)
+                var results: [(Bytes, Bytes)] = []
+                for try await (keyBuf, valueBuf) in rows.decode((ByteBuffer, ByteBuffer).self) {
+                    results.append((
+                        Array(keyBuf.readableBytesView),
+                        Array(valueBuf.readableBytesView)
+                    ))
+                }
+                return results
+            } catch let error as StorageError {
+                throw error
+            } catch {
+                throw self.mapBackendError(error, operation: .rangeRead)
             }
-
-            var bindings = PostgresBindings()
-            bindings.append(beginBuf, context: .default)
-            bindings.append(endBuf, context: .default)
-            let query = PostgresQuery(unsafeSQL: sql, binds: bindings)
-
-            let rows = try await conn.query(query, logger: logger)
-            var results: [(Bytes, Bytes)] = []
-            for try await (keyBuf, valueBuf) in rows.decode((ByteBuffer, ByteBuffer).self) {
-                results.append((
-                    Array(keyBuf.readableBytesView),
-                    Array(valueBuf.readableBytesView)
-                ))
-            }
-            return results
         }
     }
 
@@ -373,9 +397,9 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
                     try await conn.query("COMMIT", logger: logger)
                     _state.withLock { $0.committed = true }
                 } catch {
-                    _ = try? await conn.query("ROLLBACK", logger: logger)
+                    await rollbackBestEffort(connection: conn, reason: "commit")
                     if wasLazilyAcquired { releaseConnection() }
-                    throw error
+                    throw mapBackendError(error, operation: .commit)
                 }
                 if wasLazilyAcquired { releaseConnection() }
             } else if hasWrites {
@@ -386,9 +410,9 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
                     try await conn.query("COMMIT", logger: logger)
                     _state.withLock { $0.committed = true }
                 } catch {
-                    _ = try? await conn.query("ROLLBACK", logger: logger)
+                    await rollbackBestEffort(connection: conn, reason: "commit")
                     releaseConnection()
-                    throw error
+                    throw mapBackendError(error, operation: .commit)
                 }
                 releaseConnection()
             } else {
@@ -415,7 +439,7 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
         // connection while ROLLBACK is still in-flight.
         if !isNested, let conn = currentConnection, client != nil {
             Task { [self] in
-                _ = try? await conn.query("ROLLBACK", logger: self.logger)
+                await self.rollbackBestEffort(connection: conn, reason: "cancel")
                 self.releaseConnection()
             }
         }
@@ -433,16 +457,22 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
                 try await conn.query("COMMIT", logger: logger)
             }
             _state.withLock { $0.committed = true }
+        } catch let error as StorageError {
+            _state.withLock { $0.cancelled = true }
+            if !skipCommitStatement {
+                await rollbackBestEffort(connection: conn, reason: "commitInternal")
+            }
+            throw error
         } catch {
             _state.withLock { $0.cancelled = true }
             if !skipCommitStatement {
-                _ = try? await conn.query("ROLLBACK", logger: logger)
+                await rollbackBestEffort(connection: conn, reason: "commitInternal")
             }
-            throw error
+            throw mapBackendError(error, operation: .commit)
         }
     }
 
-    func rollbackInternal(connection conn: PostgresConnection) async throws {
+    func rollbackInternal(connection conn: PostgresConnection) async {
         let shouldRollback = _state.withLock { state -> Bool in
             guard !state.committed, !state.cancelled else { return false }
             state.writeBuffer.removeAll()
@@ -450,7 +480,7 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
             return true
         }
         guard shouldRollback else { return }
-        _ = try? await conn.query("ROLLBACK", logger: logger)
+        await rollbackBestEffort(connection: conn, reason: "rollbackInternal")
     }
 
     // MARK: - Write Buffer Flush
@@ -463,40 +493,46 @@ public final class PostgreSQLStorageTransaction: Transaction, @unchecked Sendabl
         }
         guard !ops.isEmpty else { return }
 
-        for op in ops {
-            switch op {
-            case .set(let key, let value):
-                let keyBuf = ByteBuffer(bytes: key)
-                let valueBuf = ByteBuffer(bytes: value)
-                try await conn.query(
-                    """
-                    INSERT INTO kv_store (key, value) VALUES (\(keyBuf), \(valueBuf))
-                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-                    """,
-                    logger: logger
-                )
+        do {
+            for op in ops {
+                switch op {
+                case .set(let key, let value):
+                    let keyBuf = ByteBuffer(bytes: key)
+                    let valueBuf = ByteBuffer(bytes: value)
+                    try await conn.query(
+                        """
+                        INSERT INTO kv_store (key, value) VALUES (\(keyBuf), \(valueBuf))
+                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                        """,
+                        logger: logger
+                    )
 
-            case .clear(let key):
-                let keyBuf = ByteBuffer(bytes: key)
-                try await conn.query(
-                    "DELETE FROM kv_store WHERE key = \(keyBuf)",
-                    logger: logger
-                )
+                case .clear(let key):
+                    let keyBuf = ByteBuffer(bytes: key)
+                    try await conn.query(
+                        "DELETE FROM kv_store WHERE key = \(keyBuf)",
+                        logger: logger
+                    )
 
-            case .clearRange(let begin, let end):
-                let beginBuf = ByteBuffer(bytes: begin)
-                let endBuf = ByteBuffer(bytes: end)
-                try await conn.query(
-                    "DELETE FROM kv_store WHERE key >= \(beginBuf) AND key < \(endBuf)",
-                    logger: logger
-                )
+                case .clearRange(let begin, let end):
+                    let beginBuf = ByteBuffer(bytes: begin)
+                    let endBuf = ByteBuffer(bytes: end)
+                    try await conn.query(
+                        "DELETE FROM kv_store WHERE key >= \(beginBuf) AND key < \(endBuf)",
+                        logger: logger
+                    )
 
-            case .atomic(let key, let param, let mutationType):
-                try await executeAtomicOp(
-                    connection: conn, key: key, param: param,
-                    mutationType: mutationType
-                )
+                case .atomic(let key, let param, let mutationType):
+                    try await executeAtomicOp(
+                        connection: conn, key: key, param: param,
+                        mutationType: mutationType
+                    )
+                }
             }
+        } catch let error as StorageError {
+            throw error
+        } catch {
+            throw mapBackendError(error, operation: .write)
         }
     }
 

@@ -81,7 +81,13 @@ public struct Subspace: Sendable, Hashable, Equatable {
         if prefix.isEmpty {
             end = [0xFF]
         } else {
-            end = (try? strinc(prefix)) ?? (prefix + [0xFF])
+            do {
+                end = try strinc(prefix)
+            } catch TupleError.cannotIncrementKey {
+                end = prefix + [0xFF]
+            } catch {
+                end = prefix + [0xFF]
+            }
         }
         return (begin: begin, end: end)
     }

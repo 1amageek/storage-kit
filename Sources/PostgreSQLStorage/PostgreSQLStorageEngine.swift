@@ -18,7 +18,8 @@ import Synchronization
 /// This is the path used by database-framework's `TransactionRunner`.
 ///
 /// `withTransaction()` is a convenience that manages the connection lifecycle
-/// automatically (BEGIN → operation → COMMIT/ROLLBACK).
+/// automatically (BEGIN → operation → COMMIT/ROLLBACK). Retry is owned by
+/// higher-level transaction runners.
 ///
 /// ## Nested Transaction Safety
 ///
@@ -126,60 +127,37 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
             return try await operation(existing)
         }
 
-        let maxRetries = configuration.maxRetries
-        guard maxRetries > 0 else {
-            throw StorageError.invalidOperation("maxRetries must be greater than 0")
-        }
-        for attempt in 0..<maxRetries {
-            do {
-                let result: T = try await client.withConnection { [configuration, logger] conn in
-                    // BEGIN transaction
-                    try await conn.query(
-                        PostgresQuery(unsafeSQL: configuration.beginStatement),
-                        logger: logger
-                    )
+        do {
+            return try await client.withConnection { [configuration, logger] conn in
+                try await conn.query(
+                    PostgresQuery(unsafeSQL: configuration.beginStatement),
+                    logger: logger
+                )
 
-                    let tx = PostgreSQLStorageTransaction(
-                        connection: conn,
-                        isNested: false,
-                        logger: logger
-                    )
+                let tx = PostgreSQLStorageTransaction(
+                    connection: conn,
+                    isNested: false,
+                    logger: logger
+                )
 
-                    return try await ActiveTransactionScope.$current.withValue(tx) {
-                        do {
-                            let result = try await operation(tx)
-                            try await tx.commitInternal(connection: conn)
-                            return result
-                        } catch {
-                            try await tx.rollbackInternal(connection: conn)
-                            throw error
-                        }
+                return try await ActiveTransactionScope.$current.withValue(tx) {
+                    do {
+                        let result = try await operation(tx)
+                        try await tx.commitInternal(connection: conn)
+                        return result
+                    } catch {
+                        await tx.rollbackInternal(connection: conn)
+                        throw error
                     }
                 }
-                return result
-            } catch let error as StorageError where error.isRetryable {
-                if attempt < maxRetries - 1 { continue }
-                throw StorageError.backendError(
-                    "Max retries (\(maxRetries)) exceeded: \(error)"
-                )
-            } catch {
-                // Only map PostgreSQL-specific errors for retry logic.
-                // User-thrown errors pass through unchanged.
-                guard error is PSQLError else {
-                    throw error
-                }
-                let mapped = Self.mapError(error)
-                if mapped.isRetryable, attempt < maxRetries - 1 { continue }
-                if mapped.isRetryable {
-                    throw StorageError.backendError(
-                        "Max retries (\(maxRetries)) exceeded: \(error)"
-                    )
-                }
-                throw mapped
             }
+        } catch let error as StorageError {
+            throw error
+        } catch let error as PSQLError {
+            throw Self.mapError(error)
+        } catch {
+            throw error
         }
-        // Unreachable when maxRetries > 0 — all loop iterations either return or throw.
-        throw StorageError.backendError("Transaction failed after \(maxRetries) attempts")
     }
 
     /// Execute an operation in auto-commit mode (no BEGIN/COMMIT).
@@ -230,8 +208,9 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     /// Retryable SQL states:
     /// - 40001: serialization_failure (SERIALIZABLE conflict)
     /// - 40P01: deadlock_detected
-    /// - 23505: unique_violation (mapped as conflict for retry)
-    static func mapError(_ error: any Error) -> StorageError {
+    /// Non-retryable SQL states:
+    /// - 23505: unique_violation
+    static func mapError(_ error: any Error, operation: StorageOperation = .unknown) -> StorageError {
         // Already a StorageError — pass through
         if let storageError = error as? StorageError {
             return storageError
@@ -243,19 +222,55 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                 let sqlState = serverInfo[.sqlState]
                 switch sqlState {
                 case "40001":
-                    return .transactionConflict
+                    return StorageError(
+                        code: .transactionConflict,
+                        operation: operation,
+                        backend: .postgreSQL,
+                        message: "PostgreSQL serialization failure",
+                        underlyingDescription: serverInfo[.message]
+                    )
                 case "40P01":
-                    return .transactionConflict
+                    return StorageError(
+                        code: .transactionConflict,
+                        operation: operation,
+                        backend: .postgreSQL,
+                        message: "PostgreSQL deadlock detected",
+                        underlyingDescription: serverInfo[.message]
+                    )
                 case "23505":
-                    return .transactionConflict
+                    return StorageError(
+                        code: .backendFailure,
+                        operation: operation,
+                        backend: .postgreSQL,
+                        message: "PostgreSQL unique constraint violation",
+                        underlyingDescription: serverInfo[.message]
+                    )
                 default:
                     let message = serverInfo[.message] ?? psqlError.localizedDescription
-                    return .backendError("PostgreSQL error (\(sqlState ?? "unknown")): \(message)")
+                    return StorageError(
+                        code: .backendFailure,
+                        operation: operation,
+                        backend: .postgreSQL,
+                        message: "PostgreSQL error",
+                        underlyingDescription: "sqlState=\(sqlState ?? "unknown"): \(message)"
+                    )
                 }
             }
-            return .backendError("PostgreSQL error: \(psqlError.localizedDescription)")
+            return StorageError(
+                code: .backendFailure,
+                operation: operation,
+                backend: .postgreSQL,
+                message: "PostgreSQL error",
+                underlyingDescription: psqlError.localizedDescription
+            )
         }
 
-        return .backendError("PostgreSQL error: \(error.localizedDescription)")
+        return StorageError(
+            code: .backendFailure,
+            operation: operation,
+            backend: .postgreSQL,
+            message: "PostgreSQL error",
+            underlyingDescription: error.localizedDescription
+        )
     }
 }

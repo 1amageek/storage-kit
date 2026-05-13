@@ -38,7 +38,7 @@ public enum PostgreSQLIsolationLevel: String, Sendable {
 ///
 /// Default is `.serializable` to match FoundationDB's transaction guarantees.
 /// This means concurrent conflicting transactions will receive serialization
-/// failures (40001), which the engine retries automatically.
+/// failures (40001), which higher-level transaction runners can retry.
 ///
 /// Only lower the isolation level if you understand the consistency trade-offs:
 /// ```swift
@@ -67,12 +67,10 @@ public struct PostgreSQLConfiguration: Sendable {
     /// Derived from `isolationLevel`.
     var beginStatement: String { isolationLevel.rawValue }
 
-    /// Maximum retry attempts for transient errors in `withTransaction`.
+    /// Legacy retry setting retained for configuration compatibility.
     ///
-    /// Note: When used via database-framework's `TransactionRunner`,
-    /// `TransactionConfiguration.retryLimit` takes precedence for the
-    /// outer retry loop. This value controls the engine-level retry
-    /// in `withTransaction()` only.
+    /// Storage backends no longer own retry loops; higher-level transaction
+    /// runners should use their own retry policy.
     public var maxRetries: Int
 
     /// TCP connection configuration.

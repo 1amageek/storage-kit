@@ -6,6 +6,39 @@ import Foundation
 @Suite("SQLiteStorageEngine Tests")
 struct SQLiteStorageEngineTests {
 
+    @Test func beginTransaction_busyIsRetryable() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("storage-kit-\(UUID().uuidString).sqlite")
+            .path
+        defer {
+            do {
+                try FileManager.default.removeItem(atPath: path)
+            } catch {
+                // Temporary-file cleanup is best effort in tests.
+            }
+        }
+
+        let first = try SQLiteStorageEngine(configuration: .file(path))
+        let second = try SQLiteStorageEngine(configuration: .file(path))
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+
+        let held = try first.createTransaction()
+        defer { held.cancel() }
+
+        do {
+            _ = try second.createTransaction()
+            Issue.record("Expected SQLite busy error")
+        } catch let error as StorageError {
+            #expect(error.code == .transactionBusy)
+            #expect(error.backend == .sqlite)
+            #expect(error.operation == .beginTransaction)
+            #expect(error.isRetryable == true)
+        }
+    }
+
     // =========================================================================
     // MARK: - Write Buffer Reverse Scan
     //
@@ -419,7 +452,7 @@ struct SQLiteStorageEngineTests {
             try await tx.commit()
             Issue.record("Expected error")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -458,7 +491,7 @@ struct SQLiteStorageEngineTests {
             _ = try await tx.getValue(for: [0x01])
             Issue.record("Expected error")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -476,7 +509,7 @@ struct SQLiteStorageEngineTests {
             }
             Issue.record("Expected error")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
@@ -544,7 +577,7 @@ struct SQLiteStorageEngineTests {
             _ = try engine.createTransaction()
             Issue.record("Expected error after close")
         } catch let error as StorageError {
-            guard case .invalidOperation = error else {
+            guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
             }
