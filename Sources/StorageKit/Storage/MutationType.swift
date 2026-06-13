@@ -14,9 +14,13 @@ public enum MutationType: Sendable {
     case bitAnd
     /// Bitwise XOR.
     case bitXor
-    /// Set to maximum value (lexicographic byte comparison).
+    /// Set to the maximum of the existing and given values, compared as
+    /// little-endian unsigned integers (consistent with `add`). A missing value
+    /// is treated as zero. See `MutationType.apply(to:param:)`.
     case max
-    /// Set to minimum value (lexicographic byte comparison).
+    /// Set to the minimum of the existing and given values, compared as
+    /// little-endian unsigned integers (consistent with `add`). A missing value
+    /// is set to the given value directly. See `MutationType.apply(to:param:)`.
     case min
     /// Compare and clear.
     case compareAndClear

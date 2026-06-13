@@ -11,8 +11,10 @@ import Synchronization
 ///
 /// SQLite does not support concurrent transactions on a single connection.
 /// This engine uses `ActiveTransactionScope` (TaskLocal) to detect nested
-/// `withTransaction()` / `createTransaction()` calls and reuse the existing
-/// transaction instead of acquiring a new lock (which would deadlock).
+/// calls without acquiring a second writer lock. Nested `withTransaction()`
+/// reuses the active transaction. Nested `createTransaction()` returns a
+/// buffered child transaction whose commit merges into the parent and whose
+/// cancel only discards child writes.
 ///
 /// ## Usage
 /// ```swift
@@ -45,32 +47,26 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     public typealias TransactionType = SQLiteStorageTransaction
 
     private let transactionLock = NSLock()
-    private let _connection: Mutex<SQLiteConnection?>
+    private let connection: SQLiteConnectionHandle
 
     public init(configuration: Configuration) throws {
-        let conn = try SQLiteConnection(path: configuration.path)
-        try conn.initialize()
-        self._connection = Mutex(conn)
+        self.connection = try SQLiteConnectionHandle(path: configuration.path)
     }
 
     public func createTransaction() throws -> SQLiteStorageTransaction {
-        // Detect nested call via TaskLocal — return child transaction (no lock, no BEGIN)
+        // Detect nested call via TaskLocal and return a buffered child.
         if let existing = ActiveTransactionScope.current as? SQLiteStorageTransaction {
-            return SQLiteStorageTransaction(connection: existing.connection, lock: nil)
+            return SQLiteStorageTransaction(parent: existing)
         }
 
         transactionLock.lock()
-        guard let conn = _connection.withLock({ $0 }) else {
-            transactionLock.unlock()
-            throw StorageError.invalidOperation("Database closed")
-        }
         do {
-            try conn.execute("BEGIN IMMEDIATE", operation: .beginTransaction)
+            try connection.execute("BEGIN IMMEDIATE", operation: .beginTransaction)
         } catch {
             transactionLock.unlock()
             throw error
         }
-        return SQLiteStorageTransaction(connection: conn, lock: transactionLock)
+        return SQLiteStorageTransaction(connection: connection, lock: transactionLock)
     }
 
     public func withTransaction<T: Sendable>(
@@ -98,10 +94,7 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     public func close() {
         transactionLock.lock()
         defer { transactionLock.unlock() }
-        _connection.withLock { conn in
-            conn?.close()
-            conn = nil
-        }
+        connection.close()
     }
 
     public func shutdown() {

@@ -76,29 +76,89 @@ struct TransactionDefaultsTests {
     }
 
     // =========================================================================
-    // MARK: - Atomic Operations Default
+    // MARK: - Atomic Operations (InMemory wiring)
+    //
+    // InMemoryTransaction routes atomicOp through MutationType.apply in all
+    // three code paths: getValue (read-your-writes replay), getRange (replay),
+    // and commit (staged mutation). The arithmetic itself is covered
+    // exhaustively by MutationTypeApplyTests; these tests confirm the wiring.
     // =========================================================================
 
-    @Test func atomicOp_isNoOp() async throws {
+    @Test func atomicAdd_visibleViaReadYourWrites() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         tx.setValue([10], for: [0x01])
+        tx.atomicOp(key: [0x01], param: [5], mutationType: .add)
 
-        // All mutation types should be accepted without error (no-op)
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .add)
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .bitOr)
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .bitAnd)
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .bitXor)
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .max)
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .min)
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .compareAndClear)
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .setVersionstampedKey)
+        // getValue replays the buffer, so the addition is visible pre-commit.
+        let value = try await tx.getValue(for: [0x01])
+        #expect(value == [15])
+        try await tx.commit()
+    }
+
+    @Test func atomicAdd_onMissingKeyTreatsExistingAsZero() async throws {
+        let engine = InMemoryEngine()
+        let tx = try engine.createTransaction()
+        // No prior setValue: existing is nil, treated as zero.
+        tx.atomicOp(key: [0x01], param: [7], mutationType: .add)
+        let value = try await tx.getValue(for: [0x01])
+        #expect(value == [7])
+        try await tx.commit()
+    }
+
+    @Test func atomicAdd_persistsAfterCommit() async throws {
+        let engine = InMemoryEngine()
+
+        try await engine.withTransaction { tx in
+            tx.setValue([10], for: [0x01])
+        }
+        try await engine.withTransaction { tx in
+            tx.atomicOp(key: [0x01], param: [5], mutationType: .add)
+        }
+
+        // A fresh transaction sees the committed, mutated value.
+        let tx = try engine.createTransaction()
+        let value = try await tx.getValue(for: [0x01])
+        #expect(value == [15])
+        try await tx.commit()
+    }
+
+    @Test func atomicAdd_visibleViaGetRange() async throws {
+        let engine = InMemoryEngine()
+        let tx = try engine.createTransaction()
+        tx.setValue([10], for: [0x01])
+        tx.atomicOp(key: [0x01], param: [5], mutationType: .add)
+
+        // getRange replays the buffer, so the addition is visible in results.
+        let results = try await tx.collectRange(begin: [0x01], end: [0x02])
+        #expect(results.count == 1)
+        #expect(results[0].1 == [15])
+        try await tx.commit()
+    }
+
+    @Test func atomicCompareAndClear_removesMatchingKey() async throws {
+        let engine = InMemoryEngine()
+        let tx = try engine.createTransaction()
+        tx.setValue([42], for: [0x01])
+        tx.atomicOp(key: [0x01], param: [42], mutationType: .compareAndClear)
+
+        let value = try await tx.getValue(for: [0x01])
+        #expect(value == nil)
+        try await tx.commit()
+    }
+
+    @Test func atomicVersionstamp_throwsOnCommit() async throws {
+        let engine = InMemoryEngine()
+        let tx = try engine.createTransaction()
+        tx.setValue([1], for: [0x01])
         tx.atomicOp(key: [0x01], param: [0x01], mutationType: .setVersionstampedValue)
 
-        // Value should remain unchanged (atomicOp is no-op for InMemory)
-        let value = try await tx.getValue(for: [0x01])
-        #expect(value == [10])
-        try await tx.commit()
+        // Versionstamp mutations cannot be computed outside FDB; commit throws
+        // and the store is left untouched (staged-then-swap guarantees this).
+        await #expect(throws: StorageError.self) {
+            try await tx.commit()
+        }
+        #expect(engine.count == 0)
     }
 
     // =========================================================================

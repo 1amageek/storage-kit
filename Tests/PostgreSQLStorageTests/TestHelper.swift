@@ -14,6 +14,16 @@ enum AllPostgreSQLTests {}
 /// Shared engine factory for PostgreSQL tests.
 enum PostgreSQLTestHelper {
 
+    /// Whether a PostgreSQL test host is configured in the environment.
+    ///
+    /// DB-requiring suites gate on this via `.enabled(if:)` so they are cleanly
+    /// skipped — not failed — when `POSTGRES_TEST_HOST` is unset. Swift Testing
+    /// treats a thrown error as a failure, so a skip cannot be expressed by
+    /// throwing; it must be a condition trait evaluated before the test runs.
+    static var isAvailable: Bool {
+        ProcessInfo.processInfo.environment["POSTGRES_TEST_HOST"] != nil
+    }
+
     /// Create a fresh engine. Each call creates a new engine and connection pool.
     ///
     /// NOTE: Callers MUST call `engine.shutdown()` when done to release the pool.

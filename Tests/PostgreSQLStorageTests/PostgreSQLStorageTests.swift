@@ -20,7 +20,7 @@ import Foundation
 ///   postgres:16
 /// ```
 extension AllPostgreSQLTests {
-@Suite("PostgreSQLStorage Tests", .serialized)
+@Suite("PostgreSQLStorage Tests", .serialized, .enabled(if: PostgreSQLTestHelper.isAvailable))
 struct PostgreSQLStorageTests {
 
     private func makeEngine() async throws -> PostgreSQLStorageEngine {
@@ -601,16 +601,23 @@ struct PostgreSQLStorageTests {
         #expect(rolledBackValue == nil)
     }
 
-    @Test func writesAfterCancelAreSilentlyIgnored() async throws {
+    @Test func cancelledTransactionRejectsCommitAndDropsWrites() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        try await engine.withTransaction { tx in
-            tx.cancel()
-            tx.setValue([42], for: [0x01])
+        do {
+            try await engine.withTransaction { tx in
+                tx.cancel()
+                tx.setValue([42], for: [0x01])
+            }
+            Issue.record("Expected cancelled transaction commit to throw")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+            #expect(error.operation == .commit)
+        } catch {
+            Issue.record("Expected StorageError")
         }
 
-        // Value should not be visible in next transaction
         let value = try await engine.withTransaction { tx in
             try await tx.getValue(for: [0x01])
         }
@@ -915,6 +922,15 @@ struct PostgreSQLStorageTests {
         engine.shutdown() // Second call should not crash
     }
 
+    @Test func readinessCheckVerifiesConnectionAndTable() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let report = try await engine.checkReadiness()
+        #expect(report.tableName == "kv_store")
+        #expect(report.schemaManagement == .createIfNeeded)
+    }
+
     // =========================================================================
     // MARK: - DirectoryService
     // =========================================================================
@@ -1152,32 +1168,45 @@ struct PostgreSQLStorageTests {
         }
     }
 
-    @Test func atomicOp_unsupportedTypesThrow() async throws {
+    @Test func atomicOp_maxMinBitwiseApply() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
+
+        // The PostgreSQL backend implements every non-versionstamp mutation via a
+        // row-locked read-modify-write that delegates to MutationType.apply. This
+        // confirms that wiring for .max / .min / .bitOr; the arithmetic itself is
+        // covered by MutationTypeApplyTests.
 
         try await engine.withTransaction { tx in
             tx.setValue([42], for: [0x01])
         }
 
-        // .max, .min, .bitOr etc. are not implemented — should throw on commit
-        do {
-            try await engine.withTransaction { tx in
-                tx.atomicOp(key: [0x01], param: [0xFF], mutationType: .max)
-            }
-            Issue.record("Expected error for unsupported atomicOp")
-        } catch let error as StorageError {
-            guard error.code == .invalidOperation else {
-                Issue.record("Expected invalidOperation, got \(error)")
-                return
-            }
+        // .max: existing 42 vs param 255 (little-endian) -> 255 wins.
+        try await engine.withTransaction { tx in
+            tx.atomicOp(key: [0x01], param: [0xFF], mutationType: .max)
         }
-
-        // Value should remain unchanged (transaction rolled back)
-        let result = try await engine.withTransaction { tx in
+        let maxResult = try await engine.withTransaction { tx in
             try await tx.getValue(for: [0x01])
         }
-        #expect(result == [42])
+        #expect(maxResult == [0xFF])
+
+        // .min: existing 255 vs param 42 -> 42 wins.
+        try await engine.withTransaction { tx in
+            tx.atomicOp(key: [0x01], param: [42], mutationType: .min)
+        }
+        let minResult = try await engine.withTransaction { tx in
+            try await tx.getValue(for: [0x01])
+        }
+        #expect(minResult == [42])
+
+        // .bitOr: 0b0010_1010 (42) | 0b0001_0101 (21) = 0b0011_1111 (63).
+        try await engine.withTransaction { tx in
+            tx.atomicOp(key: [0x01], param: [21], mutationType: .bitOr)
+        }
+        let orResult = try await engine.withTransaction { tx in
+            try await tx.getValue(for: [0x01])
+        }
+        #expect(orResult == [63])
     }
 
     @Test func atomicOp_versionstampThrows() async throws {
@@ -1261,6 +1290,58 @@ struct PostgreSQLStorageTests {
             try await collectRange(tx, begin: [prefix, 0x00], end: [prefix + 1])
         }
         #expect(range.count == count)
+    }
+
+    @Test func batchedSetCrossesMaxBindRowsBoundary() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let count = PostgreSQLStorageTransaction.maxBindRows + 1
+        let prefix: UInt8 = 0x51
+
+        try await engine.withTransaction { tx in
+            for i in 0..<count {
+                var key: Bytes = [prefix]
+                key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
+                tx.setValue([UInt8(i % 256)], for: key)
+            }
+        }
+
+        let range = try await engine.withTransaction { tx in
+            try await collectRange(tx, begin: [prefix, 0x00], end: [prefix + 1])
+        }
+        #expect(range.count == count)
+        #expect(range.first?.value == [0x00])
+        #expect(range.last?.value == [UInt8((count - 1) % 256)])
+    }
+
+    @Test func batchedClearCrossesMaxBindRowsBoundary() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let count = PostgreSQLStorageTransaction.maxBindRows + 1
+        let prefix: UInt8 = 0x52
+
+        try await engine.withTransaction { tx in
+            for i in 0..<count {
+                var key: Bytes = [prefix]
+                key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
+                tx.setValue([UInt8(i % 256)], for: key)
+            }
+        }
+
+        try await engine.withTransaction { tx in
+            for i in 0..<count {
+                var key: Bytes = [prefix]
+                key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
+                tx.clear(key: key)
+            }
+        }
+
+        let range = try await engine.withTransaction { tx in
+            try await collectRange(tx, begin: [prefix, 0x00], end: [prefix + 1])
+        }
+        #expect(range.isEmpty)
     }
 }
 } // extension AllPostgreSQLTests

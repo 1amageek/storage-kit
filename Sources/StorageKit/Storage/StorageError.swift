@@ -34,6 +34,13 @@ public struct StorageError: Error, Sendable, LocalizedError, CustomStringConvert
         case transactionConflict = "transaction_conflict"
         case transactionTooOld = "transaction_too_old"
         case transactionBusy = "transaction_busy"
+        /// The connection to the storage backend failed before the transaction
+        /// reached its commit point. Retrying the whole transaction is safe.
+        case connectionFailure = "connection_failure"
+        /// The connection failed while a commit was in flight, so the outcome
+        /// is unknown. Retryable to match FoundationDB's `commit_unknown_result`
+        /// semantics; non-idempotent transactions may be applied twice.
+        case commitUnknownResult = "commit_unknown_result"
         case keyNotFound = "key_not_found"
         case invalidOperation = "invalid_operation"
         case backendFailure = "backend_failure"
@@ -63,7 +70,8 @@ public struct StorageError: Error, Sendable, LocalizedError, CustomStringConvert
 
     public var isRetryable: Bool {
         switch code {
-        case .transactionConflict, .transactionTooOld, .transactionBusy:
+        case .transactionConflict, .transactionTooOld, .transactionBusy,
+             .connectionFailure, .commitUnknownResult:
             return true
         case .keyNotFound, .invalidOperation, .backendFailure, .dataCorruption, .resourceUnavailable:
             return false

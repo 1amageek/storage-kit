@@ -413,9 +413,10 @@ struct SQLiteStorageEngineTests {
     // =========================================================================
     // MARK: - Transaction Lifecycle
     //
-    // SQLite has both `committed` and `cancelled` flags:
-    // - commit: checks !cancelled, checks !committed, flushes, COMMIT, releases lock
-    // - cancel: checks !committed && !cancelled, sets cancelled, ROLLBACK, releases lock
+    // SQLite transactions use a terminal lifecycle:
+    // - commit failure marks the transaction failed and rolls back
+    // - cancelled/failed transactions cannot be reused
+    // - locks are released exactly once
     // =========================================================================
 
     @Test func commitPersists() async throws {
@@ -466,6 +467,44 @@ struct SQLiteStorageEngineTests {
         try await tx.commit()
         // Second commit should return early (guard !committed)
         try await tx.commit()
+    }
+
+    @Test func failedCommitTerminatesTransactionAndPreventsDoubleApply() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+        let tx = try engine.createTransaction()
+
+        tx.setValue([0xAA], for: [0x01])
+        tx.atomicOp(key: [0x02], param: [0x00], mutationType: .setVersionstampedKey)
+
+        do {
+            try await tx.commit()
+            Issue.record("Expected commit to fail")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+        }
+
+        do {
+            _ = try await tx.getValue(for: [0x01])
+            Issue.record("Expected failed transaction to reject reads")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+        }
+
+        tx.setValue([0xBB], for: [0x03])
+
+        do {
+            try await tx.commit()
+            Issue.record("Expected failed transaction to reject a second commit")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+        }
+
+        let verifier = try engine.createTransaction()
+        let firstValue = try await verifier.getValue(for: [0x01])
+        let laterValue = try await verifier.getValue(for: [0x03])
+        #expect(firstValue == nil)
+        #expect(laterValue == nil)
+        try await verifier.commit()
     }
 
     @Test func cancelAfterCommit_isNoOp() async throws {
@@ -591,7 +630,15 @@ struct SQLiteStorageEngineTests {
     @Test func filePersistence_surviveReopen() async throws {
         let tmpDir = FileManager.default.temporaryDirectory
         let dbPath = tmpDir.appendingPathComponent("test-\(UUID().uuidString).sqlite").path
-        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+        defer {
+            if FileManager.default.fileExists(atPath: dbPath) {
+                do {
+                    try FileManager.default.removeItem(atPath: dbPath)
+                } catch {
+                    Issue.record("Failed to remove SQLite test database: \(error)")
+                }
+            }
+        }
 
         do {
             let engine = try SQLiteStorageEngine(configuration: .file(dbPath))

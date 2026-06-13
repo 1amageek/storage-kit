@@ -6,6 +6,31 @@ import Foundation
 @Suite("SQLite Nested Transaction Tests")
 struct SQLiteNestedTransactionTests {
 
+    private func collectRange(
+        _ tx: some Transaction,
+        begin: Bytes, end: Bytes
+    ) async throws -> [(key: Bytes, value: Bytes)] {
+        let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
+        var result: [(key: Bytes, value: Bytes)] = []
+        for try await (key, value) in seq {
+            result.append((key: key, value: value))
+        }
+        return result
+    }
+
+    private func collectRange(
+        _ tx: some Transaction,
+        from begin: KeySelector,
+        to end: KeySelector
+    ) async throws -> [(key: Bytes, value: Bytes)] {
+        let seq = tx.getRange(from: begin, to: end, limit: 0, reverse: false)
+        var result: [(key: Bytes, value: Bytes)] = []
+        for try await (key, value) in seq {
+            result.append((key: key, value: value))
+        }
+        return result
+    }
+
     // =========================================================================
     // MARK: - Nested withTransaction
     //
@@ -74,14 +99,228 @@ struct SQLiteNestedTransactionTests {
         try await engine.withTransaction { outerTx in
             outerTx.setValue([10], for: [0x01])
 
-            // createTransaction inside withTransaction should detect nesting
+            // createTransaction inside withTransaction should create a child
+            // transaction backed by its own write buffer.
             let childTx = try engine.createTransaction()
+            let inheritedValue = try await childTx.getValue(for: [0x01])
+            #expect(inheritedValue == [10])
+
             childTx.setValue([20], for: [0x02])
             try await childTx.commit()
 
-            // Outer should see child's writes (they share the same connection)
+            // Outer should see committed child writes.
             let v2 = try await outerTx.getValue(for: [0x02])
             #expect(v2 == [20])
+        }
+    }
+
+    @Test func nestedCreateTransaction_cancelAfterRangeDoesNotLeakChildWrites() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { outerTx in
+            outerTx.setValue([10], for: [0x01])
+
+            let childTx = try engine.createTransaction()
+            childTx.setValue([20], for: [0x02])
+
+            let childRange = try await collectRange(childTx, begin: [0x00], end: [0xFF])
+            #expect(childRange.map(\.key) == [[0x01], [0x02]])
+
+            childTx.cancel()
+
+            let outerValue = try await outerTx.getValue(for: [0x01])
+            let cancelledChildValue = try await outerTx.getValue(for: [0x02])
+            #expect(outerValue == [10])
+            #expect(cancelledChildValue == nil)
+        }
+
+        try await engine.withTransaction { tx in
+            let outerValue = try await tx.getValue(for: [0x01])
+            let cancelledChildValue = try await tx.getValue(for: [0x02])
+            #expect(outerValue == [10])
+            #expect(cancelledChildValue == nil)
+        }
+    }
+
+    @Test func nestedCreateTransaction_failedChildCommitDoesNotPoisonOuter() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { outerTx in
+            outerTx.setValue([10], for: [0x01])
+
+            let childTx = try engine.createTransaction()
+            childTx.setValue([20], for: [0x02])
+            childTx.atomicOp(key: [0x03], param: [0x00], mutationType: .setVersionstampedKey)
+
+            do {
+                try await childTx.commit()
+                Issue.record("Expected child commit to fail")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+            }
+
+            let childValue = try await outerTx.getValue(for: [0x02])
+            #expect(childValue == nil)
+
+            outerTx.setValue([30], for: [0x04])
+        }
+
+        try await engine.withTransaction { tx in
+            let outerValue = try await tx.getValue(for: [0x01])
+            let rolledBackChildValue = try await tx.getValue(for: [0x02])
+            let laterOuterValue = try await tx.getValue(for: [0x04])
+            #expect(outerValue == [10])
+            #expect(rolledBackChildValue == nil)
+            #expect(laterOuterValue == [30])
+        }
+    }
+
+    @Test func nestedCreateTransaction_atomicSeesOuterBufferedValue() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { outerTx in
+            outerTx.setValue([10], for: [0x01])
+
+            let childTx = try engine.createTransaction()
+            childTx.atomicOp(key: [0x01], param: [5], mutationType: .add)
+            try await childTx.commit()
+
+            let value = try await outerTx.getValue(for: [0x01])
+            #expect(value == [15])
+        }
+
+        try await engine.withTransaction { tx in
+            let value = try await tx.getValue(for: [0x01])
+            #expect(value == [15])
+        }
+    }
+
+    @Test func nestedCreateTransaction_parentDoesNotSeeUncommittedChildAfterRange() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { outerTx in
+            outerTx.setValue([10], for: [0x01])
+
+            let childTx = try engine.createTransaction()
+            childTx.setValue([20], for: [0x02])
+
+            let childRange = try await collectRange(childTx, begin: [0x00], end: [0xFF])
+            #expect(childRange.map(\.key) == [[0x01], [0x02]])
+
+            let parentPointRead = try await outerTx.getValue(for: [0x02])
+            let parentRange = try await collectRange(outerTx, begin: [0x00], end: [0xFF])
+            #expect(parentPointRead == nil)
+            #expect(parentRange.map(\.key) == [[0x01]])
+
+            childTx.cancel()
+        }
+    }
+
+    @Test func nestedCreateTransaction_parentWriteAfterChildRangeSurvivesFailedChildCommit() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { outerTx in
+            outerTx.setValue([10], for: [0x01])
+
+            let childTx = try engine.createTransaction()
+            childTx.setValue([20], for: [0x02])
+
+            let childRange = try await collectRange(childTx, begin: [0x00], end: [0xFF])
+            #expect(childRange.map(\.key) == [[0x01], [0x02]])
+
+            outerTx.setValue([30], for: [0x03])
+            childTx.atomicOp(key: [0x04], param: [0x00], mutationType: .setVersionstampedKey)
+
+            do {
+                try await childTx.commit()
+                Issue.record("Expected child commit to fail")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+            }
+
+            #expect(try await outerTx.getValue(for: [0x01]) == [10])
+            #expect(try await outerTx.getValue(for: [0x02]) == nil)
+            #expect(try await outerTx.getValue(for: [0x03]) == [30])
+        }
+
+        try await engine.withTransaction { tx in
+            let outerValue = try await tx.getValue(for: [0x01])
+            let rolledBackChildValue = try await tx.getValue(for: [0x02])
+            let laterOuterValue = try await tx.getValue(for: [0x03])
+            #expect(outerValue == [10])
+            #expect(rolledBackChildValue == nil)
+            #expect(laterOuterValue == [30])
+        }
+    }
+
+    @Test func nestedCreateTransaction_rangeSeesParentWritesAfterChildCreation() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { outerTx in
+            outerTx.setValue([10], for: [0x01])
+            let childTx = try engine.createTransaction()
+
+            outerTx.setValue([20], for: [0x02])
+            childTx.setValue([30], for: [0x03])
+
+            let childRange = try await collectRange(childTx, begin: [0x00], end: [0xFF])
+            #expect(childRange.map(\.key) == [[0x01], [0x02], [0x03]])
+
+            childTx.cancel()
+            let outerRange = try await collectRange(outerTx, begin: [0x00], end: [0xFF])
+            #expect(outerRange.map(\.key) == [[0x01], [0x02]])
+        }
+    }
+
+    @Test func nestedCreateTransaction_rangeResolvesSelectorsAgainstChildBuffer() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { outerTx in
+            outerTx.setValue([20], for: [0x20])
+            outerTx.setValue([30], for: [0x30])
+
+            let childTx = try engine.createTransaction()
+            childTx.clear(key: [0x30])
+
+            let childRange = try await collectRange(
+                childTx,
+                from: .lastLessOrEqual([0x35]),
+                to: .firstGreaterOrEqual([0x40])
+            )
+
+            #expect(childRange.map(\.key) == [[0x20]])
+            childTx.cancel()
+        }
+    }
+
+    @Test func nestedCreateTransaction_siblingCommitSurvivesEarlierChildCancel() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { outerTx in
+            outerTx.setValue([10], for: [0x01])
+
+            let firstChild = try engine.createTransaction()
+            firstChild.setValue([20], for: [0x02])
+            let firstRange = try await collectRange(firstChild, begin: [0x00], end: [0xFF])
+            #expect(firstRange.map(\.key) == [[0x01], [0x02]])
+
+            let secondChild = try engine.createTransaction()
+            secondChild.setValue([30], for: [0x03])
+            try await secondChild.commit()
+
+            firstChild.cancel()
+
+            #expect(try await outerTx.getValue(for: [0x02]) == nil)
+            #expect(try await outerTx.getValue(for: [0x03]) == [30])
+        }
+
+        try await engine.withTransaction { tx in
+            let outerValue = try await tx.getValue(for: [0x01])
+            let cancelledFirstChildValue = try await tx.getValue(for: [0x02])
+            let committedSecondChildValue = try await tx.getValue(for: [0x03])
+            #expect(outerValue == [10])
+            #expect(cancelledFirstChildValue == nil)
+            #expect(committedSecondChildValue == [30])
         }
     }
 

@@ -72,6 +72,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
         case set(key: Bytes, value: Bytes)
         case clear(key: Bytes)
         case clearRange(begin: Bytes, end: Bytes)
+        case atomic(key: Bytes, param: Bytes, mutationType: MutationType)
     }
 
     init(engine: InMemoryEngine, snapshot: SortedKeyValueStore) {
@@ -88,23 +89,33 @@ public final class InMemoryTransaction: Transaction, Sendable {
             return state.writeBuffer
         }
 
-        // Check write buffer in reverse order (latest operation takes priority)
-        for op in writeBuffer.reversed() {
+        // Replay the write buffer in order on top of the snapshot value.
+        // Atomic mutations depend on the value produced by preceding operations,
+        // so forward replay is required (a reverse scan cannot resolve them).
+        var value = self.snapshot.get(key)
+        for op in writeBuffer {
             switch op {
             case .set(let k, let v) where k == key:
-                return v
+                value = v
             case .clear(let k) where k == key:
-                return nil
+                value = nil
             case .clearRange(let begin, let end)
                 where compareBytes(key, begin) >= 0 && compareBytes(key, end) < 0:
-                return nil
+                value = nil
+            case .atomic(let k, let param, let mutationType) where k == key:
+                switch try mutationType.apply(to: value, param: param) {
+                case .set(let bytes):
+                    value = bytes
+                case .clear:
+                    value = nil
+                case .unchanged:
+                    break
+                }
             default:
                 continue
             }
         }
-
-        // Search from snapshot (binary search)
-        return self.snapshot.get(key)
+        return value
     }
 
     public func getRange(
@@ -130,6 +141,19 @@ public final class InMemoryTransaction: Transaction, Sendable {
                 effective.delete(key)
             case .clearRange(let rangeBegin, let rangeEnd):
                 effective.deleteRange(begin: rangeBegin, end: rangeEnd)
+            case .atomic(let key, let param, let mutationType):
+                do {
+                    switch try mutationType.apply(to: effective.get(key), param: param) {
+                    case .set(let bytes):
+                        effective.set(key, bytes)
+                    case .clear:
+                        effective.delete(key)
+                    case .unchanged:
+                        break
+                    }
+                } catch {
+                    return KeyValueRangeResult(error: error)
+                }
             }
         }
 
@@ -182,6 +206,15 @@ public final class InMemoryTransaction: Transaction, Sendable {
         }
     }
 
+    // MARK: - Atomic Operations
+
+    public func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) {
+        _state.withLock { state in
+            guard !state.cancelled else { return }
+            state.writeBuffer.append(.atomic(key: key, param: param, mutationType: mutationType))
+        }
+    }
+
     // MARK: - Transaction Management
 
     public func commit() async throws {
@@ -196,17 +229,32 @@ public final class InMemoryTransaction: Transaction, Sendable {
 
         guard !ops.isEmpty else { return }
 
-        engine._store.withLock { store in
+        // Stage all operations on a copy and swap at the end, so a throwing
+        // atomic mutation (versionstamp) leaves the store untouched.
+        // Atomics apply to the store's value at commit time (FDB semantics),
+        // not to the transaction's read snapshot.
+        try engine._store.withLock { store in
+            var staged = store
             for op in ops {
                 switch op {
                 case .set(let key, let value):
-                    store.set(key, value)
+                    staged.set(key, value)
                 case .clear(let key):
-                    store.delete(key)
+                    staged.delete(key)
                 case .clearRange(let begin, let end):
-                    store.deleteRange(begin: begin, end: end)
+                    staged.deleteRange(begin: begin, end: end)
+                case .atomic(let key, let param, let mutationType):
+                    switch try mutationType.apply(to: staged.get(key), param: param) {
+                    case .set(let bytes):
+                        staged.set(key, bytes)
+                    case .clear:
+                        staged.delete(key)
+                    case .unchanged:
+                        break
+                    }
                 }
             }
+            store = staged
         }
     }
 

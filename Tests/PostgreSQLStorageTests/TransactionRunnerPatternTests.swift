@@ -16,7 +16,7 @@ import Foundation
 ///
 /// Requires a running PostgreSQL instance. See PostgreSQLStorageTests for setup.
 extension AllPostgreSQLTests {
-@Suite("TransactionRunner Pattern Tests", .serialized)
+@Suite("TransactionRunner Pattern Tests", .serialized, .enabled(if: PostgreSQLTestHelper.isAvailable))
 struct TransactionRunnerPatternTests {
 
     // MARK: - Simulated Subspace Layout
@@ -154,9 +154,11 @@ struct TransactionRunnerPatternTests {
         let key = itemKey(type: "User", id: "user-002")
         let value = serializeItem(name: "Bob", email: "bob@example.com")
 
-        // Simulate failure: cancel discards writes
+        // Simulate failure: cancel discards writes. The bound closure is
+        // synchronous and non-throwing (setValue/cancel are both), so the
+        // synchronous withValue overload applies — no try/await needed.
         let tx1 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx1) {
+        ActiveTransactionScope.$current.withValue(tx1) {
             tx1.setValue(value, for: key)
             // Simulate error → cancel
             tx1.cancel()
@@ -529,9 +531,9 @@ struct TransactionRunnerPatternTests {
 
             // Inner transaction (like FDBDataStore calling createTransaction inside operation)
             let innerTx = try engine.createTransaction()
-            // Should be nested — reuses outer connection
+            // Should be nested — reuses the outer transaction lifecycle.
             innerTx.setValue(Array("inner-data".utf8), for: innerKey)
-            try await innerTx.commit() // Flushes buffer only (nested)
+            try await innerTx.commit() // Merges into the parent buffer.
 
             try await outerTx.commit() // Actual COMMIT
         }
@@ -574,6 +576,80 @@ struct TransactionRunnerPatternTests {
 
         #expect(outerResult != nil) // Outer committed
         #expect(innerResult == nil) // Inner was cancelled
+    }
+
+    @Test func nestedTransaction_childSeesParentBufferedWrite() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let key = itemKey(type: "NestedVisibility", id: "parent-buffer")
+        let value = Array("parent-buffered".utf8)
+
+        let parentTx = try engine.createTransaction()
+        try await ActiveTransactionScope.$current.withValue(parentTx) {
+            parentTx.setValue(value, for: key)
+
+            let childTx = try engine.createTransaction()
+            let result = try await childTx.getValue(for: key)
+            #expect(result == value)
+
+            try await childTx.commit()
+            try await parentTx.commit()
+        }
+    }
+
+    @Test func nestedTransaction_childCommitPreservesParentBeforeChildOrderWithLeasedParent() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let key = itemKey(type: "NestedOrdering", id: "ordered-key")
+
+        let parentTx = try engine.createTransaction()
+        try await ActiveTransactionScope.$current.withValue(parentTx) {
+            // Force the lazy parent to acquire a connection before either write.
+            _ = try await parentTx.getValue(for: itemKey(type: "NestedOrdering", id: "missing"))
+
+            parentTx.setValue(Array("parent-write".utf8), for: key)
+
+            let childTx = try engine.createTransaction()
+            childTx.clear(key: key)
+            try await childTx.commit()
+
+            try await parentTx.commit()
+        }
+
+        let readTx = try engine.createTransaction()
+        let result = try await readTx.getValue(for: key)
+        try await readTx.commit()
+        #expect(result == nil)
+    }
+
+    @Test func nestedTransaction_rangeWithUncommittedChildWritesThrows() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        let parentTx = try engine.createTransaction()
+        try await ActiveTransactionScope.$current.withValue(parentTx) {
+            let childTx = try engine.createTransaction()
+            childTx.setValue(Array("child-write".utf8), for: itemKey(type: "NestedRange", id: "child"))
+
+            let range = childTx.getRange(begin: [0x00], end: [0xFF])
+            do {
+                for try await _ in range {
+                    Issue.record("Expected nested child range to throw")
+                }
+                Issue.record("Expected nested child range to throw")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+                #expect(error.operation == .rangeRead)
+                #expect(error.backend == .postgreSQL)
+            } catch {
+                Issue.record("Expected StorageError")
+            }
+
+            childTx.cancel()
+            try await parentTx.commit()
+        }
     }
 
     // =========================================================================
@@ -933,11 +1009,11 @@ struct TransactionRunnerPatternTests {
         }
     }
 
-    /// Verifies that nested TX writes are transferred to lazy parent's buffer
-    /// when neither has a connection, and flushed on parent commit.
+    /// Verifies that nested TX writes are transferred to the parent's buffer
+    /// and flushed on parent commit.
     ///
-    /// Regression: previously, nested commit checked self.currentConnection
-    /// (always nil after fix) instead of parent.currentConnection.
+    /// Regression: nested writes must not bypass the parent buffer, even when
+    /// the parent has not acquired a connection yet.
     @Test func nestedTransaction_lazyParent_writeTransfer() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
@@ -987,7 +1063,7 @@ struct TransactionRunnerPatternTests {
             // Write (buffered in nested)
             nestedTx.setValue(Array("new-data".utf8), for: writeKey)
 
-            try await nestedTx.commit() // flush to parent's connection
+            try await nestedTx.commit() // transfers to parent buffer
             try await parentTx.commit()
         }
 
@@ -1048,12 +1124,13 @@ struct TransactionRunnerPatternTests {
     }
 
     // =========================================================================
-    // MARK: - Regression: atomicOp(.add) param validation (Fix #5)
+    // MARK: - atomicOp(.add) supports arbitrary param widths
     // =========================================================================
 
-    /// Verifies that atomicOp(.add) with a short param (< 8 bytes)
-    /// throws an explicit error instead of silently using 0.
-    @Test func atomicOp_shortParam_throwsError() async throws {
+    /// Verifies that atomicOp(.add) performs little-endian addition over the
+    /// param's own width — there is no fixed 8-byte requirement. Adding a 3-byte
+    /// param to an absent key yields exactly those 3 bytes (zero + param).
+    @Test func atomicOp_addThreeByteParam_appliesLittleEndian() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
@@ -1061,44 +1138,13 @@ struct TransactionRunnerPatternTests {
 
         let tx = try engine.createTransaction()
         tx.atomicOp(key: counterKey, param: [0x01, 0x02, 0x03], mutationType: .add)
+        try await tx.commit()
 
-        // commit triggers flush which executes the atomic op — should throw
-        do {
-            try await tx.commit()
-            Issue.record("Expected commit to throw for short atomicOp param")
-        } catch let error as StorageError {
-            guard error.code == .invalidOperation else {
-                Issue.record("Expected invalidOperation, got \(error)")
-                return
-            }
-            #expect(error.message.contains("8 bytes"))
-        }
-    }
-
-    // =========================================================================
-    // MARK: - Transaction convenience does not own retries
-    // =========================================================================
-
-    /// Verifies that legacy maxRetries no longer gates the backend convenience.
-    @Test func withTransaction_zeroMaxRetries_stillRunsOnce() async throws {
-        guard let host = ProcessInfo.processInfo.environment["POSTGRES_TEST_HOST"] else {
-            throw PostgreSQLTestSkipError()
-        }
-        let config = PostgreSQLConfiguration(
-            host: host,
-            port: ProcessInfo.processInfo.environment["POSTGRES_TEST_PORT"]
-                .flatMap(Int.init) ?? 5432,
-            username: ProcessInfo.processInfo.environment["POSTGRES_TEST_USER"] ?? "postgres",
-            password: ProcessInfo.processInfo.environment["POSTGRES_TEST_PASSWORD"] ?? "",
-            database: ProcessInfo.processInfo.environment["POSTGRES_TEST_DB"] ?? "storage_kit_test",
-            maxRetries: 0
-        )
-        let engine = try await PostgreSQLStorageEngine(configuration: config)
-        defer { engine.shutdown() }
-
-        try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0xFA, 0x01])
-        }
+        // Absent key is treated as zero, so the result equals the 3-byte param.
+        let readTx = try engine.createTransaction()
+        let value = try await readTx.getValue(for: counterKey)
+        try await readTx.commit()
+        #expect(value == [0x01, 0x02, 0x03])
     }
 
     // =========================================================================

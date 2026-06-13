@@ -181,21 +181,84 @@ final class SQLiteConnection {
         limit: Int,
         reverse: Bool
     ) throws -> [(key: Bytes, value: Bytes)] {
+        try getRange(
+            begin: .direct(op: beginOp, key: begin),
+            end: .direct(op: endOp, key: end),
+            limit: limit, reverse: reverse
+        )
+    }
+
+    /// Range query with KeySelector-derived boundaries.
+    ///
+    /// Direct boundaries compare against the selector key. Subquery boundaries
+    /// first resolve the selector to a concrete key via `SELECT max(key)`;
+    /// `COALESCE(..., x'')` clamps an unresolvable boundary — begin clamps to
+    /// all keys (the empty blob is the minimum key), end clamps to an empty
+    /// result (`key < x''` is always false).
+    func getRange(
+        begin: SQLRangeBoundary,
+        end: SQLRangeBoundary,
+        limit: Int,
+        reverse: Bool
+    ) throws -> [(key: Bytes, value: Bytes)] {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
+        var clauses: [String] = []
+        var binds: [Bytes] = []
+        for boundary in [begin, end] {
+            switch boundary {
+            case .direct(let op, let key):
+                clauses.append("key \(op) ?")
+                binds.append(key)
+            case .resolvedSubquery(let op, let subqueryOp, let key):
+                clauses.append(
+                    "key \(op) COALESCE((SELECT max(key) FROM kv_store WHERE key \(subqueryOp) ?), x'')"
+                )
+                binds.append(key)
+            }
+        }
         let order = reverse ? "DESC" : "ASC"
         let limitClause = limit > 0 ? "LIMIT ?" : ""
-        let sql = "SELECT key, value FROM kv_store WHERE key \(beginOp) ? AND key \(endOp) ? ORDER BY key \(order) \(limitClause)"
+        let sql = "SELECT key, value FROM kv_store WHERE \(clauses[0]) AND \(clauses[1]) ORDER BY key \(order) \(limitClause)"
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
 
         try prepareStatement(sql, into: &stmt)
-        bindBlob(stmt, index: 1, data: begin)
-        bindBlob(stmt, index: 2, data: end)
-        if limit > 0 {
-            sqlite3_bind_int64(stmt, 3, Int64(limit))
+        for (offset, data) in binds.enumerated() {
+            bindBlob(stmt, index: Int32(offset + 1), data: data)
         }
+        if limit > 0 {
+            sqlite3_bind_int64(stmt, Int32(binds.count + 1), Int64(limit))
+        }
+
+        var results: [(key: Bytes, value: Bytes)] = []
+        var rc = sqlite3_step(stmt)
+        while rc == SQLITE_ROW {
+            guard let key = extractBlob(stmt, column: 0),
+                  let value = extractBlob(stmt, column: 1) else {
+                rc = sqlite3_step(stmt)
+                continue
+            }
+            results.append((key: key, value: value))
+            rc = sqlite3_step(stmt)
+        }
+        if rc != SQLITE_DONE {
+            throw SQLiteErrorMapper.map(rc: rc, operation: .rangeRead, message: currentErrorMessage)
+        }
+        return results
+    }
+
+    /// Returns all entries in key order.
+    func getAllEntries() throws -> [(key: Bytes, value: Bytes)] {
+        guard db != nil else {
+            throw StorageError.invalidOperation("Database closed")
+        }
+        let sql = "SELECT key, value FROM kv_store ORDER BY key ASC"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+
+        try prepareStatement(sql, into: &stmt)
 
         var results: [(key: Bytes, value: Bytes)] = []
         var rc = sqlite3_step(stmt)

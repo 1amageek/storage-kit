@@ -9,8 +9,13 @@
 /// When accessed via `any Transaction`, only existential dispatch occurs (no data copying).
 ///
 /// ## Backend implementation guide
-/// Required methods: `getValue`, `getRange`, `setValue`, `clear`, `clearRange`, `commit`, `cancel`.
+/// Required methods: `getValue`, `getRange`, `setValue`, `clear`, `clearRange`,
+/// `atomicOp`, `commit`, `cancel`.
 /// Others have default implementations provided via extension (non-FDB backends are automatically covered).
+///
+/// `atomicOp` must be implemented by every backend. Non-FDB backends buffer the
+/// mutation and apply it via `MutationType.apply(to:param:)`; versionstamp
+/// mutations surface an error at the first read/flush/commit that touches them.
 public protocol Transaction: Sendable {
 
     // MARK: - Associated type (zero-copy getRange)
@@ -276,8 +281,8 @@ extension Transaction {
 
 /// Default implementations for non-FDB backends.
 ///
-/// Basic methods (getValue, getRange, setValue, clear, clearRange, commit, cancel)
-/// must be implemented by each backend. The rest work with defaults.
+/// Basic methods (getValue, getRange, setValue, clear, clearRange, atomicOp,
+/// commit, cancel) must be implemented by each backend. The rest work with defaults.
 extension Transaction {
 
     /// Default: implements getKey via getRange (snapshot defaults to false).
@@ -295,10 +300,6 @@ extension Transaction {
             return key
         }
         return nil
-    }
-
-    /// Default: no-op. Non-FDB backends should override if atomic operations are needed.
-    public func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) {
     }
 
     /// Default: no-op.

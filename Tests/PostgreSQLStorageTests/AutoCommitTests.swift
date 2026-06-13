@@ -3,12 +3,14 @@ import Foundation
 @testable import PostgreSQLStorage
 @testable import StorageKit
 
+private struct PostgreSQLStorageDomainError: Error {}
+
 /// Tests for StorageEngine.withAutoCommit() — auto-commit mode without BEGIN/COMMIT.
 ///
 /// Verifies that auto-commit operations produce the same results as
 /// transactional operations for single-statement use cases.
 extension AllPostgreSQLTests {
-@Suite("AutoCommit Tests", .serialized)
+@Suite("AutoCommit Tests", .serialized, .enabled(if: PostgreSQLTestHelper.isAvailable))
 struct AutoCommitTests {
 
     private func makeEngine() async throws -> PostgreSQLStorageEngine {
@@ -213,6 +215,30 @@ struct AutoCommitTests {
     }
 
     // MARK: - Error Handling
+
+    @Test func transactionPreservesOperationDomainErrors() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        await #expect(throws: PostgreSQLStorageDomainError.self) {
+            try await engine.withTransaction { tx in
+                _ = try await tx.getValue(for: Array("domain-error-transaction".utf8), snapshot: false)
+                throw PostgreSQLStorageDomainError()
+            }
+        }
+    }
+
+    @Test func autoCommitPreservesOperationDomainErrors() async throws {
+        let engine = try await makeEngine()
+        defer { engine.shutdown() }
+
+        await #expect(throws: PostgreSQLStorageDomainError.self) {
+            try await engine.withAutoCommit { tx in
+                _ = try await tx.getValue(for: Array("domain-error-auto-commit".utf8), snapshot: false)
+                throw PostgreSQLStorageDomainError()
+            }
+        }
+    }
 
     @Test func autoCommitReturnValue() async throws {
         let engine = try await makeEngine()
