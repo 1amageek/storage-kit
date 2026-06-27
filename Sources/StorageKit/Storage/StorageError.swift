@@ -5,6 +5,7 @@ public enum StorageBackend: String, Sendable, Hashable, Codable {
     case foundationDB = "foundationdb"
     case sqlite
     case postgreSQL = "postgresql"
+    case cloudflareDurableObject = "cloudflare_durable_object"
     case inMemory = "in_memory"
     case unknown
 }

@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "storage-kit-cloudflare-durable-object-storage-host",
+  "main": "src/CloudflareDurableObjectStorageWorker.js",
+  "compatibility_date": "2026-06-27",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "STORAGEKIT_DURABLE_OBJECT",
+        "class_name": "CloudflareDurableObjectStorageHost"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "CloudflareDurableObjectStorageHost"
+      ]
+    }
+  ]
+}

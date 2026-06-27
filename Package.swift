@@ -6,9 +6,13 @@ let package = Package(
     platforms: [.macOS(.v15), .iOS(.v18)],
     products: [
         .library(name: "StorageKit", targets: ["StorageKit"]),
+        .library(name: "StorageKitEmbeddedCore", targets: ["StorageKitEmbeddedCore"]),
         .library(name: "FDBStorage", targets: ["FDBStorage"]),
         .library(name: "SQLiteStorage", targets: ["SQLiteStorage"]),
         .library(name: "PostgreSQLStorage", targets: ["PostgreSQLStorage"]),
+        .library(name: "CloudflareDurableObjectStorage", targets: ["CloudflareDurableObjectStorage"]),
+        .library(name: "CloudflareDurableObjectStorageEmbedded", targets: ["CloudflareDurableObjectStorageEmbedded"]),
+        .executable(name: "CloudflareDurableObjectStorageWasm", targets: ["CloudflareDurableObjectStorageWasm"]),
     ],
     traits: [
         .default(enabledTraits: ["FoundationDB", "SQLite"]),
@@ -22,8 +26,14 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "StorageKit",
+            name: "StorageKitEmbeddedCore",
             dependencies: []
+        ),
+        .target(
+            name: "StorageKit",
+            dependencies: [
+                "StorageKitEmbeddedCore",
+            ]
         ),
         .target(
             name: "FDBStorage",
@@ -54,6 +64,28 @@ let package = Package(
                 .define("STORAGE_POSTGRESQL", .when(traits: ["PostgreSQL"])),
             ]
         ),
+        .target(
+            name: "CloudflareDurableObjectStorage",
+            dependencies: [
+                "StorageKit",
+                "CloudflareDurableObjectStorageEmbedded",
+            ]
+        ),
+        .target(
+            name: "CloudflareDurableObjectStorageEmbedded",
+            dependencies: [
+                "StorageKitEmbeddedCore",
+            ]
+        ),
+        .executableTarget(
+            name: "CloudflareDurableObjectStorageWasm",
+            dependencies: [
+                "CloudflareDurableObjectStorageEmbedded",
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("Extern"),
+            ]
+        ),
         .testTarget(
             name: "StorageKitTests",
             dependencies: ["StorageKit"]
@@ -72,6 +104,21 @@ let package = Package(
         .testTarget(
             name: "PostgreSQLStorageTests",
             dependencies: ["PostgreSQLStorage"]
+        ),
+        .testTarget(
+            name: "CloudflareDurableObjectStorageTests",
+            dependencies: [
+                "CloudflareDurableObjectStorage",
+                "CloudflareDurableObjectStorageEmbedded",
+                "StorageKitEmbeddedCore",
+            ]
+        ),
+        .testTarget(
+            name: "CloudflareDurableObjectStorageEmbeddedTests",
+            dependencies: [
+                "CloudflareDurableObjectStorageEmbedded",
+                "StorageKitEmbeddedCore",
+            ]
         ),
     ]
 )

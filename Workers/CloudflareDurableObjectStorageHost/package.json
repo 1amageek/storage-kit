@@ -1,0 +1,17 @@
+{
+  "name": "@storage-kit/cloudflare-durable-object-storage-host",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare:wasm": "node scripts/prepare-wasm.mjs",
+    "test": "node --test",
+    "smoke:e2e": "npm run prepare:wasm && node scripts/smoke-e2e.mjs",
+    "dev": "npm run prepare:wasm && wrangler dev",
+    "deploy": "npm run prepare:wasm && wrangler deploy",
+    "deploy:dry-run": "npm run prepare:wasm && wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "4.105.0"
+  }
+}
