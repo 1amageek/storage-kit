@@ -12,12 +12,17 @@ import {
 
 const host = process.env.STORAGEKIT_SMOKE_HOST ?? "127.0.0.1";
 const port = Number(process.env.STORAGEKIT_SMOKE_PORT ?? "18787");
-const endpoint = `http://${host}:${port}`;
+const endpoint = process.env.STORAGEKIT_SMOKE_ENDPOINT ?? `http://${host}:${port}`;
 const readyTimeoutMilliseconds = 30_000;
 const packageDirectory = fileURLToPath(new URL("..", import.meta.url));
 const smokeRunID = `${process.pid}-${Date.now()}`;
+const shouldStartWorker = process.env.STORAGEKIT_SMOKE_ENDPOINT === undefined && !process.argv.includes("--remote");
 
-const worker = startWorker();
+if (!shouldStartWorker && !process.env.STORAGEKIT_SMOKE_ENDPOINT) {
+  throw new Error("STORAGEKIT_SMOKE_ENDPOINT is required for remote smoke mode");
+}
+
+const worker = shouldStartWorker ? startWorker() : null;
 try {
   await waitForWorker();
   await smokeReadiness();
@@ -30,7 +35,9 @@ try {
   await smokeTypedBadRequest();
   console.log("Cloudflare Durable Object Storage smoke E2E passed");
 } finally {
-  await stopWorker(worker);
+  if (worker !== null) {
+    await stopWorker(worker);
+  }
 }
 
 function startWorker() {

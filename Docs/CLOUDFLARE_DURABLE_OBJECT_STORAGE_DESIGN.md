@@ -1579,6 +1579,28 @@ results, unbounded lower and upper resolution, reverse cursor pagination,
 snapshot range reads, stale non-snapshot range rejection, and bytewise
 lexicographic prefix ranges.
 
+Cloudflare edge validation uses the same binary smoke suite against a deployed
+Worker endpoint:
+
+```bash
+STORAGEKIT_SMOKE_ENDPOINT=https://<worker-host> npm run smoke:remote
+```
+
+Persistence validation uses a stable scope so data can be written before a
+redeploy and read after the redeploy:
+
+```bash
+STORAGEKIT_SMOKE_ENDPOINT=https://<worker-host> \
+STORAGEKIT_PERSISTENCE_RUN_ID=release-candidate \
+npm run smoke:remote:persistence
+
+STORAGEKIT_SMOKE_ENDPOINT=https://<worker-host> \
+STORAGEKIT_PERSISTENCE_MODE=read \
+STORAGEKIT_PERSISTENCE_RUN_ID=release-candidate \
+STORAGEKIT_PERSISTENCE_TOKEN=<token> \
+npm run smoke:remote:persistence
+```
+
 ## Detailed Test Design
 
 ```text

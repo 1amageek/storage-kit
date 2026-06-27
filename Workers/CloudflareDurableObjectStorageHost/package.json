@@ -7,6 +7,8 @@
     "prepare:wasm": "node scripts/prepare-wasm.mjs",
     "test": "node --test",
     "smoke:e2e": "npm run prepare:wasm && node scripts/smoke-e2e.mjs",
+    "smoke:remote": "node scripts/smoke-e2e.mjs --remote",
+    "smoke:remote:persistence": "node scripts/smoke-persistence.mjs",
     "dev": "npm run prepare:wasm && wrangler dev",
     "deploy": "npm run prepare:wasm && wrangler deploy",
     "deploy:dry-run": "npm run prepare:wasm && wrangler deploy --dry-run"
