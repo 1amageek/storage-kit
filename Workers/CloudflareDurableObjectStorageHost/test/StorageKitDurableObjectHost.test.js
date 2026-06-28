@@ -269,6 +269,198 @@ test("non-snapshot read conflict range detects conflicting commit", () => {
   assert.equal(response.status, statusCode.transactionConflict);
 });
 
+test("range read conflict range catches inserts into selector gaps", () => {
+  const host = makeHost();
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x15), value: bytes(15) },
+    ],
+    readConflictRanges: [],
+  });
+
+  const rangeRead = send(host, {
+    operation: operation.range,
+    scope,
+    begin: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x10) },
+    end: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x20) },
+    limit: 10,
+    reverse: false,
+    snapshot: false,
+    expectedReadVersion: 1n,
+    cursor: null,
+  });
+  assert.deepEqual(rangeRead.rows.map((row) => [...row.key]), [[0x15]]);
+  assert.deepEqual([...rangeRead.conflictRange.begin], [0x10]);
+  assert.deepEqual([...rangeRead.conflictRange.end], [0x20]);
+
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x12), value: bytes(12) },
+    ],
+    readConflictRanges: [],
+  });
+
+  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(StorageKitWireCodec.encodeRequest({
+    operation: operation.commit,
+    scope,
+    observedReadVersion: rangeRead.currentCommitVersion,
+    mutations: [
+      { tag: 1, key: bytes(0x30), value: bytes(30) },
+    ],
+    readConflictRanges: [
+      rangeRead.conflictRange,
+    ],
+  })));
+  assert.equal(response.status, statusCode.transactionConflict);
+});
+
+test("range read conflict range does not catch writes after direct end selector", () => {
+  const host = makeHost();
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x15), value: bytes(15) },
+    ],
+    readConflictRanges: [],
+  });
+
+  const rangeRead = send(host, {
+    operation: operation.range,
+    scope,
+    begin: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x10) },
+    end: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x20) },
+    limit: 10,
+    reverse: false,
+    snapshot: false,
+    expectedReadVersion: 1n,
+    cursor: null,
+  });
+  assert.deepEqual([...rangeRead.conflictRange.begin], [0x10]);
+  assert.deepEqual([...rangeRead.conflictRange.end], [0x20]);
+
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x30), value: bytes(30) },
+    ],
+    readConflictRanges: [],
+  });
+
+  const response = send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: rangeRead.currentCommitVersion,
+    mutations: [
+      { tag: 1, key: bytes(0x40), value: bytes(40) },
+    ],
+    readConflictRanges: [
+      rangeRead.conflictRange,
+    ],
+  });
+  assert.equal(response.committedVersion, 3n);
+});
+
+test("range read conflict range includes exact key for firstGreaterThan end selector", () => {
+  const host = makeHost();
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x01), value: bytes(1) },
+      { tag: 1, key: bytes(0x03), value: bytes(3) },
+    ],
+    readConflictRanges: [],
+  });
+
+  const rangeRead = send(host, {
+    operation: operation.range,
+    scope,
+    begin: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x01) },
+    end: { kind: keySelectorKind.firstGreaterThan, key: bytes(0x03) },
+    limit: 10,
+    reverse: false,
+    snapshot: false,
+    expectedReadVersion: 1n,
+    cursor: null,
+  });
+  assert.deepEqual(rangeRead.rows.map((row) => [...row.key]), [[0x01], [0x03]]);
+  assert.deepEqual([...rangeRead.conflictRange.end], [0x03, 0x00]);
+
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x03), value: bytes(33) },
+    ],
+    readConflictRanges: [],
+  });
+
+  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(StorageKitWireCodec.encodeRequest({
+    operation: operation.commit,
+    scope,
+    observedReadVersion: rangeRead.currentCommitVersion,
+    mutations: [
+      { tag: 1, key: bytes(0x04), value: bytes(4) },
+    ],
+    readConflictRanges: [
+      rangeRead.conflictRange,
+    ],
+  })));
+  assert.equal(response.status, statusCode.transactionConflict);
+});
+
+test("old conflict entries are pruned and stale readers conflict", () => {
+  const sql = new NodeSqlStorage();
+  const host = new StorageKitDurableObjectHost(sql, (callback) => sql.transactionSync(callback));
+  const initialRead = send(host, {
+    operation: operation.read,
+    scope,
+    key: bytes(0x01),
+    snapshot: false,
+    expectedReadVersion: null,
+  });
+
+  for (let index = 0; index < 4100; index += 1) {
+    send(host, {
+      operation: operation.commit,
+      scope,
+      observedReadVersion: null,
+      mutations: [
+        { tag: 1, key: bytes(0x80, index & 0xff), value: bytes(index & 0xff) },
+      ],
+      readConflictRanges: [],
+    });
+  }
+
+  const rows = sql.exec("SELECT COUNT(*) AS count FROM storagekit_conflicts");
+  assert.ok(rows[0].count <= 4096);
+
+  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(StorageKitWireCodec.encodeRequest({
+    operation: operation.commit,
+    scope,
+    observedReadVersion: initialRead.currentCommitVersion,
+    mutations: [
+      { tag: 1, key: bytes(0x02), value: bytes(2) },
+    ],
+    readConflictRanges: [
+      singleKeyRange(bytes(0x01)),
+    ],
+  })));
+  assert.equal(response.status, statusCode.transactionConflict);
+});
+
 test("unrelated commit after read version does not conflict at commit", () => {
   const host = makeHost();
   const firstRead = send(host, {

@@ -1,4 +1,14 @@
 import { StorageKitDurableObjectHost } from "./StorageKitDurableObjectHost.js";
+import {
+  invalidContentLengthResponse,
+  payloadTooLargeResponse,
+  readBoundedRequestBytes,
+  rejectOversizedContentLength,
+  storageKitMaxRequestBytes,
+  StorageKitInvalidContentLengthError,
+  StorageKitPayloadTooLargeError,
+} from "./StorageKitHostLimits.js";
+import { StorageKitRequestAuthorizer } from "./StorageKitRequestAuthorizer.js";
 import { nameForScope } from "./StorageKitScope.js";
 import { StorageKitWasmBridge } from "./StorageKitWasmBridge.js";
 import { statusCode } from "./StorageKitWireConstants.js";
@@ -18,7 +28,22 @@ export class CloudflareDurableObjectStorageHost {
   }
 
   async fetch(request) {
-    const requestBytes = new Uint8Array(await request.arrayBuffer());
+    if (request.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+
+    let requestBytes;
+    try {
+      requestBytes = await readBoundedRequestBytes(request, storageKitMaxRequestBytes(this.env));
+    } catch (error) {
+      if (error instanceof StorageKitPayloadTooLargeError) {
+        return payloadTooLargeResponse(error.limit);
+      }
+      if (error instanceof StorageKitInvalidContentLengthError) {
+        return invalidContentLengthResponse();
+      }
+      throw error;
+    }
     const responseBytes = await this.dispatch(requestBytes);
     return new Response(responseBytes, {
       headers: {
@@ -53,7 +78,29 @@ export default {
       return new Response("Method Not Allowed", { status: 405 });
     }
 
-    const requestBytes = new Uint8Array(await request.arrayBuffer());
+    const authorization = await new StorageKitRequestAuthorizer(env?.STORAGEKIT_ACCESS_TOKEN).authorize(request);
+    if (!authorization.allowed) {
+      return authorization.response;
+    }
+
+    const limit = storageKitMaxRequestBytes(env);
+    const oversizedResponse = rejectOversizedContentLength(request, limit);
+    if (oversizedResponse !== null) {
+      return oversizedResponse;
+    }
+
+    let requestBytes;
+    try {
+      requestBytes = await readBoundedRequestBytes(request, limit);
+    } catch (error) {
+      if (error instanceof StorageKitPayloadTooLargeError) {
+        return payloadTooLargeResponse(error.limit);
+      }
+      if (error instanceof StorageKitInvalidContentLengthError) {
+        return invalidContentLengthResponse();
+      }
+      throw error;
+    }
     let decodedRequest;
     try {
       decodedRequest = StorageKitWireCodec.decodeRequest(requestBytes);

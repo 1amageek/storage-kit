@@ -7,6 +7,7 @@
     "prepare:wasm": "node scripts/prepare-wasm.mjs",
     "test": "node --test",
     "smoke:e2e": "npm run prepare:wasm && node scripts/smoke-e2e.mjs",
+    "smoke:local:persistence": "npm run prepare:wasm && node scripts/smoke-local-persistence.mjs",
     "smoke:remote": "node scripts/smoke-e2e.mjs --remote",
     "smoke:remote:persistence": "node scripts/smoke-persistence.mjs",
     "dev": "npm run prepare:wasm && wrangler dev",

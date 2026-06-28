@@ -7,6 +7,7 @@ import { StorageKitWireError } from "./StorageKitWireError.js";
 const schemaVersion = 1;
 const defaultPageLimit = 128;
 const maxPageLimit = 1024;
+const conflictVersionWindow = 4096n;
 const defaultMutationApplier = Object.freeze({ applyMutation });
 
 export class StorageKitSQLiteStore {
@@ -126,6 +127,7 @@ export class StorageKitSQLiteStore {
         this.applyWrite(mutation, committedVersion);
       }
       this.setMetadata("commitVersion", committedVersion.toString());
+      this.pruneConflictRanges(committedVersion);
       return {
         operation: operation.commit,
         committedVersion,
@@ -177,17 +179,31 @@ export class StorageKitSQLiteStore {
   resolveBounds(begin, end) {
     const start = this.resolveSelector(begin, "begin");
     const finish = this.resolveSelector(end, "end");
+    const readConflictRange = conflictRange(
+      lowerConflictBound(begin, start.key),
+      upperConflictBound(end, finish.key)
+    );
     if (start.empty || finish.empty) {
-      return { empty: true, startKey: null, endKey: null, conflictRange: conflictRange(start.key, finish.key) };
+      return {
+        empty: true,
+        startKey: null,
+        endKey: null,
+        conflictRange: readConflictRange,
+      };
     }
     if (start.key !== null && finish.key !== null && compareBytes(start.key, finish.key) >= 0) {
-      return { empty: true, startKey: null, endKey: null, conflictRange: conflictRange(start.key, finish.key) };
+      return {
+        empty: true,
+        startKey: null,
+        endKey: null,
+        conflictRange: readConflictRange,
+      };
     }
     return {
       empty: false,
       startKey: start.key,
       endKey: finish.key,
-      conflictRange: conflictRange(start.key, finish.key),
+      conflictRange: readConflictRange,
     };
   }
 
@@ -257,8 +273,12 @@ export class StorageKitSQLiteStore {
     if (observedReadVersion === null || observedReadVersion === undefined) {
       return;
     }
+    const observedVersion = BigInt(observedReadVersion);
+    if (observedVersion < this.minimumRetainedConflictVersion()) {
+      throw StorageKitWireError.transactionConflict();
+    }
     for (const range of readConflictRanges) {
-      if (this.hasConflictingWrite(observedReadVersion, normalizeReadConflictRange(range))) {
+      if (this.hasConflictingWrite(observedVersion, normalizeReadConflictRange(range))) {
         throw StorageKitWireError.transactionConflict();
       }
     }
@@ -268,9 +288,9 @@ export class StorageKitSQLiteStore {
     if (range === null) {
       return false;
     }
-    const observedVersion = splitVersion(BigInt(observedReadVersion));
+    const splitObservedVersion = splitVersion(observedReadVersion);
     const predicates = ["(version_hi > ? OR (version_hi = ? AND version_lo > ?))"];
-    const bindings = [observedVersion.hi, observedVersion.hi, observedVersion.lo];
+    const bindings = [splitObservedVersion.hi, splitObservedVersion.hi, splitObservedVersion.lo];
     if (range.end !== null) {
       predicates.push("begin_key < ?");
       bindings.push(range.end);
@@ -299,6 +319,25 @@ export class StorageKitSQLiteStore {
       range.begin,
       range.end
     );
+  }
+
+  pruneConflictRanges(committedVersion) {
+    const pruneThrough = committedVersion - conflictVersionWindow;
+    if (pruneThrough <= 0n) {
+      return;
+    }
+    const version = splitVersion(pruneThrough);
+    this.exec(
+      "DELETE FROM storagekit_conflicts WHERE version_hi < ? OR (version_hi = ? AND version_lo <= ?)",
+      version.hi,
+      version.hi,
+      version.lo
+    );
+  }
+
+  minimumRetainedConflictVersion() {
+    const minimum = this.currentCommitVersion() - conflictVersionWindow;
+    return minimum > 0n ? minimum : 0n;
   }
 
   currentCommitVersion() {
@@ -375,6 +414,32 @@ function singleKeyRange(key) {
 
 function conflictRange(begin, end) {
   return { begin, end };
+}
+
+function lowerConflictBound(selector, resolvedKey) {
+  switch (selector.kind) {
+    case keySelectorKind.firstGreaterOrEqual:
+    case keySelectorKind.firstGreaterThan:
+      return selector.key;
+    case keySelectorKind.lastLessOrEqual:
+    case keySelectorKind.lastLessThan:
+      return resolvedKey;
+    default:
+      throw StorageKitWireError.unknownKeySelector(selector.kind);
+  }
+}
+
+function upperConflictBound(selector, resolvedKey) {
+  switch (selector.kind) {
+    case keySelectorKind.firstGreaterOrEqual:
+    case keySelectorKind.lastLessThan:
+      return selector.key;
+    case keySelectorKind.firstGreaterThan:
+    case keySelectorKind.lastLessOrEqual:
+      return singleKeyRange(selector.key).end;
+    default:
+      throw StorageKitWireError.unknownKeySelector(selector.kind);
+  }
 }
 
 function normalizeWriteConflictRange(range) {

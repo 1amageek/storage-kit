@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
 import {
@@ -15,16 +16,27 @@ const port = Number(process.env.STORAGEKIT_SMOKE_PORT ?? "18787");
 const endpoint = process.env.STORAGEKIT_SMOKE_ENDPOINT ?? `http://${host}:${port}`;
 const readyTimeoutMilliseconds = 30_000;
 const packageDirectory = fileURLToPath(new URL("..", import.meta.url));
+const devVarsPath = fileURLToPath(new URL("../.dev.vars", import.meta.url));
 const smokeRunID = `${process.pid}-${Date.now()}`;
 const shouldStartWorker = process.env.STORAGEKIT_SMOKE_ENDPOINT === undefined && !process.argv.includes("--remote");
+const accessToken = process.env.STORAGEKIT_ACCESS_TOKEN ?? "local-storage-kit-smoke-token";
 
 if (!shouldStartWorker && !process.env.STORAGEKIT_SMOKE_ENDPOINT) {
   throw new Error("STORAGEKIT_SMOKE_ENDPOINT is required for remote smoke mode");
 }
 
-const worker = shouldStartWorker ? startWorker() : null;
+if (!shouldStartWorker && process.env.STORAGEKIT_ACCESS_TOKEN === undefined) {
+  throw new Error("STORAGEKIT_ACCESS_TOKEN is required for remote smoke mode");
+}
+
+let worker = null;
 try {
+  if (shouldStartWorker) {
+    writeDevVars();
+    worker = startWorker();
+  }
   await waitForWorker();
+  await smokeHttpGuards();
   await smokeReadiness();
   await smokeWasmAtomicReadRangeAndPagination();
   await smokeQuerySelectorMatrix();
@@ -32,11 +44,15 @@ try {
   await smokeClearRangeAndReverseRange();
   await smokeScopeIsolation();
   await smokeReadConflictRanges();
+  await smokeRangeConflictGaps();
   await smokeTypedBadRequest();
   console.log("Cloudflare Durable Object Storage smoke E2E passed");
 } finally {
   if (worker !== null) {
     await stopWorker(worker);
+  }
+  if (shouldStartWorker) {
+    removeDevVars();
   }
 }
 
@@ -75,6 +91,24 @@ async function waitForWorker() {
     await delay(250);
   }
   throw new Error(`Worker did not become ready: ${String(lastError)}`);
+}
+
+async function smokeHttpGuards() {
+  const methodResponse = await fetch(endpoint, { method: "GET" });
+  assert.equal(methodResponse.status, 405);
+
+  const unauthorizedResponse = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/octet-stream",
+      accept: "application/octet-stream",
+    },
+    body: StorageKitWireCodec.encodeRequest({
+      operation: operation.readiness,
+      scope: scope("unauthorized"),
+    }),
+  });
+  assert.equal(unauthorizedResponse.status, 401);
 }
 
 async function smokeReadiness() {
@@ -126,7 +160,7 @@ async function smokeWasmAtomicReadRangeAndPagination() {
   assert.deepEqual(response.rows.map((row) => [...row.key]), [[0x01], [0x02]]);
   assert.notEqual(response.nextCursor, null);
   assert.deepEqual([...response.conflictRange.begin], [0x01]);
-  assert.equal(response.conflictRange.end, null);
+  assert.deepEqual([...response.conflictRange.end], [0x03, 0x00]);
 
   response = expectOk(await send({
     operation: operation.range,
@@ -411,12 +445,94 @@ async function smokeReadConflictRanges() {
   assert.equal(response.status, statusCode.transactionConflict);
 }
 
+async function smokeRangeConflictGaps() {
+  const outsideScope = scope("range-conflict-outside");
+  expectOk(await send({
+    operation: operation.commit,
+    scope: outsideScope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x15), value: bytes(15) },
+    ],
+    readConflictRanges: [],
+  }));
+
+  let rangeResponse = expectOk(await send(rangeRequest(outsideScope, {
+    begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
+    end: selector(keySelectorKind.firstGreaterOrEqual, [0x20]),
+    expectedReadVersion: 1n,
+  })));
+  assert.deepEqual(rangeResponse.rows.map((row) => [...row.key]), [[0x15]]);
+  assert.deepEqual([...rangeResponse.conflictRange.begin], [0x10]);
+  assert.deepEqual([...rangeResponse.conflictRange.end], [0x20]);
+
+  expectOk(await send({
+    operation: operation.commit,
+    scope: outsideScope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x30), value: bytes(30) },
+    ],
+    readConflictRanges: [],
+  }));
+
+  let commitResponse = expectOk(await send({
+    operation: operation.commit,
+    scope: outsideScope,
+    observedReadVersion: rangeResponse.currentCommitVersion,
+    mutations: [
+      { tag: 1, key: bytes(0x40), value: bytes(40) },
+    ],
+    readConflictRanges: [rangeResponse.conflictRange],
+  }));
+  assert.equal(commitResponse.committedVersion, 3n);
+
+  const insideScope = scope("range-conflict-inside");
+  expectOk(await send({
+    operation: operation.commit,
+    scope: insideScope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x15), value: bytes(15) },
+    ],
+    readConflictRanges: [],
+  }));
+
+  rangeResponse = expectOk(await send(rangeRequest(insideScope, {
+    begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
+    end: selector(keySelectorKind.firstGreaterOrEqual, [0x20]),
+    expectedReadVersion: 1n,
+  })));
+
+  expectOk(await send({
+    operation: operation.commit,
+    scope: insideScope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x12), value: bytes(12) },
+    ],
+    readConflictRanges: [],
+  }));
+
+  commitResponse = await send({
+    operation: operation.commit,
+    scope: insideScope,
+    observedReadVersion: rangeResponse.currentCommitVersion,
+    mutations: [
+      { tag: 1, key: bytes(0x40), value: bytes(40) },
+    ],
+    readConflictRanges: [rangeResponse.conflictRange],
+  });
+  assert.equal(commitResponse.status, statusCode.transactionConflict);
+}
+
 async function smokeTypedBadRequest() {
   const httpResponse = await fetch(endpoint, {
     method: "POST",
     headers: {
       "content-type": "application/octet-stream",
       accept: "application/octet-stream",
+      authorization: `Bearer ${accessToken}`,
     },
     body: new Uint8Array([0xff]),
   });
@@ -431,6 +547,7 @@ async function send(request) {
     headers: {
       "content-type": "application/octet-stream",
       accept: "application/octet-stream",
+      authorization: `Bearer ${accessToken}`,
     },
     body: StorageKitWireCodec.encodeRequest(request),
   });
@@ -441,6 +558,18 @@ async function send(request) {
 function expectOk(response) {
   assert.equal(response.status, statusCode.ok, response.message ?? "expected ok");
   return response;
+}
+
+function writeDevVars() {
+  writeFileSync(devVarsPath, [
+    `STORAGEKIT_ACCESS_TOKEN=${accessToken}`,
+    "STORAGEKIT_MAX_REQUEST_BYTES=4194304",
+    "",
+  ].join("\n"));
+}
+
+function removeDevVars() {
+  rmSync(devVarsPath, { force: true });
 }
 
 async function stopWorker(child) {

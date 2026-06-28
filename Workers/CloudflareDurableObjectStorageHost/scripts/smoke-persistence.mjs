@@ -7,6 +7,7 @@ import {
 } from "../src/StorageKitWireConstants.js";
 
 const endpoint = process.env.STORAGEKIT_SMOKE_ENDPOINT;
+const accessToken = process.env.STORAGEKIT_ACCESS_TOKEN;
 const mode = process.env.STORAGEKIT_PERSISTENCE_MODE ?? "write-read";
 const runID = process.env.STORAGEKIT_PERSISTENCE_RUN_ID ?? "release-candidate";
 const tokenHex = process.env.STORAGEKIT_PERSISTENCE_TOKEN ?? randomBytes(16).toString("hex");
@@ -19,6 +20,10 @@ const keyBytes = new Uint8Array([0x70, 0x65, 0x72, 0x73, 0x69, 0x73, 0x74]);
 
 if (endpoint === undefined || endpoint.length === 0) {
   throw new Error("STORAGEKIT_SMOKE_ENDPOINT is required");
+}
+
+if (accessToken === undefined || accessToken.length === 0) {
+  throw new Error("STORAGEKIT_ACCESS_TOKEN is required");
 }
 
 if (!["write", "read", "write-read"].includes(mode)) {
@@ -74,6 +79,7 @@ async function send(request) {
     headers: {
       "content-type": "application/octet-stream",
       accept: "application/octet-stream",
+      authorization: `Bearer ${accessToken}`,
     },
     body: StorageKitWireCodec.encodeRequest(request),
   });

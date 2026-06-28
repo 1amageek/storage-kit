@@ -5,6 +5,8 @@ import { nameForScope } from "../src/StorageKitScope.js";
 import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
 import { operation, statusCode } from "../src/StorageKitWireConstants.js";
 
+const accessToken = "storage-kit-test-token";
+
 test("worker routes binary requests to the Durable Object name derived from scope", async () => {
   const scope = {
     databaseID: "main",
@@ -20,8 +22,10 @@ test("worker routes binary requests to the Durable Object name derived from scop
   let observedBody = null;
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
+    headers: authorizedHeaders(),
     body: requestBytes,
   }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
     STORAGEKIT_DURABLE_OBJECT: {
       idFromName(name) {
         observedName = name;
@@ -60,8 +64,10 @@ test("worker routes binary requests to the Durable Object name derived from scop
 test("worker returns a typed failure when routing cannot decode scope", async () => {
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
+    headers: authorizedHeaders(),
     body: new Uint8Array([0xff]),
   }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
     STORAGEKIT_DURABLE_OBJECT: {
       idFromName() {
         throw new Error("unexpected routing");
@@ -88,9 +94,73 @@ test("worker returns a typed failure when the Durable Object binding is absent",
 
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
+    headers: authorizedHeaders(),
     body: requestBytes,
-  }), {});
+  }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
+  });
 
   const decodedResponse = StorageKitWireCodec.decodeResponse(new Uint8Array(await response.arrayBuffer()));
   assert.equal(decodedResponse.status, statusCode.resourceUnavailable);
 });
+
+test("worker fails closed without a configured access token", async () => {
+  const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
+    method: "POST",
+    body: new Uint8Array(),
+  }), {});
+
+  assert.equal(response.status, 503);
+});
+
+test("worker rejects missing or mismatched bearer token", async () => {
+  const missing = await worker.fetch(new Request("https://storage-kit.example.test/", {
+    method: "POST",
+    body: new Uint8Array(),
+  }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
+  });
+  assert.equal(missing.status, 401);
+
+  const mismatched = await worker.fetch(new Request("https://storage-kit.example.test/", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer wrong-token",
+    },
+    body: new Uint8Array(),
+  }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
+  });
+  assert.equal(mismatched.status, 401);
+});
+
+test("worker rejects oversized payloads before routing", async () => {
+  const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
+    method: "POST",
+    headers: authorizedHeaders({
+      "content-length": "3",
+    }),
+    body: new Uint8Array([0x01, 0x02, 0x03]),
+  }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
+    STORAGEKIT_MAX_REQUEST_BYTES: "2",
+    STORAGEKIT_DURABLE_OBJECT: {
+      idFromName() {
+        throw new Error("unexpected routing");
+      },
+      get() {
+        throw new Error("unexpected routing");
+      },
+    },
+  });
+
+  assert.equal(response.status, 413);
+});
+
+function authorizedHeaders(extra = {}) {
+  return {
+    authorization: `Bearer ${accessToken}`,
+    "content-type": "application/octet-stream",
+    ...extra,
+  };
+}

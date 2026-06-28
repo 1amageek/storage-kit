@@ -3,6 +3,18 @@
   "name": "storage-kit-cloudflare-durable-object-storage-host",
   "main": "src/CloudflareDurableObjectStorageWorker.js",
   "compatibility_date": "2026-06-27",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    "STORAGEKIT_MAX_REQUEST_BYTES": "4194304"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "head_sampling_rate": 1
+    }
+  },
   "durable_objects": {
     "bindings": [
       {
