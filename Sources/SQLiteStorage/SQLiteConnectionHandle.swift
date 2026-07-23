@@ -36,6 +36,13 @@ final class SQLiteConnectionHandle: Sendable {
         }
     }
 
+    func getKey(plan: SQLiteKeySelectionPlan) throws -> Bytes? {
+        try connection.withLock { connection in
+            let connection = try Self.unwrap(connection)
+            return try connection.getKey(plan: plan)
+        }
+    }
+
     func delete(key: Bytes) throws {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
@@ -50,22 +57,74 @@ final class SQLiteConnectionHandle: Sendable {
         }
     }
 
-    func getRange(
+    func openRangeCursor(
+        ownerTransactionIdentifier: UInt64,
         begin: SQLRangeBoundary,
         end: SQLRangeBoundary,
         limit: Int,
         reverse: Bool
-    ) throws -> [(key: Bytes, value: Bytes)] {
+    ) throws -> UInt64 {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
-            return try connection.getRange(begin: begin, end: end, limit: limit, reverse: reverse)
+            return try connection.openRangeCursor(
+                ownerTransactionIdentifier: ownerTransactionIdentifier,
+                begin: begin,
+                end: end,
+                limit: limit,
+                reverse: reverse
+            )
         }
     }
 
-    func getAllEntries() throws -> [(key: Bytes, value: Bytes)] {
+    func nextRangeCursor(
+        identifier: UInt64
+    ) throws -> (key: Bytes, value: Bytes)? {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
-            return try connection.getAllEntries()
+            return try connection.nextRangeCursor(identifier: identifier)
+        }
+    }
+
+    func closeRangeCursor(identifier: UInt64) {
+        connection.withLock { connection in
+            connection?.closeRangeCursor(identifier: identifier)
+        }
+    }
+
+    func closeRangeCursors(ownerTransactionIdentifier: UInt64) {
+        connection.withLock { connection in
+            connection?.closeRangeCursors(
+                ownerTransactionIdentifier: ownerTransactionIdentifier
+            )
+        }
+    }
+
+    var rangeInstrumentation: SQLiteRangeInstrumentation {
+        connection.withLock { connection in
+            connection?.rangeInstrumentation
+                ?? SQLiteRangeInstrumentation(
+                    prepareCount: 0,
+                    stepCount: 0,
+                    payloadCopyCount: 0,
+                    finalizeCount: 0,
+                    openCursorCount: 0
+                )
+        }
+    }
+
+    func pragmaInt64(_ name: String) throws -> Int64 {
+        try connection.withLock { connection in
+            let connection = try Self.unwrap(connection)
+            return try connection.pragmaInt64(name)
+        }
+    }
+
+    func runIncrementalVacuum(
+        maximumPages: UInt64
+    ) throws -> SQLiteIncrementalCompactionMetrics {
+        try connection.withLock { connection in
+            let connection = try Self.unwrap(connection)
+            return try connection.runIncrementalVacuum(maximumPages: maximumPages)
         }
     }
 

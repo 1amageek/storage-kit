@@ -26,6 +26,9 @@ export function encodeBase64URL(bytes) {
 }
 
 export function decodeBase64URL(value) {
+  if (typeof value !== "string" || value.length % 4 === 1) {
+    throw new Error("Invalid base64url length");
+  }
   const output = [];
   let buffer = 0;
   let bits = 0;
@@ -41,5 +44,9 @@ export function decodeBase64URL(value) {
       output.push((buffer >> bits) & 0xff);
     }
   }
-  return new Uint8Array(output);
+  const bytes = new Uint8Array(output);
+  if (encodeBase64URL(bytes) !== value) {
+    throw new Error("Non-canonical base64url value");
+  }
+  return bytes;
 }

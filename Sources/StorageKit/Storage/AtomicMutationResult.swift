@@ -39,10 +39,13 @@ extension MutationType {
     /// - Throws: `StorageError(.invalidOperation)` for versionstamp mutations.
     public func apply(to existing: Bytes?, param: Bytes) throws -> AtomicMutationResult {
         do {
-            let result = try embeddedMutationType.apply(to: existing, param: param)
+            let result = try embeddedMutationType.apply(
+                to: existing?.embeddedBytes,
+                param: param.embeddedBytes
+            )
             switch result {
             case .set(let bytes):
-                return .set(bytes)
+                return .set(Bytes(bytes))
             case .clear:
                 return .clear
             case .unchanged:

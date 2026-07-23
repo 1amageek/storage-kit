@@ -1,11 +1,15 @@
 /// Embedded write operation using StorageKit atomic mutation semantics.
 public enum EmbeddedWriteOperation: Sendable, Hashable {
-    case set(key: [UInt8], value: [UInt8])
-    case clear(key: [UInt8])
-    case clearRange(begin: [UInt8], end: [UInt8])
-    case atomic(key: [UInt8], param: [UInt8], mutationType: EmbeddedMutationType)
+    case set(key: EmbeddedBytes, value: EmbeddedBytes)
+    case clear(key: EmbeddedBytes)
+    case clearRange(begin: EmbeddedBytes, end: EmbeddedBytes)
+    case atomic(
+        key: EmbeddedBytes,
+        param: EmbeddedBytes,
+        mutationType: EmbeddedMutationType
+    )
 
-    public func encode(into writer: inout EmbeddedBinaryWriter) throws(EmbeddedWireError) {
+    public func encode(into writer: inout EmbeddedWireWriter) throws(EmbeddedWireError) {
         switch self {
         case .set(let key, let value):
             writer.writeUInt8(1)
@@ -26,18 +30,24 @@ public enum EmbeddedWriteOperation: Sendable, Hashable {
         }
     }
 
-    public init(from reader: inout EmbeddedBinaryReader) throws(EmbeddedWireError) {
+    public init(from reader: inout EmbeddedWireReader) throws(EmbeddedWireError) {
         let tag = try reader.readUInt8()
         switch tag {
         case 1:
-            self = .set(key: try reader.readBytes(), value: try reader.readBytes())
+            self = .set(
+                key: try reader.readByteRegion(),
+                value: try reader.readByteRegion()
+            )
         case 2:
-            self = .clear(key: try reader.readBytes())
+            self = .clear(key: try reader.readByteRegion())
         case 3:
-            self = .clearRange(begin: try reader.readBytes(), end: try reader.readBytes())
+            self = .clearRange(
+                begin: try reader.readByteRegion(),
+                end: try reader.readByteRegion()
+            )
         case 4:
-            let key = try reader.readBytes()
-            let param = try reader.readBytes()
+            let key = try reader.readByteRegion()
+            let param = try reader.readByteRegion()
             let mutationType = try EmbeddedMutationType(from: &reader)
             self = .atomic(key: key, param: param, mutationType: mutationType)
         default:

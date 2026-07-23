@@ -2,13 +2,33 @@ import StorageKitEmbeddedCore
 
 public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
     public let scope: CloudflareDurableObjectEmbeddedScope
-    public let begin: EmbeddedKeySelector
-    public let end: EmbeddedKeySelector
+    public let begin: EmbeddedRangeBoundary
+    public let end: EmbeddedRangeBoundary
     public let limit: Int
     public let reverse: Bool
     public let snapshot: Bool
     public let expectedReadVersion: Int64?
-    public let cursor: String?
+    public let cursorKey: EmbeddedBytes?
+
+    public init(
+        scope: CloudflareDurableObjectEmbeddedScope,
+        begin: EmbeddedRangeBoundary,
+        end: EmbeddedRangeBoundary,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        expectedReadVersion: Int64? = nil,
+        cursorKey: EmbeddedBytes? = nil
+    ) {
+        self.scope = scope
+        self.begin = begin
+        self.end = end
+        self.limit = limit
+        self.reverse = reverse
+        self.snapshot = snapshot
+        self.expectedReadVersion = expectedReadVersion
+        self.cursorKey = cursorKey
+    }
 
     public init(
         scope: CloudflareDurableObjectEmbeddedScope,
@@ -18,19 +38,24 @@ public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
         reverse: Bool,
         snapshot: Bool,
         expectedReadVersion: Int64? = nil,
-        cursor: String? = nil
+        cursorKey: EmbeddedBytes? = nil
     ) {
-        self.scope = scope
-        self.begin = begin
-        self.end = end
-        self.limit = limit
-        self.reverse = reverse
-        self.snapshot = snapshot
-        self.expectedReadVersion = expectedReadVersion
-        self.cursor = cursor
+        self.init(
+            scope: scope,
+            begin: .selector(begin),
+            end: .selector(end),
+            limit: limit,
+            reverse: reverse,
+            snapshot: snapshot,
+            expectedReadVersion: expectedReadVersion,
+            cursorKey: cursorKey
+        )
     }
 
-    func encode(into writer: inout EmbeddedBinaryWriter) throws(CloudflareDurableObjectEmbeddedError) {
+    func encode(into writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) {
+        guard limit > 0, limit <= EmbeddedLimits.cloudflareDurableObject.maxRangeLimit else {
+            throw .wire(.invalidRangeLimit)
+        }
         try scope.encode(into: &writer)
         try CloudflareDurableObjectEmbeddedError.encode(begin, into: &writer)
         try CloudflareDurableObjectEmbeddedError.encode(end, into: &writer)
@@ -38,39 +63,54 @@ public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
         writer.writeBool(reverse)
         writer.writeBool(snapshot)
         try CloudflareDurableObjectEmbeddedReadRequest.writeOptionalVersion(expectedReadVersion, into: &writer)
-        try Self.writeOptionalString(cursor, into: &writer)
+        try Self.writeOptionalCursorKey(cursorKey, into: &writer)
     }
 
-    init(from reader: inout EmbeddedBinaryReader) throws(CloudflareDurableObjectEmbeddedError) {
+    init(from reader: inout EmbeddedWireReader) throws(CloudflareDurableObjectEmbeddedError) {
         self.scope = try CloudflareDurableObjectEmbeddedScope(from: &reader)
-        self.begin = try CloudflareDurableObjectEmbeddedError.readKeySelector(from: &reader)
-        self.end = try CloudflareDurableObjectEmbeddedError.readKeySelector(from: &reader)
-        self.limit = Int(try CloudflareDurableObjectEmbeddedError.readInt32(from: &reader))
+        self.begin = try CloudflareDurableObjectEmbeddedError.readRangeBoundary(
+            from: &reader
+        )
+        self.end = try CloudflareDurableObjectEmbeddedError.readRangeBoundary(
+            from: &reader
+        )
+        let limit = Int(try CloudflareDurableObjectEmbeddedError.readInt32(from: &reader))
+        guard limit > 0, limit <= EmbeddedLimits.cloudflareDurableObject.maxRangeLimit else {
+            throw .wire(.invalidRangeLimit)
+        }
+        self.limit = limit
         self.reverse = try CloudflareDurableObjectEmbeddedError.readBool(from: &reader)
         self.snapshot = try CloudflareDurableObjectEmbeddedError.readBool(from: &reader)
         self.expectedReadVersion = try CloudflareDurableObjectEmbeddedReadRequest.readOptionalVersion(from: &reader)
-        self.cursor = try Self.readOptionalString(from: &reader)
+        self.cursorKey = try Self.readOptionalCursorKey(from: &reader)
     }
 
-    static func writeOptionalString(
-        _ value: String?,
-        into writer: inout EmbeddedBinaryWriter
+    static func writeOptionalCursorKey(
+        _ value: EmbeddedBytes?,
+        into writer: inout EmbeddedWireWriter
     ) throws(CloudflareDurableObjectEmbeddedError) {
         if let value {
             writer.writeBool(true)
-            try CloudflareDurableObjectEmbeddedError.writeString(value, into: &writer)
+            try CloudflareDurableObjectEmbeddedError.writeBytes(
+                value,
+                maximum: EmbeddedLimits.cloudflareDurableObject.maxKeyBytes,
+                into: &writer
+            )
         } else {
             writer.writeBool(false)
         }
     }
 
-    static func readOptionalString(
-        from reader: inout EmbeddedBinaryReader
-    ) throws(CloudflareDurableObjectEmbeddedError) -> String? {
+    static func readOptionalCursorKey(
+        from reader: inout EmbeddedWireReader
+    ) throws(CloudflareDurableObjectEmbeddedError) -> EmbeddedBytes? {
         let hasValue = try CloudflareDurableObjectEmbeddedError.readBool(from: &reader)
         guard hasValue else {
             return nil
         }
-        return try CloudflareDurableObjectEmbeddedError.readString(from: &reader)
+        return try CloudflareDurableObjectEmbeddedError.readBytes(
+            from: &reader,
+            maximum: EmbeddedLimits.cloudflareDurableObject.maxKeyBytes
+        )
     }
 }

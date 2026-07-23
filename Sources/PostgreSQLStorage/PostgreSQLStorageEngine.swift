@@ -53,7 +53,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     public typealias Configuration = PostgreSQLConfiguration
     public typealias TransactionType = PostgreSQLStorageTransaction
 
-    private struct OperationClosureError: Error {
+    private struct TransactionBodyFailure: Error {
         let underlying: any Error
     }
 
@@ -205,8 +205,16 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                         do {
                             result = try await operation(tx)
                         } catch {
-                            await tx.rollbackInternal(connection: conn)
-                            throw Self.operationClosureError(from: error)
+                            let operationError = Self.preserveTransactionBodyFailure(from: error)
+                            do {
+                                try await tx.rollbackInternal(connection: conn)
+                            } catch {
+                                throw StorageTransactionCleanupError(
+                                    operationError: operationError,
+                                    cancellationError: error
+                                )
+                            }
+                            throw operationError
                         }
                         try await tx.commitInternal(connection: conn)
                         return result
@@ -216,7 +224,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                 }
             }
         } catch {
-            throw Self.storageBoundaryError(from: error)
+            throw Self.recoverTransactionBodyFailure(from: error)
         }
     }
 
@@ -248,7 +256,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                     do {
                         result = try await operation(tx)
                     } catch {
-                        throw Self.operationClosureError(from: error)
+                        throw Self.preserveTransactionBodyFailure(from: error)
                     }
                     // Flush buffered writes; each executes as its own auto-commit.
                     try await tx.commitInternal(connection: conn, skipCommitStatement: true)
@@ -256,7 +264,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                 }
             }
         } catch {
-            throw Self.storageBoundaryError(from: error)
+            throw Self.recoverTransactionBodyFailure(from: error)
         }
     }
 
@@ -296,18 +304,25 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
 
     // MARK: - Error Mapping
 
-    private static func operationClosureError(from error: any Error) -> any Error {
+    private static func preserveTransactionBodyFailure(
+        from error: any Error
+    ) -> any Error {
         if error is CancellationError {
             return error
         }
         if let storageError = error as? StorageError {
             return storageError
         }
-        return OperationClosureError(underlying: error)
+        return TransactionBodyFailure(underlying: error)
     }
 
-    private static func storageBoundaryError(from error: any Error) -> any Error {
-        if let operationError = error as? OperationClosureError {
+    private static func recoverTransactionBodyFailure(
+        from error: any Error
+    ) -> any Error {
+        if error is StorageTransactionCleanupError {
+            return error
+        }
+        if let operationError = error as? TransactionBodyFailure {
             return operationError.underlying
         }
         if error is CancellationError {

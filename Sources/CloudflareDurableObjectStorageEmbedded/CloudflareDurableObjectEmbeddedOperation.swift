@@ -6,8 +6,10 @@ public enum CloudflareDurableObjectEmbeddedOperation: UInt8, Sendable, Hashable 
     case read = 2
     case range = 3
     case commit = 4
+    case rangeSize = 5
+    case rangeSplitPoints = 6
 
-    init(from reader: inout EmbeddedBinaryReader) throws(CloudflareDurableObjectEmbeddedError) {
+    init(from reader: inout EmbeddedWireReader) throws(CloudflareDurableObjectEmbeddedError) {
         let tag = try CloudflareDurableObjectEmbeddedError.readUInt8(from: &reader)
         guard let operation = CloudflareDurableObjectEmbeddedOperation(rawValue: tag) else {
             throw CloudflareDurableObjectEmbeddedError.unknownOperation(tag)
@@ -15,7 +17,7 @@ public enum CloudflareDurableObjectEmbeddedOperation: UInt8, Sendable, Hashable 
         self = operation
     }
 
-    func encode(into writer: inout EmbeddedBinaryWriter) {
+    func encode(into writer: inout EmbeddedWireWriter) {
         writer.writeUInt8(rawValue)
     }
 }

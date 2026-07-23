@@ -1,6 +1,8 @@
 # StorageKit
 
-A unified key-value storage abstraction for Swift, with pluggable backends for **FoundationDB**, **SQLite**, and **in-memory** storage.
+A unified key-value storage abstraction for Swift, with pluggable backends for
+**FoundationDB**, **SQLite**, **Cloudflare Durable Object SQLite**, and
+**in-memory** storage.
 
 StorageKit provides a single `Transaction` protocol that works identically across all backends. Write your data access code once, then swap the backend without changing application logic.
 
@@ -11,6 +13,8 @@ StorageKit provides a single `Transaction` protocol that works identically acros
 - **Zero-copy design** — `getRange` returns backend-native `AsyncSequence` types without intermediate wrappers
 - **Swift 6 concurrency** — Full `Sendable` conformance, `Mutex` for synchronization, no `@unchecked Sendable`
 - **Nested transactions** — SQLite backend detects nested `withTransaction` calls via `@TaskLocal` and reuses the existing transaction
+- **Embedded Cloudflare client** — Foundation-free StorageKit Wire v1 codec for Embedded Swift
+- **Durable Object transactions** — SQLite persistence, pinned reads, selector-aware conflicts, bounded pagination, and atomic commit
 
 ## Installation
 
@@ -32,6 +36,7 @@ Then add the targets you need:
         // Pick one (or more) backends:
         .product(name: "SQLiteStorage", package: "storage-kit"),
         .product(name: "FDBStorage", package: "storage-kit"),
+        .product(name: "CloudflareDurableObjectStorage", package: "storage-kit"),
     ]
 )
 ```
@@ -47,7 +52,7 @@ let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
 // Write and read within a transaction
 try await engine.withTransaction { tx in
-    tx.setValue([1, 2, 3], for: Array("hello".utf8))
+    try tx.setValue([1, 2, 3], for: Array("hello".utf8))
 
     let value = try await tx.getValue(for: Array("hello".utf8))
     // value == [1, 2, 3]
@@ -68,7 +73,7 @@ let engine = InMemoryEngine()
 
 ### SQLite
 
-File-based or in-memory. Uses `WITHOUT ROWID` table for efficient BLOB key B-tree storage. Transactions are serialized with `NSLock`.
+File-based or in-memory. Uses a `WITHOUT ROWID` table for efficient BLOB key B-tree storage. A coordinator actor owns each transaction from `BEGIN IMMEDIATE` through commit or rollback, while short synchronous connection access is protected by `Mutex`.
 
 ```swift
 // File-based
@@ -86,7 +91,28 @@ Requires a running FDB cluster. Wraps FDB's native `TransactionProtocol` with au
 let engine = try await FDBStorageEngine(configuration: .init())
 ```
 
-FDB client initialization is handled automatically with a thread-safe `InitializationGuard`.
+FoundationDB client startup is serialized automatically across concurrent
+storage-engine initialization.
+
+### Cloudflare Durable Object SQLite
+
+The Cloudflare backend is split by runtime boundary:
+
+| Product | Use |
+|---|---|
+| `CloudflareDurableObjectStorageEmbedded` | Foundation-free StorageKit Wire v1 values and codec |
+| `CloudflareDurableObjectStorage` | `StorageEngine`, transaction state, and typed StorageKit Wire client |
+| `CloudflareDurableObjectStorageHTTP` | URLSession transport for native clients |
+| `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch` transport for a WASI reactor |
+
+The Worker implementation lives in
+`Workers/CloudflareDurableObjectStorageHost`. It routes one canonical storage
+scope to one Durable Object and persists keys, metadata, and conflict history in
+Durable Object SQLite.
+
+StorageKit Wire v1 is a bounded binary storage protocol. It is intentionally
+separate from database-framework's DatabaseWire query protocol. See
+`Docs/CLOUDFLARE_DURABLE_OBJECT_STORAGE_DESIGN.md` for the complete contract.
 
 ## Core Concepts
 
@@ -103,13 +129,13 @@ try await engine.withTransaction { tx in
     let results = try await tx.collectRange(begin: startKey, end: endKey)
 
     // Write (buffered until commit)
-    tx.setValue(newValue, for: key)
+    try tx.setValue(newValue, for: key)
 
     // Delete
-    tx.clear(key: key)
+    try tx.clear(key: key)
 
     // Range delete
-    tx.clearRange(beginKey: start, endKey: end)
+    try tx.clearRange(beginKey: start, endKey: end)
 
     // Auto-committed on success, rolled back on error
 }
@@ -170,13 +196,34 @@ users.contains(key) // true
 Hierarchical namespace management (equivalent to FDB's DirectoryLayer):
 
 ```swift
-let dir = engine.directoryService
-let userSpace = try await dir.createOrOpen(path: ["app", "users"])
-let indexSpace = try await dir.createOrOpen(path: ["app", "users", "email_index"])
+let userSpace = try await engine.createOrOpenDirectory(
+    path: ["app", "users"]
+)
+
+try await engine.withTransaction { transaction in
+    let indexSpace = try await engine.directoryService.createOrOpen(
+        path: ["app", "users", "email_index"],
+        transaction: transaction
+    )
+    // Directory metadata and application writes now share one transaction.
+}
 ```
 
 - **FDB**: `FDBDirectoryService` — dynamic prefix allocation via DirectoryLayer with HCA
-- **SQLite / InMemory**: `StaticDirectoryService` — deterministic Tuple encoding (same API, no dynamic allocation)
+- **SQLite / InMemory**: `StaticDirectoryService` — deterministic Tuple encoding; namespace enumeration and removal are explicitly unsupported
+
+Every `DirectoryService` operation receives the caller-owned transaction. The
+one-shot `StorageEngine` helpers create a transaction for convenience; use the
+transaction-aware service API whenever namespace metadata and data mutations
+must commit atomically.
+
+### Physical Compaction
+
+Physical storage maintenance is an optional transaction capability. Native
+`SQLiteStorage` exposes `DatabaseStorageCompactionTransaction`; Cloudflare
+Durable Object SQLite does not, because the public platform does not expose the
+required vacuum PRAGMAs. Capability absence is reported as unsupported and is
+never treated as a successful no-op.
 
 ## Architecture
 
@@ -193,12 +240,10 @@ let indexSpace = try await dir.createOrOpen(path: ["app", "users", "email_index"
 │  │          │  │            │  │ DirectoryService     │ │
 │  └──────────┘  └────────────┘  └──────────────────────┘ │
 ├─────────────┬───────────────┬───────────────────────────┤
-│  InMemory   │  SQLiteStorage│      FDBStorage           │
-│             │               │                           │
-│ Sorted array│ WITHOUT ROWID │ Native FDB transaction    │
-│ + snapshot  │ + NSLock      │ + automatic retry         │
-│ isolation   │ serialization │ + zero-copy range results │
-└─────────────┴───────────────┴───────────────────────────┘
+│  InMemory   │ SQLiteStorage │ FDBStorage │ Cloudflare DO │
+│ Sorted array│ WITHOUT ROWID │ Native FDB │ DO SQLite     │
+│ + snapshot  │ + serialized  │ + retry    │ + conflicts   │
+└─────────────┴───────────────┴────────────┴───────────────┘
 ```
 
 ### Key Internal Types
@@ -212,7 +257,7 @@ let indexSpace = try await dir.createOrOpen(path: ["app", "users", "email_index"
 
 ## Requirements
 
-- Swift 6.0+
+- Swift 6.4+
 - macOS 15+ / iOS 18+
 - FoundationDB 7.1+ (for FDBStorage only)
 

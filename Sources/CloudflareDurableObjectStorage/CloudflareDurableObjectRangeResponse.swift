@@ -1,19 +1,19 @@
 /// Host range response.
-public struct CloudflareDurableObjectRangeResponse: Sendable, Hashable, Codable {
+public struct CloudflareDurableObjectRangeResponse: Sendable, Hashable {
     public let rows: [CloudflareDurableObjectKeyValue]
-    public let nextCursor: String?
+    public let hasMore: Bool
     public let currentCommitVersion: Int64
-    public let conflictRange: CloudflareDurableObjectConflictRange?
+    public let readConflictRanges: [CloudflareDurableObjectConflictRange]
 
     public init(
         rows: [CloudflareDurableObjectKeyValue],
-        nextCursor: String? = nil,
+        hasMore: Bool,
         currentCommitVersion: Int64,
-        conflictRange: CloudflareDurableObjectConflictRange? = nil
+        readConflictRanges: [CloudflareDurableObjectConflictRange] = []
     ) {
         self.rows = rows
-        self.nextCursor = nextCursor
+        self.hasMore = hasMore
         self.currentCommitVersion = currentCommitVersion
-        self.conflictRange = conflictRange
+        self.readConflictRanges = readConflictRanges
     }
 }

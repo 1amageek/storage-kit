@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// Tuple-based key space prefix management.
 ///
@@ -37,19 +41,97 @@ public struct Subspace: Sendable, Hashable, Equatable {
 
     /// Create a nested subspace with additional elements.
     public func subspace(_ elements: any TupleElement...) -> Subspace {
-        Subspace(prefix: prefix + Tuple(elements).pack())
+        Subspace(prefix: append(Tuple(elements)))
     }
 
     /// Nest via subscript (alias for subspace).
     public subscript(_ elements: any TupleElement...) -> Subspace {
-        Subspace(prefix: prefix + Tuple(elements).pack())
+        Subspace(prefix: append(Tuple(elements)))
     }
 
     // MARK: - Pack / Unpack
 
     /// Encode a Tuple with this subspace's prefix prepended.
     public func pack(_ tuple: Tuple) -> Bytes {
-        prefix + tuple.pack()
+        append(tuple)
+    }
+
+    /// Encode borrowed tuple elements directly into one final key allocation.
+    public func pack<Elements: Collection>(
+        elements: Elements
+    ) -> Bytes where Elements.Element == any TupleElement {
+        pack(elements: elements, appending: nil)
+    }
+
+    /// Encode borrowed tuple elements and a final marker directly into one
+    /// final key allocation.
+    public func pack<Elements: Collection>(
+        elements: Elements,
+        appending finalElement: (any TupleElement)?
+    ) -> Bytes where Elements.Element == any TupleElement {
+        var measuringSink = TupleEncodingSink(measuringFrom: 0)
+        Tuple.encodePacked(
+            elements,
+            appending: finalElement,
+            to: &measuringSink
+        )
+        let tupleByteCount = measuringSink.byteCount
+        let (byteCount, overflow) = prefix.count.addingReportingOverflow(
+            tupleByteCount
+        )
+        precondition(!overflow, "Subspace key byte count overflow")
+        return Bytes.copying(count: byteCount) { buffer in
+            prefix.withUnsafeBytes { source in
+                let destination = UnsafeMutableRawBufferPointer(
+                    start: buffer.baseAddress,
+                    count: prefix.count
+                )
+                destination.copyMemory(from: source)
+            }
+            var sink = TupleEncodingSink(
+                buffer: buffer,
+                startingAt: prefix.count
+            )
+            Tuple.encodePacked(
+                elements,
+                appending: finalElement,
+                to: &sink
+            )
+            sink.validateFinalByteCount(byteCount)
+        }
+    }
+
+    /// Builds a pre-measured tuple suffix directly in one final key allocation.
+    ///
+    /// The encoder closure is synchronous. Any borrowed pointer exposed through
+    /// the sink must not escape the closure.
+    public func pack<Failure: Error>(
+        encodedTupleByteCount: Int,
+        encode: (inout TupleEncodingSink) throws(Failure) -> Void
+    ) throws(Failure) -> Bytes {
+        precondition(encodedTupleByteCount >= 0)
+        let (byteCount, overflow) = prefix.count.addingReportingOverflow(
+            encodedTupleByteCount
+        )
+        precondition(!overflow, "Subspace key byte count overflow")
+        let initialize: (
+            UnsafeMutableRawBufferPointer
+        ) throws(Failure) -> Void = { buffer in
+            prefix.withUnsafeBytes { source in
+                let destination = UnsafeMutableRawBufferPointer(
+                    start: buffer.baseAddress,
+                    count: prefix.count
+                )
+                destination.copyMemory(from: source)
+            }
+            var sink = TupleEncodingSink(
+                buffer: buffer,
+                startingAt: prefix.count
+            )
+            try encode(&sink)
+            sink.validateFinalByteCount(byteCount)
+        }
+        return try Bytes.copying(count: byteCount, initialize)
     }
 
     /// Strip the prefix and decode a Tuple.
@@ -57,9 +139,16 @@ public struct Subspace: Sendable, Hashable, Equatable {
         guard contains(key) else {
             throw TupleError.prefixMismatch
         }
-        let remaining = Array(key[prefix.count...])
-        let elements = try Tuple.unpack(from: remaining)
-        return Tuple(elements)
+        let remaining = key[prefix.count..<key.count]
+        return try Tuple(packed: remaining)
+    }
+
+    /// Opens a single-pass decoder over the key suffix without copying it.
+    public func tupleCursor(for key: Bytes) throws -> TupleCursor {
+        guard contains(key) else {
+            throw TupleError.prefixMismatch
+        }
+        return TupleCursor(bytes: key[prefix.count..<key.count])
     }
 
     // MARK: - Contains
@@ -94,9 +183,32 @@ public struct Subspace: Sendable, Hashable, Equatable {
 
     /// Generate a key range from a Tuple range.
     public func range(from start: Tuple, to end: Tuple) -> (begin: Bytes, end: Bytes) {
-        let beginKey = prefix + start.pack()
-        let endKey = prefix + end.pack()
+        let beginKey = append(start)
+        let endKey = append(end)
         return (begin: beginKey, end: endKey)
+    }
+
+    private func append(_ tuple: Tuple) -> Bytes {
+        let tupleByteCount = tuple.packedByteCount
+        let (byteCount, overflow) = prefix.count.addingReportingOverflow(
+            tupleByteCount
+        )
+        precondition(!overflow)
+        return Bytes.copying(count: byteCount) { buffer in
+            prefix.withUnsafeBytes { source in
+                let destination = UnsafeMutableRawBufferPointer(
+                    start: buffer.baseAddress,
+                    count: prefix.count
+                )
+                destination.copyMemory(from: source)
+            }
+            var sink = TupleEncodingSink(
+                buffer: buffer,
+                startingAt: prefix.count
+            )
+            tuple.encodePacked(to: &sink)
+            sink.validateFinalByteCount(byteCount)
+        }
     }
 
     /// Prefix-based range [prefix, strinc(prefix)).

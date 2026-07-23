@@ -86,11 +86,11 @@ struct ByteComparisonTests {
 
         try await engine.withTransaction { tx in
             // Insert keys that exercise prefix comparison
-            tx.setValue([1], for: [0x01, 0xFF])
-            tx.setValue([2], for: [0x01])
-            tx.setValue([3], for: [0x01, 0x00])
-            tx.setValue([4], for: [0x02])
-            tx.setValue([5], for: [0x00])
+            try tx.setValue([1], for: [0x01, 0xFF])
+            try tx.setValue([2], for: [0x01])
+            try tx.setValue([3], for: [0x01, 0x00])
+            try tx.setValue([4], for: [0x02])
+            try tx.setValue([5], for: [0x00])
         }
 
         try await engine.withTransaction { tx in

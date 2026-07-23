@@ -18,27 +18,35 @@ import FoundationDB
 public final class FDBStorageEngine: StorageEngine, Sendable {
 
     public struct Configuration: Sendable {
-        nonisolated(unsafe) let database: (any DatabaseProtocol)?
+        let database: (any DatabaseProtocol)?
+        let commitRequestLimit: CommitRequestLimit
 
         /// Use the default cluster. FDB client library is initialized automatically.
-        public init() {
+        public init(
+            commitRequestLimit: CommitRequestLimit = .default
+        ) {
             self.database = nil
+            self.commitRequestLimit = commitRequestLimit
         }
 
         /// Use a specific database instance.
-        public init(database: any DatabaseProtocol) {
+        public init(
+            database: any DatabaseProtocol,
+            commitRequestLimit: CommitRequestLimit = .default
+        ) {
             self.database = database
+            self.commitRequestLimit = commitRequestLimit
         }
     }
 
-    /// Serializes FDB client library initialization to prevent TOCTOU races.
+    /// Serializes FoundationDB client startup to prevent TOCTOU races.
     ///
     /// `FDBClient.initialize()` throws if called twice. Without serialization,
     /// concurrent `init(configuration:)` calls could both observe `isInitialized == false`
     /// and race into `initialize()`.
-    private static let initGuard = InitializationGuard()
+    private static let clientStartup = FoundationDBClientStartup()
 
-    private actor InitializationGuard {
+    private actor FoundationDBClientStartup {
         private var initialized = false
 
         func ensureInitialized() async throws {
@@ -50,19 +58,26 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
 
     public typealias TransactionType = FDBStorageTransaction
 
-    nonisolated(unsafe) public let database: any DatabaseProtocol
+    public let database: any DatabaseProtocol
+    private let transactionDomain = FoundationDBTransactionDomain()
+    private let commitRequestLimit: CommitRequestLimit
 
     public init(configuration: Configuration) async throws {
         if !FDBClient.isInitialized {
-            try await Self.initGuard.ensureInitialized()
+            try await Self.clientStartup.ensureInitialized()
         }
         self.database = try configuration.database ?? FDBClient.openDatabase()
+        self.commitRequestLimit = configuration.commitRequestLimit
     }
 
     public func createTransaction() throws -> FDBStorageTransaction {
         do {
             let fdbTx = try database.createTransaction()
-            return FDBStorageTransaction(fdbTx)
+            return try FDBStorageTransaction(
+                fdbTx,
+                transactionDomain: transactionDomain,
+                commitRequestLimit: commitRequestLimit
+            )
         } catch let error as FDBError {
             throw FDBStorageTransaction.convertFDBError(error, operation: .beginTransaction)
         } catch {
@@ -75,21 +90,53 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
     ) async throws -> T {
         let tx = try createTransaction()
         return try await ActiveTransactionScope.$current.withValue(tx) {
+            let result: T
             do {
-                let result = try await operation(tx)
+                result = try await operation(tx)
+            } catch let error as FDBError {
+                let converted = FDBStorageTransaction.convertFDBError(
+                    error,
+                    operation: .execute
+                )
+                try await cancel(tx, preserving: converted)
+                throw converted
+            } catch {
+                try await cancel(tx, preserving: error)
+                throw error
+            }
+
+            do {
                 try await tx.commit()
                 return result
-            } catch let error as FDBError {
-                tx.cancel()
-                throw FDBStorageTransaction.convertFDBError(error, operation: .commit)
             } catch {
-                tx.cancel()
+                if let storageError = error as? StorageError,
+                   storageError.code == .commitUnknownResult {
+                    throw storageError
+                }
+                try await cancel(tx, preserving: error)
                 throw error
             }
         }
     }
 
+    private func cancel(
+        _ transaction: FDBStorageTransaction,
+        preserving operationError: any Error
+    ) async throws {
+        do {
+            try await transaction.cancel()
+        } catch {
+            throw StorageTransactionCleanupError(
+                operationError: operationError,
+                cancellationError: error
+            )
+        }
+    }
+
     public var directoryService: any DirectoryService {
-        FDBDirectoryService(database: database)
+        FDBDirectoryService(
+            database: database,
+            transactionDomain: transactionDomain
+        )
     }
 }

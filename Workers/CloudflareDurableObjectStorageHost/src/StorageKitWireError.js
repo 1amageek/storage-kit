@@ -6,15 +6,22 @@ export class StorageKitWireError extends Error {
   }
 
   static truncated() {
-    return new StorageKitWireError("truncated", "Truncated binary message");
+    return new StorageKitWireError("truncated", "Truncated StorageKit Wire frame");
   }
 
   static trailingBytes() {
-    return new StorageKitWireError("trailingBytes", "Trailing bytes in binary message");
+    return new StorageKitWireError("trailingBytes", "Trailing bytes in StorageKit Wire frame");
   }
 
   static byteCountOverflow() {
-    return new StorageKitWireError("byteCountOverflow", "Binary count exceeds supported bounds");
+    return new StorageKitWireError("byteCountOverflow", "Encoded byte count exceeds supported bounds");
+  }
+
+  static limitExceeded(field, limit) {
+    return new StorageKitWireError(
+      "limitExceeded",
+      `${field} exceeds the configured limit of ${limit}`
+    );
   }
 
   static invalidBool(value) {
@@ -33,8 +40,8 @@ export class StorageKitWireError extends Error {
     return new StorageKitWireError("unknownStatus", `Unknown status: ${value}`);
   }
 
-  static unknownKeySelector(value) {
-    return new StorageKitWireError("unknownKeySelector", `Unknown key selector: ${value}`);
+  static unknownRangeBoundary(value) {
+    return new StorageKitWireError("unknownRangeBoundary", `Unknown range boundary: ${value}`);
   }
 
   static unknownMutationType(value) {
@@ -53,15 +60,33 @@ export class StorageKitWireError extends Error {
     return new StorageKitWireError("invalidScope", "Invalid Durable Object storage scope");
   }
 
-  static invalidCursor() {
-    return new StorageKitWireError("invalidCursor", "Invalid range cursor");
+  static invalidRangeContinuation() {
+    return new StorageKitWireError(
+      "invalidRangeContinuation",
+      "A range response cannot continue without returning a row"
+    );
   }
 
   static transactionConflict() {
     return new StorageKitWireError("transactionConflict", "Observed read version does not match current committed version");
   }
 
+  static scopeMismatch() {
+    return new StorageKitWireError(
+      "scopeMismatch",
+      "Storage scope does not match this Durable Object"
+    );
+  }
+
   static invalidOperation(message) {
     return new StorageKitWireError("invalidOperation", message);
+  }
+
+  static resourceUnavailable(message) {
+    return new StorageKitWireError("resourceUnavailable", message);
+  }
+
+  static backendContractViolation(message) {
+    return new StorageKitWireError("backendContractViolation", message);
   }
 }

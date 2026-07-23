@@ -7,42 +7,66 @@ public struct EmbeddedKeySelector: Sendable, Hashable {
         case lastLessThan = 4
     }
 
-    public let key: [UInt8]
-    public let kind: Kind
+    public let key: EmbeddedBytes
+    public let orEqual: Bool
+    public let offset: Int
 
-    public init(key: [UInt8], kind: Kind) {
+    public init(key: EmbeddedBytes, kind: Kind) {
         self.key = key
-        self.kind = kind
-    }
-
-    public func encode(into writer: inout EmbeddedBinaryWriter) throws(EmbeddedWireError) {
-        writer.writeUInt8(kind.rawValue)
-        try writer.writeBytes(key)
-    }
-
-    public init(from reader: inout EmbeddedBinaryReader) throws(EmbeddedWireError) {
-        let rawKind = try reader.readUInt8()
-        guard let kind = Kind(rawValue: rawKind) else {
-            throw EmbeddedWireError.unknownKeySelector(rawKind)
-        }
-        self.kind = kind
-        self.key = try reader.readBytes()
-    }
-
-    public func resolve(in sortedKeys: [[UInt8]]) -> Int {
         switch kind {
         case .firstGreaterOrEqual:
-            return lowerBound(key, in: sortedKeys)
+            self.orEqual = false
+            self.offset = 1
         case .firstGreaterThan:
-            return upperBound(key, in: sortedKeys)
+            self.orEqual = true
+            self.offset = 1
         case .lastLessOrEqual:
-            return upperBound(key, in: sortedKeys) - 1
+            self.orEqual = true
+            self.offset = 0
         case .lastLessThan:
-            return lowerBound(key, in: sortedKeys) - 1
+            self.orEqual = false
+            self.offset = 0
         }
     }
 
-    private func lowerBound(_ key: [UInt8], in sortedKeys: [[UInt8]]) -> Int {
+    public init(key: EmbeddedBytes, orEqual: Bool, offset: Int) {
+        self.key = key
+        self.orEqual = orEqual
+        self.offset = offset
+    }
+
+    public func encode(into writer: inout EmbeddedWireWriter) throws(EmbeddedWireError) {
+        try writer.writeBytes(key)
+        writer.writeBool(orEqual)
+        guard let encodedOffset = Int64(exactly: offset) else {
+            throw EmbeddedWireError.keySelectorOffsetOverflow
+        }
+        writer.writeInt64(encodedOffset)
+    }
+
+    public init(from reader: inout EmbeddedWireReader) throws(EmbeddedWireError) {
+        self.key = try reader.readByteRegion()
+        self.orEqual = try reader.readBool()
+        let encodedOffset = try reader.readInt64()
+        guard let offset = Int(exactly: encodedOffset) else {
+            throw EmbeddedWireError.keySelectorOffsetOverflow
+        }
+        self.offset = offset
+    }
+
+    public func resolve(in sortedKeys: [EmbeddedBytes]) -> Int {
+        let base = orEqual
+            ? upperBound(key, in: sortedKeys) - 1
+            : lowerBound(key, in: sortedKeys) - 1
+        let (resolved, overflow) = base.addingReportingOverflow(offset)
+        if overflow { return offset >= 0 ? sortedKeys.count : 0 }
+        return max(0, min(resolved, sortedKeys.count))
+    }
+
+    private func lowerBound(
+        _ key: EmbeddedBytes,
+        in sortedKeys: [EmbeddedBytes]
+    ) -> Int {
         var low = 0
         var high = sortedKeys.count
         while low < high {
@@ -56,7 +80,10 @@ public struct EmbeddedKeySelector: Sendable, Hashable {
         return low
     }
 
-    private func upperBound(_ key: [UInt8], in sortedKeys: [[UInt8]]) -> Int {
+    private func upperBound(
+        _ key: EmbeddedBytes,
+        in sortedKeys: [EmbeddedBytes]
+    ) -> Int {
         var low = 0
         var high = sortedKeys.count
         while low < high {

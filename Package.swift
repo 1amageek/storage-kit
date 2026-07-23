@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.4
 import PackageDescription
 
 let package = Package(
@@ -11,8 +11,19 @@ let package = Package(
         .library(name: "SQLiteStorage", targets: ["SQLiteStorage"]),
         .library(name: "PostgreSQLStorage", targets: ["PostgreSQLStorage"]),
         .library(name: "CloudflareDurableObjectStorage", targets: ["CloudflareDurableObjectStorage"]),
+        .library(
+            name: "CloudflareDurableObjectStorageTesting",
+            targets: ["CloudflareDurableObjectStorageTesting"]
+        ),
+        .library(
+            name: "CloudflareDurableObjectStorageHTTP",
+            targets: ["CloudflareDurableObjectStorageHTTP"]
+        ),
         .library(name: "CloudflareDurableObjectStorageEmbedded", targets: ["CloudflareDurableObjectStorageEmbedded"]),
-        .executable(name: "CloudflareDurableObjectStorageWasm", targets: ["CloudflareDurableObjectStorageWasm"]),
+        .library(
+            name: "CloudflareDurableObjectStorageHostTransport",
+            targets: ["CloudflareDurableObjectStorageHostTransport"]
+        ),
     ],
     traits: [
         .default(enabledTraits: ["FoundationDB", "SQLite"]),
@@ -21,7 +32,7 @@ let package = Package(
         .trait(name: "PostgreSQL"),
     ],
     dependencies: [
-        .package(url: "https://github.com/1amageek/fdb-swift-bindings.git", from: "0.1.0"),
+        .package(path: "../fdb-swift-bindings"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
     ],
     targets: [
@@ -68,7 +79,23 @@ let package = Package(
             name: "CloudflareDurableObjectStorage",
             dependencies: [
                 "StorageKit",
+                "StorageKitEmbeddedCore",
                 "CloudflareDurableObjectStorageEmbedded",
+            ]
+        ),
+        .target(
+            name: "CloudflareDurableObjectStorageTesting",
+            dependencies: [
+                "CloudflareDurableObjectStorage",
+                "StorageKit",
+            ]
+        ),
+        .target(
+            name: "CloudflareDurableObjectStorageHTTP",
+            dependencies: [
+                "CloudflareDurableObjectStorage",
+                "StorageKit",
+                "StorageKitEmbeddedCore",
             ]
         ),
         .target(
@@ -77,10 +104,11 @@ let package = Package(
                 "StorageKitEmbeddedCore",
             ]
         ),
-        .executableTarget(
-            name: "CloudflareDurableObjectStorageWasm",
+        .target(
+            name: "CloudflareDurableObjectStorageHostTransport",
             dependencies: [
-                "CloudflareDurableObjectStorageEmbedded",
+                "CloudflareDurableObjectStorage",
+                "StorageKitEmbeddedCore",
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Extern"),
@@ -88,7 +116,10 @@ let package = Package(
         ),
         .testTarget(
             name: "StorageKitTests",
-            dependencies: ["StorageKit"]
+            dependencies: [
+                "StorageKit",
+                "StorageKitEmbeddedCore",
+            ]
         ),
         .testTarget(
             name: "FDBStorageTests",
@@ -109,6 +140,7 @@ let package = Package(
             name: "CloudflareDurableObjectStorageTests",
             dependencies: [
                 "CloudflareDurableObjectStorage",
+                "CloudflareDurableObjectStorageTesting",
                 "CloudflareDurableObjectStorageEmbedded",
                 "StorageKitEmbeddedCore",
             ]
@@ -117,6 +149,23 @@ let package = Package(
             name: "CloudflareDurableObjectStorageEmbeddedTests",
             dependencies: [
                 "CloudflareDurableObjectStorageEmbedded",
+                "StorageKitEmbeddedCore",
+            ],
+            resources: [
+                .copy("GoldenVectors"),
+            ]
+        ),
+        .testTarget(
+            name: "CloudflareDurableObjectStorageHostTransportTests",
+            dependencies: [
+                "CloudflareDurableObjectStorageHostTransport",
+                "StorageKitEmbeddedCore",
+            ]
+        ),
+        .testTarget(
+            name: "CloudflareDurableObjectStorageHTTPTests",
+            dependencies: [
+                "CloudflareDurableObjectStorageHTTP",
                 "StorageKitEmbeddedCore",
             ]
         ),

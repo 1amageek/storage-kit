@@ -1,7 +1,7 @@
 import StorageKit
 
 /// Wire mutation code matching StorageKit mutation names.
-public enum CloudflareDurableObjectMutationTypeCode: String, Sendable, Codable, Hashable {
+public enum CloudflareDurableObjectMutationTypeCode: Sendable, Hashable {
     case add
     case bitOr
     case bitAnd

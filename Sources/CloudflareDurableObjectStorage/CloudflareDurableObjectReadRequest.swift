@@ -1,5 +1,5 @@
 /// Host read request.
-public struct CloudflareDurableObjectReadRequest: Sendable, Hashable, Codable {
+public struct CloudflareDurableObjectReadRequest: Sendable, Hashable {
     public let scope: CloudflareDurableObjectStorageScope
     public let key: CloudflareDurableObjectBytes
     public let snapshot: Bool

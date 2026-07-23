@@ -1,4 +1,10 @@
-import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(WASILibc)
+import WASILibc
+#endif
 
 /// Lexicographic comparison of byte arrays using `memcmp`.
 ///

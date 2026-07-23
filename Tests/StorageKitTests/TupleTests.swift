@@ -5,6 +5,23 @@ import Foundation
 @Suite("Tuple Layer Tests")
 struct TupleTests {
 
+    @Test func validatedElementRangePreservesValues() throws {
+        let tuple = Tuple("prefix", Int64(42), Bytes([0x01, 0x02]))
+        let elements = try tuple.elements(in: 1..<3)
+
+        #expect(elements.count == 2)
+        #expect(elements[0] as? Int64 == 42)
+        #expect(elements[1] as? Bytes == Bytes([0x01, 0x02]))
+    }
+
+    @Test func invalidElementRangeThrowsTypedError() {
+        let tuple = Tuple("only")
+
+        #expect(throws: TupleError.self) {
+            _ = try tuple.elements(in: 0..<2)
+        }
+    }
+
     // MARK: - String
 
     @Test func stringRoundTrip() throws {
@@ -122,7 +139,7 @@ struct TupleTests {
 
     // MARK: - Int
 
-    @Test func intNativeRoundTrip() throws {
+    @Test func platformIntegerRoundTrip() throws {
         let original = 12345
         let encoded = original.encodeTuple()
         var offset = 1

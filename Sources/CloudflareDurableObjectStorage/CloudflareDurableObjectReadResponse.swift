@@ -1,5 +1,5 @@
 /// Host read response.
-public struct CloudflareDurableObjectReadResponse: Sendable, Hashable, Codable {
+public struct CloudflareDurableObjectReadResponse: Sendable, Hashable {
     public let value: CloudflareDurableObjectBytes?
     public let currentCommitVersion: Int64
 

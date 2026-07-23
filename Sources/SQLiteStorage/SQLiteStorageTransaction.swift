@@ -1,93 +1,185 @@
 import StorageKit
-import Foundation
 import Synchronization
 
-/// StorageKit.Transaction implementation for SQLite.
+/// SQLite transaction with synchronous mutation buffering and lazy async I/O.
 ///
-/// Write operations (`setValue`/`clear`/`clearRange`) are non-throwing per the protocol,
-/// so writes are buffered and flushed on commit.
-/// `getValue` replays the visible buffer in order to provide read-your-writes semantics.
-/// Top-level `getRange` flushes the buffer before executing the SQL query.
-///
-/// ## Nested Transaction Support
-///
-/// Nested children created by `SQLiteStorageEngine.createTransaction()` keep
-/// their own write buffer. `commit()` validates and merges that buffer into the
-/// parent; `cancel()` discards it. Nested range reads materialize the current
-/// database contents plus visible parent/child buffers without writing child
-/// data into SQLite, so child rollback cannot affect parent writes.
-public final class SQLiteStorageTransaction: Transaction, Sendable {
+/// Every async database operation flushes the transaction-owned mutation buffer
+/// into the current native SQLite transaction/savepoint before reading. Nested
+/// children suspend their parent until strict-LIFO `commit()` or `cancel()`.
+public final class SQLiteStorageTransaction:
+    DatabaseStorageCompactionTransaction,
+    Sendable {
+    public static let maximumCompactionWorkUnitsPerSlice: UInt64 = 4_096
 
-    public typealias RangeResult = KeyValueRangeResult
+    public typealias RangeResult = SQLiteRangeResult
 
-    private let connection: SQLiteConnectionHandle
-    private let lock: NSLock?
-    private let parent: SQLiteStorageTransaction?
-
-    private struct MutableState: Sendable {
-        var writeBuffer: [WriteOp] = []
-        var lifecycle: Lifecycle = .open
-        var lockReleased: Bool
-    }
+    public static let declaredCapabilities = TransactionCapabilities.none
+    public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
+    public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
 
     private enum Lifecycle: Sendable {
         case open
-        case committing
+        case committing(TransactionOperationCompletion)
         case committed
+        case cancelling(TransactionOperationCompletion)
         case cancelled
-        case failed(StorageError)
-    }
-    private let _state: Mutex<MutableState>
-
-    private enum WriteOp: Sendable {
-        case set(key: Bytes, value: Bytes)
-        case clear(key: Bytes)
-        case clearRange(begin: Bytes, end: Bytes)
-        case atomic(key: Bytes, param: Bytes, mutationType: MutationType)
+        case failed(StorageError, cleanupRequired: Bool)
     }
 
-    init(connection: SQLiteConnectionHandle, lock: NSLock?) {
-        self.connection = connection
-        self.lock = lock
+    private struct MutableState: Sendable {
+        var writes: [SQLiteWriteOperation] = []
+        var lifecycle: Lifecycle = .open
+        var activeChildIdentifier: UInt64?
+        var activeRangeRegistrations: Set<UInt64> = []
+        var nextRangeRegistrationIdentifier: UInt64 = 1
+    }
+
+    private let identifier: UInt64
+    private let rootIdentifier: UInt64
+    private let parent: SQLiteStorageTransaction?
+    private let coordinator: SQLiteTransactionCoordinator
+    private let connection: SQLiteConnectionHandle
+    private let lifetime: SQLiteStorageLifetime
+    private let mutationByteMeter: TransactionMutationByteMeter
+    private let state = Mutex(MutableState())
+
+    init(
+        identifier: UInt64,
+        coordinator: SQLiteTransactionCoordinator,
+        connection: SQLiteConnectionHandle,
+        lifetime: SQLiteStorageLifetime
+    ) {
+        self.identifier = identifier
+        self.rootIdentifier = identifier
         self.parent = nil
-        self._state = Mutex(MutableState(lockReleased: lock == nil))
+        self.coordinator = coordinator
+        self.connection = connection
+        self.lifetime = lifetime
+        self.mutationByteMeter = TransactionMutationByteMeter()
     }
 
-    init(parent: SQLiteStorageTransaction) {
-        self.connection = parent.connection
-        self.lock = nil
+    private init(
+        identifier: UInt64,
+        parent: SQLiteStorageTransaction
+    ) {
+        self.identifier = identifier
+        self.rootIdentifier = parent.rootIdentifier
         self.parent = parent
-        self._state = Mutex(MutableState(lockReleased: true))
+        self.coordinator = parent.coordinator
+        self.connection = parent.connection
+        self.lifetime = parent.lifetime
+        self.mutationByteMeter = parent.mutationByteMeter
+    }
+
+    public func configureMutationByteLimit(maximumBytes: Int?) throws {
+        try mutationByteMeter.configure(maximumBytes: maximumBytes)
+    }
+
+    deinit {
+        let coordinator = coordinator
+        let identifier = identifier
+        let rootIdentifier = rootIdentifier
+        let parent = parent
+        let cleanupRequired = state.withLock { state in
+            switch state.lifecycle {
+            case .open, .failed(_, cleanupRequired: true):
+                return true
+            case .committing, .committed, .cancelling, .cancelled,
+                 .failed(_, cleanupRequired: false):
+                return false
+            }
+        }
+        Task {
+            if cleanupRequired {
+                if let parent {
+                    let outcome = await coordinator.cancelChild(
+                        rootIdentifier: rootIdentifier,
+                        parentIdentifier: parent.identifier,
+                        childIdentifier: identifier
+                    )
+                    parent.resolveAbandonedChild(
+                        identifier: identifier,
+                        outcome: outcome
+                    )
+                } else {
+                    await coordinator.abandonRoot(identifier: identifier)
+                }
+            }
+            await coordinator.retireTerminalIdentifier(identifier)
+        }
+    }
+
+    func belongs(to lifetime: SQLiteStorageLifetime) -> Bool {
+        self.lifetime === lifetime
+    }
+
+    var hasActiveChild: Bool {
+        state.withLock { $0.activeChildIdentifier != nil }
+    }
+
+    func makeChild(identifier: UInt64) throws -> SQLiteStorageTransaction {
+        try state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .beginTransaction)
+            guard state.activeChildIdentifier == nil else {
+                throw Self.invalidState(
+                    "SQLite nested transactions must be created in strict LIFO order",
+                    operation: .beginTransaction
+                )
+            }
+            guard state.activeRangeRegistrations.isEmpty else {
+                throw Self.invalidState(
+                    "SQLite transaction cannot create a child while a range cursor is open",
+                    operation: .beginTransaction
+                )
+            }
+            state.activeChildIdentifier = identifier
+        }
+        return SQLiteStorageTransaction(identifier: identifier, parent: self)
     }
 
     // MARK: - Read
 
-    public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
-        let writeBuffer = try visibleWriteBuffer()
-        var value = try connection.get(key: key)
-        for op in writeBuffer {
-            switch op {
-            case .set(let k, let v) where k == key:
-                value = v
-            case .clear(let k) where k == key:
-                value = nil
-            case .clearRange(let b, let e)
-                where compareBytes(key, b) >= 0 && compareBytes(key, e) < 0:
-                value = nil
-            case .atomic(let k, let param, let mutationType) where k == key:
-                switch try mutationType.apply(to: value, param: param) {
-                case .set(let bytes):
-                    value = bytes
-                case .clear:
-                    value = nil
-                case .unchanged:
-                    break
-                }
-            default:
-                continue
-            }
+    public func getValue(
+        for key: Bytes,
+        snapshot: Bool
+    ) async throws -> Bytes? {
+        let writes = try takeWrites(operation: .read)
+        do {
+            try await ensureBackendStarted()
+            return try await coordinator.readValue(
+                rootIdentifier: rootIdentifier,
+                transactionIdentifier: identifier,
+                writes: writes,
+                key: key
+            )
+        } catch {
+            throw recordFailure(error, operation: .read)
         }
-        return value
+    }
+
+    public func getKey(
+        selector: KeySelector,
+        snapshot: Bool
+    ) async throws -> Bytes? {
+        let plan: SQLiteKeySelectionPlan
+        do {
+            plan = try SQLiteKeySelectionPlan(selector: selector)
+        } catch {
+            throw map(error, operation: .rangeRead)
+        }
+
+        let writes = try takeWrites(operation: .rangeRead)
+        do {
+            try await ensureBackendStarted()
+            return try await coordinator.readKey(
+                rootIdentifier: rootIdentifier,
+                transactionIdentifier: identifier,
+                writes: writes,
+                plan: plan
+            )
+        } catch {
+            throw recordFailure(error, operation: .rangeRead)
+        }
     }
 
     public func getRange(
@@ -97,343 +189,653 @@ public final class SQLiteStorageTransaction: Transaction, Sendable {
         reverse: Bool,
         snapshot: Bool,
         streamingMode: StreamingMode
-    ) -> KeyValueRangeResult {
+    ) -> SQLiteRangeResult {
         do {
-            try _state.withLock { state in
-                try Self.validateReadable(state.lifecycle)
-            }
-        } catch {
-            return KeyValueRangeResult(error: error)
-        }
-
-        // Resolve KeySelectors to SQL boundary conditions (see SQLRangeBoundary
-        // for the full FDB-semantics mapping, including the lastLess* selectors
-        // that require scalar-subquery resolution).
-        do {
-            if parent == nil {
-                let beginBoundary = try SQLRangeBoundary.begin(begin)
-                let endBoundary = try SQLRangeBoundary.end(end)
-                try flushWriteBuffer()
-                let results = try connection.getRange(
-                    begin: beginBoundary,
-                    end: endBoundary,
-                    limit: limit, reverse: reverse
+            try state.withLock { state in
+                try Self.validateReadable(
+                    state,
+                    operation: .rangeRead
                 )
-                return KeyValueRangeResult(results)
             }
-
-            let results = try nestedRangeResults(
-                from: begin,
-                to: end,
-                limit: limit,
-                reverse: reverse
+            guard limit >= 0 else {
+                throw Self.invalidState(
+                    "SQLite range limit must not be negative",
+                    operation: .rangeRead
+                )
+            }
+            return SQLiteRangeResult(
+                transaction: self,
+                plan: SQLiteRangeScanPlan(
+                    begin: try SQLRangeBoundary.begin(begin),
+                    end: try SQLRangeBoundary.end(end),
+                    limit: limit,
+                    reverse: reverse
+                )
             )
-            return KeyValueRangeResult(results)
         } catch {
-            return KeyValueRangeResult(error: error)
+            return SQLiteRangeResult(
+                error: map(error, operation: .rangeRead)
+            )
         }
+    }
+
+    func openRange(plan: SQLiteRangeScanPlan) async throws -> SQLiteOpenedRange {
+        let acquired = try registerRangeAndTakeWrites()
+        do {
+            try await ensureBackendStarted()
+            let opened = try await coordinator.openRange(
+                rootIdentifier: rootIdentifier,
+                transactionIdentifier: identifier,
+                writes: acquired.1,
+                plan: plan
+            )
+            if opened.first == nil {
+                unregisterRange(acquired.0)
+            }
+            return SQLiteOpenedRange(
+                registrationIdentifier: acquired.0,
+                cursorIdentifier: opened.cursorIdentifier,
+                first: opened.first
+            )
+        } catch {
+            unregisterRange(acquired.0)
+            throw recordFailure(error, operation: .rangeRead)
+        }
+    }
+
+    func nextRange(
+        registrationIdentifier: UInt64,
+        cursorIdentifier: UInt64
+    ) async throws -> (Bytes, Bytes)? {
+        try state.withLock { state in
+            try Self.validateReadable(state, operation: .rangeRead)
+            guard state.activeRangeRegistrations.contains(
+                registrationIdentifier
+            ) else {
+                throw Self.invalidState(
+                    "SQLite range iterator is not registered",
+                    operation: .rangeRead
+                )
+            }
+        }
+        do {
+            let row = try await coordinator.nextRange(
+                rootIdentifier: rootIdentifier,
+                transactionIdentifier: identifier,
+                cursorIdentifier: cursorIdentifier
+            )
+            if row == nil {
+                unregisterRange(registrationIdentifier)
+            }
+            return row
+        } catch {
+            abandonRange(
+                registrationIdentifier: registrationIdentifier,
+                cursorIdentifier: cursorIdentifier
+            )
+            throw recordFailure(error, operation: .rangeRead)
+        }
+    }
+
+    func abandonRange(
+        registrationIdentifier: UInt64,
+        cursorIdentifier: UInt64
+    ) {
+        connection.closeRangeCursor(identifier: cursorIdentifier)
+        unregisterRange(registrationIdentifier)
     }
 
     // MARK: - Write
 
-    public func setValue(_ value: Bytes, for key: Bytes) {
-        _state.withLock { state in
-            guard case .open = state.lifecycle else { return }
-            state.writeBuffer.append(.set(key: key, value: value))
+    public func setValue(_ value: Bytes, for key: Bytes) throws {
+        try appendAdmittedWrite(operation: .write) {
+            try mutationByteMeter.recordSet(key: key, value: value)
+        } makeWrite: {
+            .set(key: key, value: value)
         }
     }
 
-    public func clear(key: Bytes) {
-        _state.withLock { state in
-            guard case .open = state.lifecycle else { return }
-            state.writeBuffer.append(.clear(key: key))
+    public func clear(key: Bytes) throws {
+        try appendAdmittedWrite(operation: .delete) {
+            try mutationByteMeter.recordClear(key: key)
+        } makeWrite: {
+            .clear(key: key)
         }
     }
 
-    public func clearRange(beginKey: Bytes, endKey: Bytes) {
-        _state.withLock { state in
-            guard case .open = state.lifecycle else { return }
-            state.writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
+    public func clearRange(beginKey: Bytes, endKey: Bytes) throws {
+        try appendAdmittedWrite(operation: .deleteRange) {
+            try mutationByteMeter.recordClearRange(
+                beginKey: beginKey,
+                endKey: endKey
+            )
+        } makeWrite: {
+            .clearRange(begin: beginKey, end: endKey)
         }
     }
 
-    // MARK: - Atomic Operations
-
-    public func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) {
-        _state.withLock { state in
-            guard case .open = state.lifecycle else { return }
-            state.writeBuffer.append(.atomic(key: key, param: param, mutationType: mutationType))
+    public func atomicOp(
+        key: Bytes,
+        param: Bytes,
+        mutationType: MutationType
+    ) throws {
+        try appendAdmittedWrite(operation: .write) {
+            try mutationByteMeter.recordAtomic(
+                key: key,
+                parameter: param
+            )
+        } makeWrite: {
+            .atomic(
+                key: key,
+                parameter: param,
+                mutationType: mutationType
+            )
         }
     }
 
-    // MARK: - Transaction Management
+    // MARK: - Physical Maintenance
+
+    public var compactionLimits: DatabaseStorageCompactionLimits {
+        DatabaseStorageCompactionLimits(
+            maximumWorkUnitsPerSlice:
+                Self.maximumCompactionWorkUnitsPerSlice
+        )
+    }
+
+    public func stageCompactionSlice(
+        maximumWorkUnits: UInt64,
+        continuation: DatabaseStorageCompactionContinuation?
+    ) async throws -> DatabaseStorageCompactionResult {
+        let maximum = Self.maximumCompactionWorkUnitsPerSlice
+        guard maximumWorkUnits > 0, maximumWorkUnits <= maximum else {
+            throw DatabaseStorageCompactionError.invalidMaximumWorkUnits(
+                actual: maximumWorkUnits,
+                maximum: maximum
+            )
+        }
+        guard parent == nil else {
+            throw DatabaseStorageCompactionError.nestedTransaction
+        }
+        if let continuation {
+            try SQLiteIncrementalCompactionContinuationCodec.validate(
+                continuation
+            )
+        }
+
+        let writes = try takeWrites(operation: .execute)
+        do {
+            try await ensureBackendStarted()
+            let metrics = try await coordinator.compact(
+                rootIdentifier: rootIdentifier,
+                transactionIdentifier: identifier,
+                writes: writes,
+                maximumWorkUnits: maximumWorkUnits
+            )
+            guard metrics.freePagesAfter <= metrics.freePagesBefore else {
+                throw DatabaseStorageCompactionError.backendFailure(
+                    description:
+                        "SQLite freelist grew during a transaction-scoped compaction slice"
+                )
+            }
+            let consumed = metrics.freePagesBefore - metrics.freePagesAfter
+            if metrics.freePagesBefore > 0, consumed == 0 {
+                throw DatabaseStorageCompactionError.backendMadeNoProgress(
+                    remainingWorkUnits: metrics.freePagesAfter
+                )
+            }
+            return DatabaseStorageCompactionResult(
+                workUnitsConsumed: consumed,
+                remainingWorkUnits: metrics.freePagesAfter,
+                continuation: metrics.freePagesAfter == 0
+                    ? nil
+                    : SQLiteIncrementalCompactionContinuationCodec.current
+            )
+        } catch let error as DatabaseStorageCompactionError {
+            throw error
+        } catch {
+            throw recordFailure(error, operation: .execute)
+        }
+    }
+
+    // MARK: - Terminal Operations
 
     public func commit() async throws {
-        let start = _state.withLock { state -> CommitStart in
+        enum Start {
+            case leader(TransactionOperationCompletion)
+            case waitForCommit(TransactionOperationCompletion)
+            case waitForCancellation(TransactionOperationCompletion)
+            case committed
+            case cancelled
+            case failed(StorageError)
+        }
+
+        let start = state.withLock { state -> Start in
+            if state.activeChildIdentifier != nil {
+                return .failed(Self.invalidState(
+                    "SQLite transaction cannot commit while its child is active",
+                    operation: .commit
+                ))
+            }
             switch state.lifecycle {
             case .open:
-                state.lifecycle = .committing
-                return .proceed
-            case .committing:
-                return .throw(Self.invalidStateError("Transaction commit already in progress"))
+                let completion = TransactionOperationCompletion()
+                state.lifecycle = .committing(completion)
+                return .leader(completion)
+            case .committing(let completion):
+                return .waitForCommit(completion)
             case .committed:
-                return .alreadyCommitted
+                return .committed
+            case .cancelling(let completion):
+                return .waitForCancellation(completion)
             case .cancelled:
-                return .throw(Self.invalidStateError("Transaction cancelled"))
-            case .failed(let error):
-                return .throw(error)
+                return .cancelled
+            case .failed(let error, _):
+                return .failed(error)
             }
         }
 
         switch start {
-        case .proceed:
-            break
-        case .alreadyCommitted:
-            return
-        case .throw(let error):
-            cleanupFailedTransactionIfNeeded()
-            throw error
-        }
-
-        if parent != nil {
-            try commitNested()
-        } else if lock != nil {
-            // Top-level transaction: flush buffer, COMMIT, release lock
-            defer { releaseLockOnce() }
-            do {
-                try flushWriteBuffer()
-                try connection.execute("COMMIT", operation: .commit)
-                _state.withLock { $0.lifecycle = .committed }
-            } catch let originalError {
-                let error = markFailed(originalError, operation: .commit)
-                do {
-                    try connection.execute("ROLLBACK", operation: .rollback)
-                } catch {
-                    // Preserve the original commit/write error. Rollback failure is
-                    // secondary because the transaction lock is still released below.
-                }
-                throw error
-            }
-        } else {
-            _state.withLock { $0.lifecycle = .committed }
-        }
-    }
-
-    public func cancel() {
-        enum Action {
-            case none
-            case rollbackAndRelease
-        }
-
-        let action = _state.withLock { state -> Action in
-            switch state.lifecycle {
-            case .committed, .cancelled:
-                return .none
-            case .open, .committing:
-                state.lifecycle = .cancelled
-                state.writeBuffer.removeAll()
-            case .failed:
-                state.writeBuffer.removeAll()
-            }
-            if parent != nil {
-                return .none
-            }
-            return state.lockReleased ? .none : .rollbackAndRelease
-        }
-
-        switch action {
-        case .none:
-            return
-        case .rollbackAndRelease:
-            rollbackBestEffort()
-            releaseLockOnce()
-        }
-        // Nested transaction: just discard buffer (parent controls ROLLBACK)
-    }
-
-    // MARK: - Internal
-
-    private enum CommitStart: Sendable {
-        case proceed
-        case alreadyCommitted
-        case `throw`(StorageError)
-    }
-
-    private func visibleWriteBuffer() throws -> [WriteOp] {
-        let inherited = try parent?.visibleWriteBuffer() ?? []
-        let local = try _state.withLock { state in
-            try Self.validateReadable(state.lifecycle)
-            return state.writeBuffer
-        }
-        return inherited + local
-    }
-
-    private func commitNested() throws {
-        do {
-            let ops = try _state.withLock { state -> [WriteOp] in
-                switch state.lifecycle {
-                case .committing:
-                    return state.writeBuffer
-                case .open:
-                    return state.writeBuffer
-                case .committed:
-                    return []
-                case .cancelled:
-                    throw Self.invalidStateError("Transaction cancelled")
-                case .failed(let error):
-                    throw error
-                }
-            }
-            try Self.validateMergeable(ops)
-            try parent?.appendBufferedWrites(ops)
-            _state.withLock { state in
-                state.writeBuffer.removeAll()
-                state.lifecycle = .committed
-            }
-        } catch {
-            throw markFailed(error, operation: .commit)
-        }
-    }
-
-    private func appendBufferedWrites(_ ops: [WriteOp]) throws {
-        guard !ops.isEmpty else { return }
-        try _state.withLock { state in
-            switch state.lifecycle {
-            case .open, .committing:
-                state.writeBuffer.append(contentsOf: ops)
-            case .committed:
-                throw Self.invalidStateError("Transaction committed")
-            case .cancelled:
-                throw Self.invalidStateError("Transaction cancelled")
-            case .failed(let error):
-                throw error
-            }
-        }
-    }
-
-    private static func validateMergeable(_ ops: [WriteOp]) throws {
-        for op in ops {
-            guard case .atomic(_, let param, let mutationType) = op else {
-                continue
-            }
-            _ = try mutationType.apply(to: nil, param: param)
-        }
-    }
-
-    private func nestedRangeResults(
-        from begin: KeySelector,
-        to end: KeySelector,
-        limit: Int,
-        reverse: Bool
-    ) throws -> [(key: Bytes, value: Bytes)] {
-        _ = try SQLRangeBoundary.begin(begin)
-        _ = try SQLRangeBoundary.end(end)
-        let visibleBuffer = try visibleWriteBuffer()
-        let entries = try connection.getAllEntries()
-        return try Self.materializeRange(
-            entries: entries,
-            applying: visibleBuffer,
-            begin: begin,
-            end: end,
-            limit: limit,
-            reverse: reverse
-        )
-    }
-
-    private static func materializeRange(
-        entries: [(key: Bytes, value: Bytes)],
-        applying writeBuffer: [WriteOp],
-        begin: KeySelector,
-        end: KeySelector,
-        limit: Int,
-        reverse: Bool
-    ) throws -> [(key: Bytes, value: Bytes)] {
-        var values: [Bytes: Bytes] = [:]
-        for entry in entries {
-            values[entry.key] = entry.value
-        }
-
-        for op in writeBuffer {
-            switch op {
-            case .set(let key, let value):
-                values[key] = value
-            case .clear(let key):
-                values[key] = nil
-            case .clearRange(let begin, let end):
-                let keysToRemove = values.keys.filter {
-                    compareBytes($0, begin) >= 0 && compareBytes($0, end) < 0
-                }
-                for key in keysToRemove {
-                    values[key] = nil
-                }
-            case .atomic(let key, let param, let mutationType):
-                switch try mutationType.apply(to: values[key], param: param) {
-                case .set(let bytes):
-                    values[key] = bytes
-                case .clear:
-                    values[key] = nil
-                case .unchanged:
-                    break
-                }
-            }
-        }
-
-        let sorted = values
-            .map { (key: $0.key, value: $0.value) }
-            .sorted { compareBytes($0.key, $1.key) < 0 }
-        let keys = sorted.map(\.key)
-        let start = begin.resolve(in: keys)
-        let end = end.resolve(in: keys)
-        guard start < end else { return [] }
-
-        var results = Array(sorted[start..<end])
-        if reverse {
-            results.reverse()
-        }
-        if limit > 0 && results.count > limit {
-            results = Array(results.prefix(limit))
-        }
-        return results
-    }
-
-    private static func validateReadable(_ lifecycle: Lifecycle) throws {
-        switch lifecycle {
-        case .open:
-            return
-        case .committing:
-            throw invalidStateError("Transaction commit already in progress")
+        case .leader(let completion):
+            let result = await performCommit()
+            await completion.resolve(result)
+            try result.get()
+        case .waitForCommit(let completion):
+            try await completion.wait().get()
+        case .waitForCancellation(let completion):
+            try await completion.wait().get()
+            throw Self.invalidState(
+                "SQLite transaction was cancelled",
+                operation: .commit
+            )
         case .committed:
-            throw invalidStateError("Transaction committed")
+            return
         case .cancelled:
-            throw invalidStateError("Transaction cancelled")
+            throw Self.invalidState(
+                "SQLite transaction was cancelled",
+                operation: .commit
+            )
         case .failed(let error):
             throw error
         }
     }
 
-    private static func invalidStateError(_ message: String) -> StorageError {
-        StorageError(
-            code: .invalidOperation,
-            operation: .unknown,
-            backend: .sqlite,
-            message: message
+    public func cancel() async throws {
+        enum Start {
+            case leader(TransactionOperationCompletion)
+            case waitForCancellation(TransactionOperationCompletion)
+            case waitForCommit(TransactionOperationCompletion)
+            case cancelled
+            case committed
+            case cleanedFailure
+            case failed(StorageError)
+        }
+
+        let start = state.withLock { state -> Start in
+            if state.activeChildIdentifier != nil {
+                return .failed(Self.invalidState(
+                    "SQLite transaction cannot cancel while its child is active",
+                    operation: .cancel
+                ))
+            }
+            switch state.lifecycle {
+            case .open:
+                let completion = TransactionOperationCompletion()
+                state.lifecycle = .cancelling(completion)
+                state.writes.removeAll(keepingCapacity: false)
+                return .leader(completion)
+            case .committing(let completion):
+                return .waitForCommit(completion)
+            case .committed:
+                return .committed
+            case .cancelling(let completion):
+                return .waitForCancellation(completion)
+            case .cancelled:
+                return .cancelled
+            case .failed(_, let cleanupRequired):
+                guard cleanupRequired else { return .cleanedFailure }
+                let completion = TransactionOperationCompletion()
+                state.lifecycle = .cancelling(completion)
+                state.writes.removeAll(keepingCapacity: false)
+                return .leader(completion)
+            }
+        }
+
+        switch start {
+        case .leader(let completion):
+            let result = await performCancellation()
+            await completion.resolve(result)
+            try result.get()
+        case .waitForCancellation(let completion):
+            try await completion.wait().get()
+        case .waitForCommit(let completion):
+            let result = await completion.wait()
+            switch result {
+            case .success:
+                throw Self.invalidState(
+                    "SQLite transaction was committed",
+                    operation: .cancel
+                )
+            case .failure:
+                return
+            }
+        case .cancelled, .cleanedFailure:
+            return
+        case .committed:
+            throw Self.invalidState(
+                "SQLite transaction was committed",
+                operation: .cancel
+            )
+        case .failed(let error):
+            throw error
+        }
+    }
+
+    private func performCommit() async -> Result<Void, StorageError> {
+        let writes = state.withLock { state -> [SQLiteWriteOperation] in
+            let writes = state.writes
+            state.writes.removeAll(keepingCapacity: false)
+            state.activeRangeRegistrations.removeAll(keepingCapacity: false)
+            return writes
+        }
+
+        if let parent {
+            do {
+                try await ensureBackendStarted()
+            } catch {
+                let mapped = map(error, operation: .commit)
+                state.withLock {
+                    $0.lifecycle = .failed(mapped, cleanupRequired: true)
+                }
+                return .failure(mapped)
+            }
+            let outcome = await coordinator.commitChild(
+                rootIdentifier: rootIdentifier,
+                childIdentifier: identifier,
+                writes: writes
+            )
+            if outcome.parentResumed {
+                do {
+                    try parent.releaseChild(identifier: identifier)
+                } catch {
+                    let mapped = map(error, operation: .commit)
+                    state.withLock {
+                        $0.lifecycle = .failed(mapped, cleanupRequired: false)
+                    }
+                    return .failure(mapped)
+                }
+            } else if let error = outcome.error {
+                parent.recordDescendantFatalFailure(error)
+            }
+            if let error = outcome.error {
+                state.withLock {
+                    $0.lifecycle = .failed(
+                        error,
+                        cleanupRequired: !outcome.parentResumed
+                    )
+                }
+                return .failure(error)
+            }
+            state.withLock { $0.lifecycle = .committed }
+            return .success(())
+        }
+
+        let error = await coordinator.commitRoot(
+            identifier: identifier,
+            writes: writes
         )
-    }
-
-    private func markFailed(_ error: any Error, operation: StorageOperation) -> StorageError {
-        let storageError = storageError(from: error, operation: operation)
-        _state.withLock { state in
-            state.lifecycle = .failed(storageError)
-            state.writeBuffer.removeAll()
+        if let error {
+            state.withLock {
+                $0.lifecycle = .failed(error, cleanupRequired: false)
+            }
+            return .failure(error)
         }
-        return storageError
+        state.withLock { $0.lifecycle = .committed }
+        return .success(())
     }
 
-    private func storageError(from error: any Error, operation: StorageOperation) -> StorageError {
+    private func performCancellation() async -> Result<Void, StorageError> {
+        state.withLock {
+            $0.activeRangeRegistrations.removeAll(keepingCapacity: false)
+        }
+        if let parent {
+            let outcome = await coordinator.cancelChild(
+                rootIdentifier: rootIdentifier,
+                parentIdentifier: parent.identifier,
+                childIdentifier: identifier
+            )
+            if outcome.parentResumed {
+                do {
+                    try parent.releaseChild(identifier: identifier)
+                } catch {
+                    let mapped = map(error, operation: .cancel)
+                    state.withLock {
+                        $0.lifecycle = .failed(mapped, cleanupRequired: false)
+                    }
+                    return .failure(mapped)
+                }
+            } else if let error = outcome.error {
+                parent.recordDescendantFatalFailure(error)
+            }
+            if let error = outcome.error {
+                state.withLock {
+                    $0.lifecycle = .failed(
+                        error,
+                        cleanupRequired: !outcome.parentResumed
+                    )
+                }
+                return .failure(error)
+            }
+            state.withLock { $0.lifecycle = .cancelled }
+            return .success(())
+        }
+
+        let error = await coordinator.cancelRoot(identifier: identifier)
+        if let error {
+            state.withLock {
+                $0.lifecycle = .failed(error, cleanupRequired: false)
+            }
+            return .failure(error)
+        }
+        state.withLock { $0.lifecycle = .cancelled }
+        return .success(())
+    }
+
+    // MARK: - Transaction Lifecycle and Backend Access
+
+    private func ensureBackendStarted() async throws {
+        guard !lifetime.isClosed else {
+            throw Self.invalidState(
+                "SQLite storage engine is closed",
+                operation: .beginTransaction
+            )
+        }
+        guard let parent else {
+            try await coordinator.beginRoot(identifier: identifier)
+            return
+        }
+
+        let parentWrites: [SQLiteWriteOperation]
+        do {
+            parentWrites = try parent.takeWritesForChildStart(
+                childIdentifier: identifier
+            )
+            try await parent.ensureBackendStarted()
+            try await coordinator.beginChild(
+                rootIdentifier: rootIdentifier,
+                parentIdentifier: parent.identifier,
+                childIdentifier: identifier,
+                parentWrites: parentWrites
+            )
+        } catch {
+            let mapped = map(error, operation: .beginTransaction)
+            parent.recordDescendantFatalFailure(mapped)
+            throw mapped
+        }
+    }
+
+    private func appendAdmittedWrite(
+        operation: StorageOperation,
+        admit: () throws -> Void,
+        makeWrite: () -> SQLiteWriteOperation
+    ) throws {
+        try state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: operation)
+            guard state.activeChildIdentifier == nil else {
+                throw Self.invalidState(
+                    "SQLite parent transaction is suspended by its child",
+                    operation: operation
+                )
+            }
+            guard state.activeRangeRegistrations.isEmpty else {
+                throw Self.invalidState(
+                    "SQLite transaction cannot mutate while a range cursor is open",
+                    operation: operation
+                )
+            }
+            try admit()
+            state.writes.append(makeWrite())
+        }
+    }
+
+    private func takeWrites(
+        operation: StorageOperation
+    ) throws -> [SQLiteWriteOperation] {
+        try state.withLock { state in
+            try Self.validateReadable(state, operation: operation)
+            let writes = state.writes
+            state.writes.removeAll(keepingCapacity: false)
+            return writes
+        }
+    }
+
+    private func takeWritesForChildStart(
+        childIdentifier: UInt64
+    ) throws -> [SQLiteWriteOperation] {
+        try state.withLock { state in
+            switch state.lifecycle {
+            case .open:
+                break
+            case .failed(let error, _):
+                throw error
+            default:
+                throw Self.invalidState(
+                    "SQLite parent transaction is not open",
+                    operation: .beginTransaction
+                )
+            }
+            guard state.activeChildIdentifier == childIdentifier else {
+                throw Self.invalidState(
+                    "SQLite child does not own the parent suspension",
+                    operation: .beginTransaction
+                )
+            }
+            let writes = state.writes
+            state.writes.removeAll(keepingCapacity: false)
+            return writes
+        }
+    }
+
+    private func registerRangeAndTakeWrites()
+        throws -> (UInt64, [SQLiteWriteOperation]) {
+        try state.withLock { state in
+            try Self.validateReadable(state, operation: .rangeRead)
+            let registration = state.nextRangeRegistrationIdentifier
+            let (next, overflow) = registration.addingReportingOverflow(1)
+            guard !overflow else {
+                throw StorageError(
+                    code: .resourceUnavailable,
+                    operation: .rangeRead,
+                    backend: .sqlite,
+                    message: "SQLite range registration space is exhausted"
+                )
+            }
+            state.nextRangeRegistrationIdentifier = next
+            state.activeRangeRegistrations.insert(registration)
+            let writes = state.writes
+            state.writes.removeAll(keepingCapacity: false)
+            return (registration, writes)
+        }
+    }
+
+    private func unregisterRange(_ registration: UInt64) {
+        _ = state.withLock { state in
+            state.activeRangeRegistrations.remove(registration)
+        }
+    }
+
+    private func releaseChild(identifier: UInt64) throws {
+        try state.withLock { state in
+            guard state.activeChildIdentifier == identifier else {
+                throw Self.invalidState(
+                    "SQLite child completion violated strict LIFO ownership",
+                    operation: .commit
+                )
+            }
+            state.activeChildIdentifier = nil
+        }
+    }
+
+    private func resolveAbandonedChild(
+        identifier: UInt64,
+        outcome: SQLiteChildTerminalOutcome
+    ) {
+        if outcome.parentResumed {
+            do {
+                try releaseChild(identifier: identifier)
+            } catch {
+                recordDescendantFatalFailure(
+                    map(error, operation: .cancel)
+                )
+            }
+        } else if let error = outcome.error {
+            recordDescendantFatalFailure(error)
+        }
+    }
+
+    private func recordDescendantFatalFailure(_ error: StorageError) {
+        state.withLock { state in
+            state.lifecycle = .failed(error, cleanupRequired: true)
+            state.writes.removeAll(keepingCapacity: false)
+        }
+        parent?.recordDescendantFatalFailure(error)
+    }
+
+    private func recordFailure(
+        _ error: any Error,
+        operation: StorageOperation
+    ) -> StorageError {
+        let mapped = map(error, operation: operation)
+        state.withLock { state in
+            switch state.lifecycle {
+            case .open, .committing:
+                state.lifecycle = .failed(mapped, cleanupRequired: true)
+                state.writes.removeAll(keepingCapacity: false)
+            case .failed:
+                break
+            case .committed, .cancelling, .cancelled:
+                break
+            }
+        }
+        return mapped
+    }
+
+    private func map(
+        _ error: any Error,
+        operation: StorageOperation
+    ) -> StorageError {
         if let storageError = error as? StorageError {
-            return storageError
+            if storageError.backend == .sqlite {
+                return storageError
+            }
+            return StorageError(
+                code: storageError.code,
+                operation: operation,
+                backend: .sqlite,
+                message: storageError.message,
+                backendCode: storageError.backendCode,
+                underlyingDescription: storageError.underlyingDescription
+            )
         }
-
         return StorageError(
             code: .backendFailure,
             operation: operation,
@@ -443,77 +845,85 @@ public final class SQLiteStorageTransaction: Transaction, Sendable {
         )
     }
 
-    private func cleanupFailedTransactionIfNeeded() {
-        let shouldRollbackAndRelease = _state.withLock { state in
-            guard case .failed = state.lifecycle else { return false }
-            return !state.lockReleased
+    private static func validateReadable(
+        _ state: MutableState,
+        operation: StorageOperation
+    ) throws {
+        switch state.lifecycle {
+        case .open:
+            break
+        case .committing:
+            throw invalidState(
+                "SQLite transaction is committing",
+                operation: operation
+            )
+        case .committed:
+            throw invalidState(
+                "SQLite transaction was committed",
+                operation: operation
+            )
+        case .cancelling:
+            throw invalidState(
+                "SQLite transaction is cancelling",
+                operation: operation
+            )
+        case .cancelled:
+            throw invalidState(
+                "SQLite transaction was cancelled",
+                operation: operation
+            )
+        case .failed(let error, _):
+            throw error
         }
-        guard shouldRollbackAndRelease else { return }
-
-        rollbackBestEffort()
-        releaseLockOnce()
+        guard state.activeChildIdentifier == nil else {
+            throw invalidState(
+                "SQLite parent transaction is suspended by its child",
+                operation: operation
+            )
+        }
     }
 
-    private func rollbackBestEffort() {
-        do {
-            try connection.execute("ROLLBACK", operation: .rollback)
-        } catch {
-            // Cancellation and failed-transaction cleanup cannot surface rollback errors.
+    private static func validateOpen(
+        _ lifecycle: Lifecycle,
+        operation: StorageOperation
+    ) throws {
+        switch lifecycle {
+        case .open:
+            return
+        case .committing:
+            throw invalidState(
+                "SQLite transaction is committing",
+                operation: operation
+            )
+        case .committed:
+            throw invalidState(
+                "SQLite transaction was committed",
+                operation: operation
+            )
+        case .cancelling:
+            throw invalidState(
+                "SQLite transaction is cancelling",
+                operation: operation
+            )
+        case .cancelled:
+            throw invalidState(
+                "SQLite transaction was cancelled",
+                operation: operation
+            )
+        case .failed(let error, _):
+            throw error
         }
     }
 
-    private func releaseLockOnce() {
-        guard lock != nil else { return }
-        let shouldRelease = _state.withLock { state in
-            guard !state.lockReleased else { return false }
-            state.lockReleased = true
-            return true
-        }
-        guard shouldRelease else { return }
-        lock?.unlock()
-    }
-
-    private func flushWriteBuffer() throws {
-        let ops = try _state.withLock { state -> [WriteOp] in
-            switch state.lifecycle {
-            case .open, .committing:
-                return state.writeBuffer
-            case .committed:
-                throw Self.invalidStateError("Transaction committed")
-            case .cancelled:
-                throw Self.invalidStateError("Transaction cancelled")
-            case .failed(let error):
-                throw error
-            }
-        }
-
-        do {
-            for op in ops {
-                switch op {
-                case .set(let key, let value):
-                    try connection.insertOrReplace(key: key, value: value)
-                case .clear(let key):
-                    try connection.delete(key: key)
-                case .clearRange(let begin, let end):
-                    try connection.deleteRange(begin: begin, end: end)
-                case .atomic(let key, let param, let mutationType):
-                    // Read-modify-write is safe here: the SQLite transaction holds
-                    // an exclusive lock, and preceding buffered ops are already
-                    // flushed, so the database value is the correct base.
-                    // A mid-flush throw is undone by commit()'s ROLLBACK.
-                    switch try mutationType.apply(to: connection.get(key: key), param: param) {
-                    case .set(let bytes):
-                        try connection.insertOrReplace(key: key, value: bytes)
-                    case .clear:
-                        try connection.delete(key: key)
-                    case .unchanged:
-                        break
-                    }
-                }
-            }
-        } catch {
-            throw markFailed(error, operation: .write)
-        }
-        _state.withLock { $0.writeBuffer.removeAll() }
+    private static func invalidState(
+        _ message: String,
+        operation: StorageOperation
+    ) -> StorageError {
+        StorageError(
+            code: .invalidOperation,
+            operation: operation,
+            backend: .sqlite,
+            message: message
+        )
     }
 }

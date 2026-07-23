@@ -1,34 +1,430 @@
 import FoundationDB
 import StorageKit
+import Synchronization
 
-public struct FDBStorageRangeResult: AsyncSequence, Sendable {
+public struct FDBStorageRangeResult: TransactionRangeResult {
     public typealias Element = (Bytes, Bytes)
 
-    private let base: FDB.AsyncKVSequence
+    private enum Source: Sendable {
+        case sequence(FDB.AsyncKVSequence, FDBStorageTransaction)
+        case failure(StorageError)
+    }
 
-    init(_ base: FDB.AsyncKVSequence) {
-        self.base = base
+    private let source: Source
+
+    init(
+        _ base: FDB.AsyncKVSequence,
+        transaction: FDBStorageTransaction
+    ) {
+        self.source = .sequence(base, transaction)
+    }
+
+    init(error: StorageError) {
+        self.source = .failure(error)
     }
 
     public func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(base.makeAsyncIterator())
+        switch source {
+        case .sequence(let sequence, let transaction):
+            return AsyncIterator(
+                sequence.makeAsyncIterator(),
+                transaction: transaction
+            )
+        case .failure(let error):
+            return AsyncIterator(error: error)
+        }
     }
 
-    public struct AsyncIterator: AsyncIteratorProtocol {
-        private var base: FDB.AsyncKVSequence.AsyncIterator
+    /// A reference iterator whose aliases share one serialized iteration state.
+    /// Only that state may enter the FoundationDB iterator, so `next()`
+    /// and `finish()` cannot overlap even when aliases are used concurrently.
+    public final class AsyncIterator: TransactionRangeIterator, Sendable {
+        private let iterationState: FoundationDBRangeIterationState
 
-        init(_ base: FDB.AsyncKVSequence.AsyncIterator) {
-            self.base = base
+        init(
+            _ base: FDB.AsyncKVSequence.AsyncIterator,
+            transaction: FDBStorageTransaction
+        ) {
+            self.iterationState = FoundationDBRangeIterationState(
+                base,
+                transaction: transaction
+            )
         }
 
-        public mutating func next() async throws -> Element? {
-            do {
-                return try await base.next()
-            } catch let error as FDBError {
-                throw FDBStorageTransaction.convertFDBError(error, operation: .rangeRead)
-            } catch {
-                throw FDBStorageTransaction.convertBackendError(error, operation: .rangeRead)
+        init(error: StorageError) {
+            self.iterationState = FoundationDBRangeIterationState(error: error)
+        }
+
+        public func next() async throws -> Element? {
+            try await iterationState.next()
+        }
+
+        public func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {
+            try await iterationState.finish()
+        }
+
+        var finishWaiterCount: Int {
+            get async {
+                await iterationState.finishWaiterCount
             }
+        }
+
+        var nextWaiterCount: Int {
+            get async {
+                await iterationState.nextWaiterCount
+            }
+        }
+    }
+}
+
+private actor FoundationDBRangeIterationState {
+    private enum Source {
+        case sequence(
+            FDB.AsyncKVSequence.AsyncIterator,
+            FDBStorageTransaction,
+            FDBStorageOperationLease?
+        )
+        case reading(
+            RangeIterationBoundary,
+            finishRequested: Bool
+        )
+        case finishing(RangeIterationBoundary)
+        case failure(StorageError)
+        case finished
+    }
+
+    private var source: Source
+    private(set) var finishWaiterCount = 0
+    private(set) var nextWaiterCount = 0
+
+    init(
+        _ base: FDB.AsyncKVSequence.AsyncIterator,
+        transaction: FDBStorageTransaction
+    ) {
+        self.source = .sequence(base, transaction, nil)
+    }
+
+    init(error: StorageError) {
+        self.source = .failure(error)
+    }
+
+    func next() async throws -> (Bytes, Bytes)? {
+        while true {
+            switch source {
+            case .failure(let error):
+                source = .finished
+                throw error
+            case .finished:
+                return nil
+            case .reading(let completion, _),
+                 .finishing(let completion):
+                nextWaiterCount += 1
+                defer { nextWaiterCount -= 1 }
+                try await completion.waitForBoundary()
+            case .sequence(
+                let iterator,
+                let transaction,
+                let currentLease
+            ):
+                return try await readNext(
+                    iterator: iterator,
+                    transaction: transaction,
+                    currentLease: currentLease
+                )
+            }
+        }
+    }
+
+    func finish() async throws {
+        while true {
+            switch source {
+            case .failure, .finished:
+                source = .finished
+                return
+            case .reading(let completion, false):
+                source = .reading(completion, finishRequested: true)
+                try await waitForFinishOperation(completion)
+            case .reading(let completion, true),
+                 .finishing(let completion):
+                try await waitForFinishOperation(completion)
+            case .sequence(let iterator, _, let lease):
+                let completion = RangeIterationBoundary()
+                source = .finishing(completion)
+                do {
+                    try await iterator.finish()
+                    lease?.release()
+                    source = .finished
+                    completion.resolve(.success(()))
+                    return
+                } catch is CancellationError {
+                    lease?.release()
+                    source = .finished
+                    completion.resolve(.failure(.cancelled))
+                    throw CancellationError()
+                } catch let error as FDBError {
+                    let converted = FDBStorageTransaction.convertFDBError(
+                        error,
+                        operation: .rangeRead
+                    )
+                    lease?.release()
+                    source = .finished
+                    completion.resolve(.failure(.storage(converted)))
+                    throw converted
+                } catch let error as StorageError {
+                    lease?.release()
+                    source = .finished
+                    completion.resolve(.failure(.storage(error)))
+                    throw error
+                } catch {
+                    let converted = FDBStorageTransaction.convertBackendError(
+                        error,
+                        operation: .rangeRead
+                    )
+                    lease?.release()
+                    source = .finished
+                    completion.resolve(.failure(.storage(converted)))
+                    throw converted
+                }
+            }
+        }
+    }
+
+    private func waitForFinishOperation(
+        _ completion: RangeIterationBoundary
+    ) async throws {
+        finishWaiterCount += 1
+        defer { finishWaiterCount -= 1 }
+        try await completion.waitForBoundary()
+    }
+
+    private func readNext(
+        iterator: FDB.AsyncKVSequence.AsyncIterator,
+        transaction: FDBStorageTransaction,
+        currentLease: FDBStorageOperationLease?
+    ) async throws -> (Bytes, Bytes)? {
+        let lease: FDBStorageOperationLease
+        do {
+            if let currentLease {
+                try transaction.validateOperationLease(for: .rangeRead)
+                lease = currentLease
+            } else {
+                lease = try transaction.makeOperationLease(for: .rangeRead)
+            }
+        } catch let error as StorageError {
+            source = .finished
+            throw error
+        } catch {
+            source = .finished
+            throw FDBStorageTransaction.convertBackendError(
+                error,
+                operation: .rangeRead
+            )
+        }
+
+        let completion = RangeIterationBoundary()
+        source = .reading(completion, finishRequested: false)
+
+        do {
+            let element = try await iterator.next()
+            try transaction.validateOperationLease(for: .rangeRead)
+
+            if finishWasRequested(for: completion) {
+                return try await completeRequestedFinish(
+                    iterator: iterator,
+                    lease: lease,
+                    completion: completion
+                )
+            }
+
+            guard let (key, value) = element else {
+                lease.release()
+                source = .finished
+                completion.resolve(.success(()))
+                return nil
+            }
+
+            source = .sequence(iterator, transaction, lease)
+            completion.resolve(.success(()))
+            return (
+                Bytes(retaining: FoundationDBResultBytesOwner(key)),
+                Bytes(retaining: FoundationDBResultBytesOwner(value))
+            )
+        } catch is CancellationError {
+            lease.release()
+            source = .finished
+            completion.resolveIfPending(.failure(.cancelled))
+            throw CancellationError()
+        } catch let error as FDBError {
+            let converted = FDBStorageTransaction.convertFDBError(
+                error,
+                operation: .rangeRead
+            )
+            lease.release()
+            source = .finished
+            completion.resolveIfPending(.failure(.storage(converted)))
+            throw converted
+        } catch let error as StorageError {
+            lease.release()
+            source = .finished
+            completion.resolveIfPending(.failure(.storage(error)))
+            throw error
+        } catch {
+            let converted = FDBStorageTransaction.convertBackendError(
+                error,
+                operation: .rangeRead
+            )
+            lease.release()
+            source = .finished
+            completion.resolveIfPending(.failure(.storage(converted)))
+            throw converted
+        }
+    }
+
+    private func finishWasRequested(
+        for completion: RangeIterationBoundary
+    ) -> Bool {
+        guard case .reading(let activeCompletion, let requested) = source,
+              activeCompletion === completion else {
+            return false
+        }
+        return requested
+    }
+
+    private func completeRequestedFinish(
+        iterator: FDB.AsyncKVSequence.AsyncIterator,
+        lease: FDBStorageOperationLease,
+        completion: RangeIterationBoundary
+    ) async throws -> (Bytes, Bytes)? {
+        source = .finishing(completion)
+        do {
+            try await iterator.finish()
+            lease.release()
+            source = .finished
+            completion.resolve(.success(()))
+            return nil
+        } catch is CancellationError {
+            lease.release()
+            source = .finished
+            completion.resolve(.failure(.cancelled))
+            throw CancellationError()
+        } catch let error as FDBError {
+            let converted = FDBStorageTransaction.convertFDBError(
+                error,
+                operation: .rangeRead
+            )
+            lease.release()
+            source = .finished
+            completion.resolve(.failure(.storage(converted)))
+            throw converted
+        } catch let error as StorageError {
+            lease.release()
+            source = .finished
+            completion.resolve(.failure(.storage(error)))
+            throw error
+        } catch {
+            let converted = FDBStorageTransaction.convertBackendError(
+                error,
+                operation: .rangeRead
+            )
+            lease.release()
+            source = .finished
+            completion.resolve(.failure(.storage(converted)))
+            throw converted
+        }
+    }
+}
+
+private enum RangeIterationBoundaryFailure: Error, Sendable {
+    case cancelled
+    case storage(StorageError)
+
+    func throwAtBoundary() throws {
+        switch self {
+        case .cancelled:
+            throw CancellationError()
+        case .storage(let error):
+            throw error
+        }
+    }
+}
+
+private final class RangeIterationBoundary: Sendable {
+    private struct MutableState: Sendable {
+        var result: Result<Void, RangeIterationBoundaryFailure>?
+        var waiters: [CheckedContinuation<
+            Result<Void, RangeIterationBoundaryFailure>,
+            Never
+        >] = []
+    }
+
+    private let state = Mutex(MutableState())
+
+    func wait() async -> Result<Void, RangeIterationBoundaryFailure> {
+        let completed = state.withLock { $0.result }
+        if let completed {
+            return completed
+        }
+        return await withCheckedContinuation { continuation in
+            let racedResult = state.withLock { state
+                -> Result<Void, RangeIterationBoundaryFailure>? in
+                if let result = state.result {
+                    return result
+                }
+                state.waiters.append(continuation)
+                return nil
+            }
+            if let racedResult {
+                continuation.resume(returning: racedResult)
+            }
+        }
+    }
+
+    func waitForBoundary() async throws {
+        switch await wait() {
+        case .success:
+            return
+        case .failure(let failure):
+            try failure.throwAtBoundary()
+        }
+    }
+
+    func resolve(_ result: Result<Void, RangeIterationBoundaryFailure>) {
+        let waiters = state.withLock { state in
+            precondition(
+                state.result == nil,
+                "Range iterator operation resolved more than once"
+            )
+            state.result = result
+            let waiters = state.waiters
+            state.waiters.removeAll(keepingCapacity: false)
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.resume(returning: result)
+        }
+    }
+
+    func resolveIfPending(
+        _ result: Result<Void, RangeIterationBoundaryFailure>
+    ) {
+        let waiters = state.withLock { state
+            -> [CheckedContinuation<
+                Result<Void, RangeIterationBoundaryFailure>,
+                Never
+            >]? in
+            guard state.result == nil else {
+                return nil
+            }
+            state.result = result
+            let waiters = state.waiters
+            state.waiters.removeAll(keepingCapacity: false)
+            return waiters
+        }
+        guard let waiters else { return }
+        for waiter in waiters {
+            waiter.resume(returning: result)
         }
     }
 }

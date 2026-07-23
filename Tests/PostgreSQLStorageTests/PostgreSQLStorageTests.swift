@@ -19,16 +19,16 @@ import Foundation
 ///   -e POSTGRES_DB=storage_kit_test \
 ///   postgres:16
 /// ```
-extension AllPostgreSQLTests {
-@Suite("PostgreSQLStorage Tests", .serialized, .enabled(if: PostgreSQLTestHelper.isAvailable))
+extension SerializedPostgreSQLStorageTests {
+@Suite("PostgreSQLStorage Tests", .serialized, .enabled(if: PostgreSQLTestEnvironment.isConfigured))
 struct PostgreSQLStorageTests {
 
     private func makeEngine() async throws -> PostgreSQLStorageEngine {
-        let engine = try await PostgreSQLTestHelper.makeEngine()
+        let engine = try await PostgreSQLTestEnvironment.makeEngine()
 
         // Clean all data — suites are serialized so no concurrent conflict
         try await engine.withTransaction { tx in
-            tx.clearRange(beginKey: [0x00], endKey: [0xFF, 0xFF])
+            try tx.clearRange(beginKey: [0x00], endKey: [0xFF, 0xFF])
         }
 
         return engine
@@ -54,11 +54,11 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: [UInt8] = [0x01, 0x02, 0x03]
-        let value: [UInt8] = [0xAA, 0xBB, 0xCC]
+        let key: Bytes = [0x01, 0x02, 0x03]
+        let value: Bytes = [0xAA, 0xBB, 0xCC]
 
         try await engine.withTransaction { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         let result = try await engine.withTransaction { tx in
@@ -71,15 +71,15 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: [UInt8] = [0x10]
-        let value: [UInt8] = [0x20]
+        let key: Bytes = [0x10]
+        let value: Bytes = [0x20]
 
         try await engine.withTransaction { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         try await engine.withTransaction { tx in
-            tx.clear(key: key)
+            try tx.clear(key: key)
         }
 
         let result = try await engine.withTransaction { tx in
@@ -93,17 +93,17 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([2], for: [0x02])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([4], for: [0x04])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([2], for: [0x02])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([4], for: [0x04])
         }
 
         try await engine.withTransaction { tx in
-            tx.clearRange(beginKey: [0x02], endKey: [0x04])
+            try tx.clearRange(beginKey: [0x02], endKey: [0x04])
         }
 
-        let results = try await engine.withTransaction { tx -> [[UInt8]?] in
+        let results = try await engine.withTransaction { tx -> [Bytes?] in
             let r1 = try await tx.getValue(for: [0x01])
             let r2 = try await tx.getValue(for: [0x02])
             let r3 = try await tx.getValue(for: [0x03])
@@ -121,10 +121,10 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x0A])
-            tx.setValue([20], for: [0x14])
-            tx.setValue([30], for: [0x1E])
-            tx.setValue([40], for: [0x28])
+            try tx.setValue([10], for: [0x0A])
+            try tx.setValue([20], for: [0x14])
+            try tx.setValue([30], for: [0x1E])
+            try tx.setValue([40], for: [0x28])
         }
 
         let results = try await engine.withTransaction { tx -> [(Bytes, Bytes)] in
@@ -151,9 +151,9 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x01])
-            tx.clear(key: [0x01])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x01])
+            try tx.clear(key: [0x01])
             return try await tx.getValue(for: [0x01])
         }
         #expect(result == nil)
@@ -163,10 +163,10 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x01])
-            tx.clear(key: [0x01])
-            tx.setValue([2], for: [0x01])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x01])
+            try tx.clear(key: [0x01])
+            try tx.setValue([2], for: [0x01])
             return try await tx.getValue(for: [0x01])
         }
         #expect(result == [2])
@@ -176,9 +176,9 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x02])
-            tx.clearRange(beginKey: [0x01], endKey: [0x05])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x02])
+            try tx.clearRange(beginKey: [0x01], endKey: [0x05])
             return try await tx.getValue(for: [0x02])
         }
         #expect(result == nil)
@@ -188,9 +188,9 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.clearRange(beginKey: [0x01], endKey: [0x05])
-            tx.setValue([99], for: [0x03])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.clearRange(beginKey: [0x01], endKey: [0x05])
+            try tx.setValue([99], for: [0x03])
             return try await tx.getValue(for: [0x03])
         }
         #expect(result == [99])
@@ -200,10 +200,10 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([2], for: [0x01])
-            tx.setValue([3], for: [0x01])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([2], for: [0x01])
+            try tx.setValue([3], for: [0x01])
             return try await tx.getValue(for: [0x01])
         }
         #expect(result == [3])
@@ -213,11 +213,11 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x02])
-            tx.clearRange(beginKey: [0x01], endKey: [0x05])
-            tx.setValue([2], for: [0x02])
-            tx.clearRange(beginKey: [0x01], endKey: [0x05])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x02])
+            try tx.clearRange(beginKey: [0x01], endKey: [0x05])
+            try tx.setValue([2], for: [0x02])
+            try tx.clearRange(beginKey: [0x01], endKey: [0x05])
             return try await tx.getValue(for: [0x02])
         }
         #expect(result == nil)
@@ -228,11 +228,11 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
         }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([20], for: [0x01])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([20], for: [0x01])
             return try await tx.getValue(for: [0x01])
         }
         #expect(result == [20])
@@ -243,11 +243,11 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
         }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.clear(key: [0x01])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.clear(key: [0x01])
             return try await tx.getValue(for: [0x01])
         }
         #expect(result == nil)
@@ -258,11 +258,11 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
         }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([99], for: [0xFF]) // different key
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([99], for: [0xFF]) // different key
             // [0x01] not in buffer → falls through to PostgreSQL
             return try await tx.getValue(for: [0x01])
         }
@@ -280,9 +280,9 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x02])
-            tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x02])
+            try tx.clearRange(beginKey: [0x02], endKey: [0x05])
             return try await tx.getValue(for: [0x02])
         }
         #expect(result == nil)
@@ -292,9 +292,9 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x05])
-            tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x05])
+            try tx.clearRange(beginKey: [0x02], endKey: [0x05])
             return try await tx.getValue(for: [0x05])
         }
         #expect(result == [1])
@@ -304,9 +304,9 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x04])
-            tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x04])
+            try tx.clearRange(beginKey: [0x02], endKey: [0x05])
             return try await tx.getValue(for: [0x04])
         }
         #expect(result == nil)
@@ -316,9 +316,9 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([1], for: [0x01])
-            tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([1], for: [0x01])
+            try tx.clearRange(beginKey: [0x02], endKey: [0x05])
             return try await tx.getValue(for: [0x01])
         }
         #expect(result == [1])
@@ -328,10 +328,10 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let results = try await engine.withTransaction { tx -> ([UInt8]?, [UInt8]?) in
-            tx.setValue([1], for: [0x01, 0xFF])
-            tx.setValue([2], for: [0x02, 0x00])
-            tx.clearRange(beginKey: [0x02, 0x00], endKey: [0x03, 0x00])
+        let results = try await engine.withTransaction { tx -> (Bytes?, Bytes?) in
+            try tx.setValue([1], for: [0x01, 0xFF])
+            try tx.setValue([2], for: [0x02, 0x00])
+            try tx.clearRange(beginKey: [0x02, 0x00], endKey: [0x03, 0x00])
             // [0x01, 0xFF] < begin → preserved
             let preserved = try await tx.getValue(for: [0x01, 0xFF])
             // [0x02, 0x00] == begin → cleared
@@ -347,15 +347,15 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([2], for: [0x02])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([4], for: [0x04])
-            tx.setValue([5], for: [0x05])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([2], for: [0x02])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([4], for: [0x04])
+            try tx.setValue([5], for: [0x05])
         }
 
         try await engine.withTransaction { tx in
-            tx.clearRange(beginKey: [0x02], endKey: [0x05])
+            try tx.clearRange(beginKey: [0x02], endKey: [0x05])
         }
 
         try await engine.withTransaction { tx in
@@ -386,7 +386,7 @@ struct PostgreSQLStorageTests {
 
         try await engine.withTransaction { tx in
             // Buffer has set(0x01, [10])
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
 
             // getRange triggers flush → buffer is now empty, data is in PostgreSQL
             _ = try await collectRange(tx, begin: [0x00], end: [0xFF])
@@ -402,12 +402,12 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
             _ = try await collectRange(tx, begin: [0x00], end: [0xFF]) // flush
 
             // New writes go into a fresh buffer
-            tx.setValue([20], for: [0x02])
-            tx.clear(key: [0x01])
+            try tx.setValue([20], for: [0x02])
+            try tx.clear(key: [0x01])
 
             // getValue for [0x01]: clear in buffer → nil
             let clearedAfterFlush = try await tx.getValue(for: [0x01])
@@ -424,13 +424,13 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
             _ = try await collectRange(tx, begin: [0x00], end: [0xFF]) // flush 1
 
-            tx.setValue([20], for: [0x02])
+            try tx.setValue([20], for: [0x02])
             _ = try await collectRange(tx, begin: [0x00], end: [0xFF]) // flush 2
 
-            tx.setValue([30], for: [0x03])
+            try tx.setValue([30], for: [0x03])
             let range = try await collectRange(tx, begin: [0x00], end: [0xFF]) // flush 3
 
             #expect(range.count == 3)
@@ -445,11 +445,11 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([20], for: [0x02])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([20], for: [0x02])
             _ = try await collectRange(tx, begin: [0x00], end: [0xFF]) // flush
 
-            tx.clear(key: [0x01]) // buffer: clear(0x01)
+            try tx.clear(key: [0x01]) // buffer: clear(0x01)
             let range = try await collectRange(tx, begin: [0x00], end: [0xFF]) // flush again
 
             // After second flush: PostgreSQL has [0x02] only
@@ -467,9 +467,9 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.clear(key: [0x01])
-            tx.setValue([2], for: [0x01])
+            try tx.setValue([1], for: [0x01])
+            try tx.clear(key: [0x01])
+            try tx.setValue([2], for: [0x01])
 
             let value = try await tx.getValue(for: [0x01])
             #expect(value == [2])
@@ -485,14 +485,14 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([20], for: [0x02])
-            tx.setValue([30], for: [0x03])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([20], for: [0x02])
+            try tx.setValue([30], for: [0x03])
         }
 
         try await engine.withTransaction { tx in
-            tx.clearRange(beginKey: [0x01], endKey: [0x04])
-            tx.setValue([99], for: [0x02])
+            try tx.clearRange(beginKey: [0x01], endKey: [0x04])
+            try tx.setValue([99], for: [0x02])
 
             let v1 = try await tx.getValue(for: [0x01])
             let v2 = try await tx.getValue(for: [0x02])
@@ -514,13 +514,13 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([20], for: [0x02])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([20], for: [0x02])
         }
 
         try await engine.withTransaction { tx in
-            tx.setValue([99], for: [0x01])    // overwrite
-            tx.clearRange(beginKey: [0x01], endKey: [0x03])  // then clear range
+            try tx.setValue([99], for: [0x01])    // overwrite
+            try tx.clearRange(beginKey: [0x01], endKey: [0x03])  // then clear range
 
             let v1 = try await tx.getValue(for: [0x01])
             let v2 = try await tx.getValue(for: [0x02])
@@ -540,8 +540,8 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.setValue([0xFF], for: [0x42])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.setValue([0xFF], for: [0x42])
             return try await tx.getValue(for: [0x42])
         }
         #expect(result == [0xFF])
@@ -552,11 +552,11 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x50])
+            try tx.setValue([1], for: [0x50])
         }
 
-        let result = try await engine.withTransaction { tx -> [UInt8]? in
-            tx.clear(key: [0x50])
+        let result = try await engine.withTransaction { tx -> Bytes? in
+            try tx.clear(key: [0x50])
             return try await tx.getValue(for: [0x50])
         }
         #expect(result == nil)
@@ -574,7 +574,7 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([42], for: [0x01])
+            try tx.setValue([42], for: [0x01])
         }
 
         let value = try await engine.withTransaction { tx in
@@ -586,14 +586,14 @@ struct PostgreSQLStorageTests {
     @Test func withTransaction_errorCausesRollback() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
-        struct TestError: Error {}
+        struct TransactionBodyFailure: Error {}
 
         do {
             try await engine.withTransaction { tx in
-                tx.setValue([42], for: [0x01])
-                throw TestError()
+                try tx.setValue([42], for: [0x01])
+                throw TransactionBodyFailure()
             }
-        } catch is TestError {}
+        } catch is TransactionBodyFailure {}
 
         let rolledBackValue = try await engine.withTransaction { tx in
             try await tx.getValue(for: [0x01])
@@ -607,8 +607,8 @@ struct PostgreSQLStorageTests {
 
         do {
             try await engine.withTransaction { tx in
-                tx.cancel()
-                tx.setValue([42], for: [0x01])
+                try await tx.cancel()
+                try tx.setValue([42], for: [0x01])
             }
             Issue.record("Expected cancelled transaction commit to throw")
         } catch let error as StorageError {
@@ -630,7 +630,7 @@ struct PostgreSQLStorageTests {
 
         do {
             try await engine.withTransaction { tx in
-                tx.cancel()
+                try await tx.cancel()
                 _ = try await tx.getValue(for: [0x01])
             }
             Issue.record("Expected error")
@@ -648,7 +648,7 @@ struct PostgreSQLStorageTests {
 
         do {
             try await engine.withTransaction { tx in
-                tx.cancel()
+                try await tx.cancel()
                 let seq = tx.getRange(begin: [0x00], end: [0xFF], limit: 0, reverse: false)
                 for try await _ in seq {
                     Issue.record("Should not yield any elements")
@@ -669,7 +669,7 @@ struct PostgreSQLStorageTests {
 
         for i: UInt8 in 0..<10 {
             try await engine.withTransaction { tx in
-                tx.setValue([i], for: [i])
+                try tx.setValue([i], for: [i])
             }
         }
 
@@ -689,7 +689,7 @@ struct PostgreSQLStorageTests {
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
-                tx.setValue([i * 10], for: [i])
+                try tx.setValue([i * 10], for: [i])
             }
         }
 
@@ -710,7 +710,7 @@ struct PostgreSQLStorageTests {
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
-                tx.setValue([i * 10], for: [i])
+                try tx.setValue([i * 10], for: [i])
             }
         }
 
@@ -743,9 +743,9 @@ struct PostgreSQLStorageTests {
 
         // Verify BYTEA comparison matches lexicographic ordering
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x00, 0x01])
-            tx.setValue([2], for: [0x00, 0xFF])
-            tx.setValue([3], for: [0x01, 0x00])
+            try tx.setValue([1], for: [0x00, 0x01])
+            try tx.setValue([2], for: [0x00, 0xFF])
+            try tx.setValue([3], for: [0x01, 0x00])
         }
 
         let results = try await engine.withTransaction { tx -> [(Bytes, Bytes)] in
@@ -765,10 +765,10 @@ struct PostgreSQLStorageTests {
 
         try await engine.withTransaction { tx in
             // Insert keys that test BYTEA ordering
-            tx.setValue([1], for: [0x01, 0x02])
-            tx.setValue([2], for: [0x01])
-            tx.setValue([3], for: [0x01, 0x02, 0x03])
-            tx.setValue([4], for: [0x02])
+            try tx.setValue([1], for: [0x01, 0x02])
+            try tx.setValue([2], for: [0x01])
+            try tx.setValue([3], for: [0x01, 0x02, 0x03])
+            try tx.setValue([4], for: [0x02])
         }
 
         let range = try await engine.withTransaction { tx in
@@ -792,9 +792,9 @@ struct PostgreSQLStorageTests {
         let spaceB = Subspace("beta")
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: spaceA.pack(Tuple(Int64(1))))
-            tx.setValue([2], for: spaceA.pack(Tuple(Int64(2))))
-            tx.setValue([3], for: spaceB.pack(Tuple(Int64(1))))
+            try tx.setValue([1], for: spaceA.pack(Tuple(Int64(1))))
+            try tx.setValue([2], for: spaceA.pack(Tuple(Int64(2))))
+            try tx.setValue([3], for: spaceB.pack(Tuple(Int64(1))))
         }
 
         let range = try await engine.withTransaction { tx in
@@ -813,11 +813,11 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x60])
+            try tx.setValue([1], for: [0x60])
 
             // Nested withTransaction should reuse the same transaction
             try await engine.withTransaction { innerTx in
-                innerTx.setValue([2], for: [0x61])
+                try innerTx.setValue([2], for: [0x61])
             }
         }
 
@@ -836,10 +836,10 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             try await engine.withTransaction { innerTx in
-                innerTx.setValue([20], for: [0x02])
+                try innerTx.setValue([20], for: [0x02])
 
                 // Inner should see outer's writes
                 let v1 = try await innerTx.getValue(for: [0x01])
@@ -855,19 +855,19 @@ struct PostgreSQLStorageTests {
     @Test func nestedWithTransaction_errorInInner_propagatesToOuter() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
-        struct InnerError: Error {}
+        struct NestedTransactionBodyFailure: Error {}
 
         do {
             try await engine.withTransaction { outerTx in
-                outerTx.setValue([10], for: [0x01])
+                try outerTx.setValue([10], for: [0x01])
 
                 try await engine.withTransaction { innerTx in
-                    innerTx.setValue([20], for: [0x02])
-                    throw InnerError()
+                    try innerTx.setValue([20], for: [0x02])
+                    throw NestedTransactionBodyFailure()
                 }
             }
             Issue.record("Expected error")
-        } catch is InnerError {}
+        } catch is NestedTransactionBodyFailure {}
 
         // Everything should be rolled back
         let v1 = try await engine.withTransaction { tx in
@@ -885,14 +885,14 @@ struct PostgreSQLStorageTests {
         defer { engine.shutdown() }
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             try await engine.withTransaction { inner1 in
-                inner1.setValue([20], for: [0x02])
+                try inner1.setValue([20], for: [0x02])
             }
 
             try await engine.withTransaction { inner2 in
-                inner2.setValue([30], for: [0x03])
+                try inner2.setValue([30], for: [0x03])
                 // Should see writes from both outer and inner1
                 let v1 = try await inner2.getValue(for: [0x01])
                 let v2 = try await inner2.getValue(for: [0x02])
@@ -901,7 +901,7 @@ struct PostgreSQLStorageTests {
             }
         }
 
-        let results = try await engine.withTransaction { tx -> ([UInt8]?, [UInt8]?, [UInt8]?) in
+        let results = try await engine.withTransaction { tx -> (Bytes?, Bytes?, Bytes?) in
             let v1 = try await tx.getValue(for: [0x01])
             let v2 = try await tx.getValue(for: [0x02])
             let v3 = try await tx.getValue(for: [0x03])
@@ -939,11 +939,11 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let subspace1 = try await engine.directoryService.createOrOpen(path: ["app", "users"])
-        let subspace2 = try await engine.directoryService.createOrOpen(path: ["app", "users"])
+        let subspace1 = try await engine.createOrOpenDirectory(path: ["app", "users"])
+        let subspace2 = try await engine.createOrOpenDirectory(path: ["app", "users"])
         #expect(subspace1 == subspace2)
 
-        let exists = try await engine.directoryService.exists(path: ["app", "users"])
+        let exists = try await engine.directoryExists(path: ["app", "users"])
         #expect(exists == true)
     }
 
@@ -984,7 +984,7 @@ struct PostgreSQLStorageTests {
             for i: UInt8 in 0..<20 {
                 group.addTask {
                     try await engine.withTransaction { tx in
-                        tx.setValue([i], for: [i])
+                        try tx.setValue([i], for: [i])
                     }
                 }
             }
@@ -1008,7 +1008,7 @@ struct PostgreSQLStorageTests {
                 group.addTask {
                     try await engine.withTransaction { tx in
                         // Write to unique key and then read it back
-                        tx.setValue([i * 10], for: [0xA0 + i])
+                        try tx.setValue([i * 10], for: [0xA0 + i])
                     }
                 }
             }
@@ -1031,7 +1031,7 @@ struct PostgreSQLStorageTests {
 
         // Seed data
         try await engine.withTransaction { tx in
-            tx.setValue([42], for: [0x01])
+            try tx.setValue([42], for: [0x01])
         }
 
         // Concurrent reads + writes to different keys
@@ -1049,7 +1049,7 @@ struct PostgreSQLStorageTests {
             for i: UInt8 in 0..<10 {
                 group.addTask {
                     try await engine.withTransaction { tx in
-                        tx.setValue([i], for: [0xF0 + i])
+                        try tx.setValue([i], for: [0xF0 + i])
                     }
                 }
             }
@@ -1064,21 +1064,21 @@ struct PostgreSQLStorageTests {
     @Test func errorRecovery_transactionFailThenSucceed() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
-        struct TestError: Error {}
+        struct TransactionBodyFailure: Error {}
 
         // Three consecutive failing transactions
         for _ in 0..<3 {
             do {
                 try await engine.withTransaction { tx in
-                    tx.setValue([1], for: [0x01])
-                    throw TestError()
+                    try tx.setValue([1], for: [0x01])
+                    throw TransactionBodyFailure()
                 }
-            } catch is TestError {}
+            } catch is TransactionBodyFailure {}
         }
 
         // Must still work after repeated failures
         try await engine.withTransaction { tx in
-            tx.setValue([99], for: [0x01])
+            try tx.setValue([99], for: [0x01])
         }
 
         let value = try await engine.withTransaction { tx in
@@ -1098,10 +1098,10 @@ struct PostgreSQLStorageTests {
         // atomicOp(.add) on non-existent key: should create entry
         // Param = 5 as little-endian Int64
         var addend: Int64 = 5
-        let param = withUnsafeBytes(of: &addend) { Array($0) }
+        let param = withUnsafeBytes(of: &addend) { Bytes($0) }
 
         try await engine.withTransaction { tx in
-            tx.atomicOp(key: [0x01], param: param, mutationType: .add)
+            try tx.atomicOp(key: [0x01], param: param, mutationType: .add)
         }
 
         let result = try await engine.withTransaction { tx in
@@ -1121,18 +1121,18 @@ struct PostgreSQLStorageTests {
 
         // Set initial value = 10 as little-endian Int64
         var initial: Int64 = 10
-        let initialBytes = withUnsafeBytes(of: &initial) { Array($0) }
+        let initialBytes = withUnsafeBytes(of: &initial) { Bytes($0) }
 
         try await engine.withTransaction { tx in
-            tx.setValue(initialBytes, for: [0x01])
+            try tx.setValue(initialBytes, for: [0x01])
         }
 
         // Add 7
         var addend: Int64 = 7
-        let param = withUnsafeBytes(of: &addend) { Array($0) }
+        let param = withUnsafeBytes(of: &addend) { Bytes($0) }
 
         try await engine.withTransaction { tx in
-            tx.atomicOp(key: [0x01], param: param, mutationType: .add)
+            try tx.atomicOp(key: [0x01], param: param, mutationType: .add)
         }
 
         let result = try await engine.withTransaction { tx in
@@ -1152,9 +1152,9 @@ struct PostgreSQLStorageTests {
         // Multiple sequential adds
         for i: Int64 in 1...5 {
             var addend = i
-            let param = withUnsafeBytes(of: &addend) { Array($0) }
+            let param = withUnsafeBytes(of: &addend) { Bytes($0) }
             try await engine.withTransaction { tx in
-                tx.atomicOp(key: [0x01], param: param, mutationType: .add)
+                try tx.atomicOp(key: [0x01], param: param, mutationType: .add)
             }
         }
 
@@ -1178,12 +1178,12 @@ struct PostgreSQLStorageTests {
         // covered by MutationTypeApplyTests.
 
         try await engine.withTransaction { tx in
-            tx.setValue([42], for: [0x01])
+            try tx.setValue([42], for: [0x01])
         }
 
         // .max: existing 42 vs param 255 (little-endian) -> 255 wins.
         try await engine.withTransaction { tx in
-            tx.atomicOp(key: [0x01], param: [0xFF], mutationType: .max)
+            try tx.atomicOp(key: [0x01], param: [0xFF], mutationType: .max)
         }
         let maxResult = try await engine.withTransaction { tx in
             try await tx.getValue(for: [0x01])
@@ -1192,7 +1192,7 @@ struct PostgreSQLStorageTests {
 
         // .min: existing 255 vs param 42 -> 42 wins.
         try await engine.withTransaction { tx in
-            tx.atomicOp(key: [0x01], param: [42], mutationType: .min)
+            try tx.atomicOp(key: [0x01], param: [42], mutationType: .min)
         }
         let minResult = try await engine.withTransaction { tx in
             try await tx.getValue(for: [0x01])
@@ -1201,7 +1201,7 @@ struct PostgreSQLStorageTests {
 
         // .bitOr: 0b0010_1010 (42) | 0b0001_0101 (21) = 0b0011_1111 (63).
         try await engine.withTransaction { tx in
-            tx.atomicOp(key: [0x01], param: [21], mutationType: .bitOr)
+            try tx.atomicOp(key: [0x01], param: [21], mutationType: .bitOr)
         }
         let orResult = try await engine.withTransaction { tx in
             try await tx.getValue(for: [0x01])
@@ -1215,7 +1215,7 @@ struct PostgreSQLStorageTests {
 
         do {
             try await engine.withTransaction { tx in
-                tx.atomicOp(key: [0x01], param: [0x00], mutationType: .setVersionstampedKey)
+                try tx.atomicOp(key: [0x01], param: [0x00], mutationType: .setVersionstampedKey)
             }
             Issue.record("Expected error for versionstamp")
         } catch let error as StorageError {
@@ -1241,8 +1241,8 @@ struct PostgreSQLStorageTests {
     }
 
     @Test func mapError_unknownErrorWrapped() {
-        struct UnknownError: Error {}
-        let mapped = PostgreSQLStorageEngine.mapError(UnknownError())
+        struct UnclassifiedBackendFailure: Error {}
+        let mapped = PostgreSQLStorageEngine.mapError(UnclassifiedBackendFailure())
         if mapped.code == .backendFailure {
             // pass
         } else {
@@ -1258,11 +1258,11 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: [UInt8] = [0x01]
-        let value: [UInt8] = Array(repeating: 0xAB, count: 100_000)
+        let key: Bytes = [0x01]
+        let value: Bytes = Bytes(repeating: 0xAB, count: 100_000)
 
         try await engine.withTransaction { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         let result = try await engine.withTransaction { tx in
@@ -1282,7 +1282,7 @@ struct PostgreSQLStorageTests {
             for i in 0..<count {
                 var key: Bytes = [prefix]
                 key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
-                tx.setValue([UInt8(i % 256)], for: key)
+                try tx.setValue([UInt8(i % 256)], for: key)
             }
         }
 
@@ -1303,7 +1303,7 @@ struct PostgreSQLStorageTests {
             for i in 0..<count {
                 var key: Bytes = [prefix]
                 key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
-                tx.setValue([UInt8(i % 256)], for: key)
+                try tx.setValue([UInt8(i % 256)], for: key)
             }
         }
 
@@ -1326,7 +1326,7 @@ struct PostgreSQLStorageTests {
             for i in 0..<count {
                 var key: Bytes = [prefix]
                 key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
-                tx.setValue([UInt8(i % 256)], for: key)
+                try tx.setValue([UInt8(i % 256)], for: key)
             }
         }
 
@@ -1334,7 +1334,7 @@ struct PostgreSQLStorageTests {
             for i in 0..<count {
                 var key: Bytes = [prefix]
                 key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
-                tx.clear(key: key)
+                try tx.clear(key: key)
             }
         }
 
@@ -1344,4 +1344,4 @@ struct PostgreSQLStorageTests {
         #expect(range.isEmpty)
     }
 }
-} // extension AllPostgreSQLTests
+} // extension SerializedPostgreSQLStorageTests

@@ -1,7 +1,7 @@
 import StorageKit
 
 /// Lazy range result backed by a host range request and local write overlay.
-public struct CloudflareDurableObjectRangeResult: AsyncSequence, Sendable {
+public struct CloudflareDurableObjectRangeResult: TransactionRangeResult {
     public typealias Element = (Bytes, Bytes)
 
     private let makeIteratorBody: @Sendable () -> Iterator
@@ -16,7 +16,7 @@ public struct CloudflareDurableObjectRangeResult: AsyncSequence, Sendable {
         makeIteratorBody()
     }
 
-    public struct Iterator: AsyncIteratorProtocol {
+    public struct Iterator: TransactionRangeIterator, Sendable {
         private var scan: any CloudflareDurableObjectRangeScanning
 
         init(scan: any CloudflareDurableObjectRangeScanning) {
@@ -25,6 +25,12 @@ public struct CloudflareDurableObjectRangeResult: AsyncSequence, Sendable {
 
         public mutating func next() async throws -> (Bytes, Bytes)? {
             try await scan.next()
+        }
+
+        public mutating func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {
+            try await scan.finish(isolation: actor)
         }
     }
 }

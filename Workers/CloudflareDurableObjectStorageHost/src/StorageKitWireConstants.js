@@ -5,6 +5,8 @@ export const operation = Object.freeze({
   read: 2,
   range: 3,
   commit: 4,
+  rangeSize: 5,
+  rangeSplitPoints: 6,
 });
 
 export const statusCode = Object.freeze({
@@ -13,13 +15,7 @@ export const statusCode = Object.freeze({
   invalidOperation: 2,
   backendFailure: 3,
   resourceUnavailable: 4,
-});
-
-export const keySelectorKind = Object.freeze({
-  firstGreaterOrEqual: 1,
-  firstGreaterThan: 2,
-  lastLessOrEqual: 3,
-  lastLessThan: 4,
+  backendContractViolation: 5,
 });
 
 export const mutationType = Object.freeze({

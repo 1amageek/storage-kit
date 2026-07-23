@@ -1,6 +1,6 @@
 /// Result of applying an atomic mutation to an existing byte value.
 public enum EmbeddedAtomicMutationResult: Sendable, Equatable {
-    case set([UInt8])
+    case set(EmbeddedBytes)
     case clear
     case unchanged
 }

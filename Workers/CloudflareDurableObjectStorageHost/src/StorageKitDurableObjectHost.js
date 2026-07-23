@@ -4,8 +4,12 @@ import { statusCode } from "./StorageKitWireConstants.js";
 import { StorageKitWireError } from "./StorageKitWireError.js";
 
 export class StorageKitDurableObjectHost {
-  constructor(sql, transactionSync = null) {
+  constructor(sql, transactionSync) {
     this.store = new StorageKitSQLiteStore(sql, transactionSync);
+  }
+
+  migrate() {
+    this.store.migrate();
   }
 
   dispatchBytes(bytes) {
@@ -17,10 +21,6 @@ export class StorageKitDurableObjectHost {
       return StorageKitWireCodec.encodeFailure(statusForError(error), error.message);
     }
   }
-
-  setMutationApplier(mutationApplier) {
-    this.store.setMutationApplier(mutationApplier);
-  }
 }
 
 function statusForError(error) {
@@ -28,13 +28,19 @@ function statusForError(error) {
     switch (error.code) {
       case "transactionConflict":
         return statusCode.transactionConflict;
+      case "resourceUnavailable":
+        return statusCode.resourceUnavailable;
+      case "backendContractViolation":
+        return statusCode.backendContractViolation;
       case "invalidOperation":
       case "invalidScope":
-      case "invalidCursor":
+      case "scopeMismatch":
+      case "invalidRangeContinuation":
+      case "limitExceeded":
       case "unsupportedProtocolVersion":
       case "unknownOperation":
       case "unknownStatus":
-      case "unknownKeySelector":
+      case "unknownRangeBoundary":
       case "unknownMutationType":
       case "unknownWriteOperation":
       case "invalidBool":

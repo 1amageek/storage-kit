@@ -3,16 +3,21 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
   "scripts": {
-    "prepare:wasm": "node scripts/prepare-wasm.mjs",
     "test": "node --test",
-    "smoke:e2e": "npm run prepare:wasm && node scripts/smoke-e2e.mjs",
-    "smoke:local:persistence": "npm run prepare:wasm && node scripts/smoke-local-persistence.mjs",
+    "smoke:e2e": "node scripts/smoke-e2e.mjs",
+    "smoke:local:persistence": "node scripts/smoke-local-persistence.mjs",
     "smoke:remote": "node scripts/smoke-e2e.mjs --remote",
     "smoke:remote:persistence": "node scripts/smoke-persistence.mjs",
-    "dev": "npm run prepare:wasm && wrangler dev",
-    "deploy": "npm run prepare:wasm && wrangler deploy",
-    "deploy:dry-run": "npm run prepare:wasm && wrangler deploy --dry-run"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dry-run": "wrangler deploy --dry-run"
   },
   "devDependencies": {
     "wrangler": "4.105.0"

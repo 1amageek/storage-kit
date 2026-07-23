@@ -11,15 +11,22 @@ public struct CloudflareDurableObjectEmbeddedReadinessResponse: Sendable, Hashab
         self.metadataInitialized = metadataInitialized
     }
 
-    func encode(into writer: inout EmbeddedBinaryWriter) {
+    func encode(into writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) {
+        guard commitVersion >= 0 else {
+            throw .invalidVersion(commitVersion)
+        }
         writer.writeUInt32(schemaVersion)
         writer.writeInt64(commitVersion)
         writer.writeBool(metadataInitialized)
     }
 
-    init(from reader: inout EmbeddedBinaryReader) throws(CloudflareDurableObjectEmbeddedError) {
+    init(from reader: inout EmbeddedWireReader) throws(CloudflareDurableObjectEmbeddedError) {
         self.schemaVersion = try CloudflareDurableObjectEmbeddedError.readUInt32(from: &reader)
-        self.commitVersion = try CloudflareDurableObjectEmbeddedError.readInt64(from: &reader)
+        let version = try CloudflareDurableObjectEmbeddedError.readInt64(from: &reader)
+        guard version >= 0 else {
+            throw .invalidVersion(version)
+        }
+        self.commitVersion = version
         self.metadataInitialized = try CloudflareDurableObjectEmbeddedError.readBool(from: &reader)
     }
 }

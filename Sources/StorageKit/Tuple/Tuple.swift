@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// Composite key struct compatible with the FDB Tuple Layer.
 ///
@@ -18,44 +22,42 @@ import Foundation
 /// - NaN == NaN (same bit pattern)
 public struct Tuple: Sendable, Hashable, Equatable {
 
-    /// Internal wrapper that holds type-erased elements.
-    private struct AnyElement: Sendable, Hashable {
-        let encoded: Bytes
+    /// Canonical element retained by the tuple.
+    private struct CanonicalElement: Sendable {
+        let value: any TupleElement
 
         init(_ element: any TupleElement) {
-            self.encoded = element.encodeTuple()
-        }
-
-        static func == (lhs: AnyElement, rhs: AnyElement) -> Bool {
-            lhs.encoded == rhs.encoded
-        }
-
-        func hash(into hasher: inout Hasher) {
-            hasher.combine(encoded)
+            self.value = Tuple.canonicalElement(element)
         }
     }
 
-    private let storage: [AnyElement]
+    private let canonicalElements: [CanonicalElement]
 
     /// Number of elements.
-    public var count: Int { storage.count }
+    public var count: Int { canonicalElements.count }
 
     /// Whether the tuple is empty.
-    public var isEmpty: Bool { storage.isEmpty }
+    public var isEmpty: Bool { canonicalElements.isEmpty }
 
     // MARK: - Initializers
 
     public init(_ elements: any TupleElement...) {
-        self.storage = elements.map { AnyElement($0) }
+        self.canonicalElements = elements.map { CanonicalElement($0) }
     }
 
     public init(_ elements: [any TupleElement]) {
-        self.storage = elements.map { AnyElement($0) }
+        self.canonicalElements = elements.map { CanonicalElement($0) }
     }
 
-    /// Internal: construct directly from an AnyElement array.
-    private init(storage: [AnyElement]) {
-        self.storage = storage
+    /// Decode packed tuple bytes directly into owned tuple storage.
+    /// Byte-backed element payloads remain views over the input byte owner.
+    public init(packed bytes: Bytes) throws {
+        self = try Self.unpackTuple(from: bytes)
+    }
+
+    /// Construct directly from canonical elements.
+    private init(canonicalElements: [CanonicalElement]) {
+        self.canonicalElements = canonicalElements
     }
 
     // MARK: - Element Access
@@ -65,15 +67,36 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// - Parameter index: The element index.
     /// - Throws: `TupleError` if the index is out of bounds or decoding fails.
     public func element(at index: Int) throws -> any TupleElement {
-        guard index >= 0 && index < storage.count else {
+        guard index >= 0 && index < canonicalElements.count else {
             throw TupleError.unexpectedEndOfData
         }
-        let encoded = storage[index].encoded
-        guard let first = encoded.first else {
-            throw TupleError.unexpectedEndOfData
+        return canonicalElements[index].value
+    }
+
+    /// Materializes a validated range of tuple elements without re-encoding them.
+    ///
+    /// Byte-backed elements remain views over their original owners. The returned
+    /// array contains existential references only; element payloads are not copied.
+    public func elements(
+        in range: Range<Int>? = nil
+    ) throws -> [any TupleElement] {
+        let range = range ?? 0..<canonicalElements.count
+        guard range.lowerBound >= 0,
+              range.upperBound >= range.lowerBound,
+              range.upperBound <= canonicalElements.count else {
+            throw TupleError.invalidElementRange(
+                lowerBound: range.lowerBound,
+                upperBound: range.upperBound,
+                count: canonicalElements.count
+            )
         }
-        var offset = 1
-        return try Self.decodeElement(typeCode: first, bytes: encoded, at: &offset)
+
+        var result: [any TupleElement] = []
+        result.reserveCapacity(range.count)
+        for index in range {
+            result.append(canonicalElements[index].value)
+        }
+        return result
     }
 
     /// Access an element by index (returns nil if out of bounds or decoding fails).
@@ -91,11 +114,56 @@ public struct Tuple: Sendable, Hashable, Equatable {
 
     /// Encode all elements into a byte array.
     public func pack() -> Bytes {
-        var result = Bytes()
-        for element in storage {
-            result.append(contentsOf: element.encoded)
+        var measuringSink = TupleEncodingSink(measuringFrom: 0)
+        encodePacked(to: &measuringSink)
+        let byteCount = measuringSink.byteCount
+        return Bytes.copying(count: byteCount) { buffer in
+            var sink = TupleEncodingSink(buffer: buffer)
+            encodePacked(to: &sink)
+            sink.validateFinalByteCount(byteCount)
         }
-        return result
+    }
+
+    package func encodePacked(to sink: inout TupleEncodingSink) {
+        for element in canonicalElements {
+            element.value.encodeTuple(to: &sink)
+        }
+    }
+
+    package static func encodePacked<Elements: Collection>(
+        _ elements: Elements,
+        appending finalElement: (any TupleElement)?,
+        to sink: inout TupleEncodingSink
+    ) where Elements.Element == any TupleElement {
+        for element in elements {
+            canonicalElement(element).encodeTuple(to: &sink)
+        }
+        if let finalElement {
+            canonicalElement(finalElement).encodeTuple(to: &sink)
+        }
+    }
+
+    private static func canonicalElement(
+        _ element: any TupleElement
+    ) -> any TupleElement {
+        switch element {
+        case let value as Int:
+            return Int64(value)
+        case let value as Int32:
+            return Int64(value)
+        case let value as UInt64 where value <= UInt64(Int64.max):
+            return Int64(value)
+        case let value as Date:
+            return value.timeIntervalSince1970
+        default:
+            return element
+        }
+    }
+
+    package var packedByteCount: Int {
+        var sink = TupleEncodingSink(measuringFrom: 0)
+        encodePacked(to: &sink)
+        return sink.byteCount
     }
 
     // MARK: - Unpack
@@ -118,13 +186,36 @@ public struct Tuple: Sendable, Hashable, Equatable {
         return elements
     }
 
+    /// Decode directly into owned tuple storage without first materializing a
+    /// separate existential array. Used by subspace scans on the hot key path.
+    static func unpackTuple(from bytes: Bytes) throws -> Tuple {
+        var canonicalElements: [CanonicalElement] = []
+        var offset = 0
+
+        while offset < bytes.count {
+            let typeCode = bytes[offset]
+            offset += 1
+            canonicalElements.append(
+                CanonicalElement(
+                    try decodeElement(
+                        typeCode: typeCode,
+                        bytes: bytes,
+                        at: &offset
+                    )
+                )
+            )
+        }
+
+        return Tuple(canonicalElements: canonicalElements)
+    }
+
     /// Decode a single element based on the type code and update the offset.
     ///
     /// - Parameters:
     ///   - typeCode: The already-read type code byte.
     ///   - bytes: The full byte array.
     ///   - offset: The byte position after the type code (updated after decoding).
-    private static func decodeElement(typeCode: UInt8, bytes: Bytes, at offset: inout Int) throws -> any TupleElement {
+    package static func decodeElement(typeCode: UInt8, bytes: Bytes, at offset: inout Int) throws -> any TupleElement {
         let intZero = TupleTypeCode.intZero.rawValue
 
         switch typeCode {
@@ -187,20 +278,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// Encodes internal elements, escapes 0x00 bytes in the result as 0x00 0xFF,
     /// and appends a 0x00 terminator at the end.
     public func encodeNested() -> Bytes {
-        var result: Bytes = [TupleTypeCode.nested.rawValue]
-        for element in storage {
-            let encoded = element.encoded
-            for byte in encoded {
-                if byte == 0x00 {
-                    result.append(0x00)
-                    result.append(0xFF)
-                } else {
-                    result.append(byte)
-                }
-            }
-        }
-        result.append(0x00) // terminator
-        return result
+        encodeTuple()
     }
 
     /// Decode a Nested Tuple.
@@ -208,36 +286,69 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// Collects internal bytes while restoring the null-escape pattern (0x00 + 0xFF),
     /// and detects termination at a non-escaped 0x00. No depth tracking is needed.
     private static func decodeNestedTuple(from bytes: Bytes, at offset: inout Int) throws -> Tuple {
-        var innerBytes = Bytes()
-        while offset < bytes.count {
-            let byte = bytes[offset]
-            offset += 1
+        let start = offset
+        var cursor = offset
+        var decodedCount = 0
+        var containsEscape = false
+        while cursor < bytes.count {
+            let byte = bytes[cursor]
+            cursor += 1
             if byte == 0x00 {
-                if offset < bytes.count && bytes[offset] == 0xFF {
-                    innerBytes.append(0x00)
-                    offset += 1
+                if cursor < bytes.count && bytes[cursor] == 0xFF {
+                    containsEscape = true
+                    decodedCount += 1
+                    cursor += 1
                 } else {
-                    // terminator found
-                    break
+                    let end = cursor - 1
+                    offset = cursor
+                    let innerBytes: Bytes
+                    if containsEscape {
+                        innerBytes = Bytes.copying(count: decodedCount) { output in
+                            var source = start
+                            var destination = 0
+                            while source < end {
+                                let value = bytes[source]
+                                output[destination] = value
+                                destination += 1
+                                source += value == 0 ? 2 : 1
+                            }
+                        }
+                    } else {
+                        innerBytes = bytes[start..<end]
+                    }
+                    return Tuple(try unpack(from: innerBytes))
                 }
             } else {
-                innerBytes.append(byte)
+                decodedCount += 1
             }
         }
-        let elements = try unpack(from: innerBytes)
-        return Tuple(elements)
+        throw TupleError.unexpectedEndOfData
     }
 }
 
 // MARK: - TupleElement conformance for Tuple (nested)
 
 extension Tuple: TupleElement {
-    public func encodeTuple() -> Bytes {
-        encodeNested()
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        sink.writeByte(TupleTypeCode.nested.rawValue)
+        sink.withNullEscaping { nestedSink in
+            encodePacked(to: &nestedSink)
+        }
+        sink.writeByte(0x00)
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Tuple {
         try decodeNestedTuple(from: bytes, at: &offset)
+    }
+}
+
+extension Tuple {
+    public static func == (lhs: Tuple, rhs: Tuple) -> Bool {
+        lhs.pack() == rhs.pack()
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(pack())
     }
 }
 
@@ -246,13 +357,13 @@ extension Tuple: TupleElement {
 extension Tuple {
     /// Return a new Tuple with an element appended.
     public func appending(_ element: any TupleElement) -> Tuple {
-        var newStorage = storage
-        newStorage.append(AnyElement(element))
-        return Tuple(storage: newStorage)
+        var appendedElements = canonicalElements
+        appendedElements.append(CanonicalElement(element))
+        return Tuple(canonicalElements: appendedElements)
     }
 
     /// Return a new Tuple with all elements of another Tuple appended.
     public func appending(_ other: Tuple) -> Tuple {
-        Tuple(storage: storage + other.storage)
+        Tuple(canonicalElements: canonicalElements + other.canonicalElements)
     }
 }

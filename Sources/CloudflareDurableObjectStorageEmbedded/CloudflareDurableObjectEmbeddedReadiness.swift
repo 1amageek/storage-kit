@@ -7,11 +7,11 @@ public struct CloudflareDurableObjectEmbeddedReadinessRequest: Sendable, Hashabl
         self.scope = scope
     }
 
-    func encode(into writer: inout EmbeddedBinaryWriter) throws(CloudflareDurableObjectEmbeddedError) {
+    func encode(into writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) {
         try scope.encode(into: &writer)
     }
 
-    init(from reader: inout EmbeddedBinaryReader) throws(CloudflareDurableObjectEmbeddedError) {
+    init(from reader: inout EmbeddedWireReader) throws(CloudflareDurableObjectEmbeddedError) {
         self.scope = try CloudflareDurableObjectEmbeddedScope(from: &reader)
     }
 }

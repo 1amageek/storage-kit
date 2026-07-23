@@ -1,13 +1,44 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import worker from "../src/CloudflareDurableObjectStorageHost.js";
+import worker, {
+  CloudflareDurableObjectStorageHost,
+} from "../src/CloudflareDurableObjectStorageHost.js";
 import { nameForScope } from "../src/StorageKitScope.js";
 import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
 import { operation, statusCode } from "../src/StorageKitWireConstants.js";
+import { InMemorySQLiteStorage } from "./InMemorySQLiteStorage.js";
 
 const accessToken = "storage-kit-test-token";
 
-test("worker routes binary requests to the Durable Object name derived from scope", async () => {
+test("Durable Object migration runs inside blockConcurrencyWhile", async () => {
+  const sql = new InMemorySQLiteStorage();
+  let initializationCount = 0;
+  const ctx = {
+    storage: {
+      sql,
+      transactionSync(operation) {
+        return sql.transactionSync(operation);
+      },
+    },
+    blockConcurrencyWhile(operation) {
+      initializationCount += 1;
+      return operation();
+    },
+  };
+  const object = new CloudflareDurableObjectStorageHost(ctx, {});
+  assert.equal(initializationCount, 1);
+
+  const response = StorageKitWireCodec.decodeResponse(object.dispatch(
+    StorageKitWireCodec.encodeRequest({
+      operation: operation.readiness,
+      scope: { databaseID: "main", tenantID: null, workspaceID: null },
+    })
+  ));
+  assert.equal(response.status, statusCode.ok);
+  assert.equal(response.schemaVersion, 1);
+});
+
+test("worker routes StorageKit Wire requests to the Durable Object name derived from scope", async () => {
   const scope = {
     databaseID: "main",
     tenantID: "tenant-a",
@@ -80,6 +111,75 @@ test("worker returns a typed failure when routing cannot decode scope", async ()
 
   const decodedResponse = StorageKitWireCodec.decodeResponse(new Uint8Array(await response.arrayBuffer()));
   assert.equal(decodedResponse.status, statusCode.invalidOperation);
+});
+
+test("worker rejects removed operation 7 before Durable Object routing", async () => {
+  let routed = false;
+  const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
+    method: "POST",
+    headers: authorizedHeaders(),
+    body: new Uint8Array([1, 0x07]),
+  }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
+    STORAGEKIT_DURABLE_OBJECT: {
+      idFromName() {
+        routed = true;
+        throw new Error("unexpected routing");
+      },
+      get() {
+        routed = true;
+        throw new Error("unexpected routing");
+      },
+    },
+  });
+
+  const decodedResponse = StorageKitWireCodec.decodeResponse(
+    new Uint8Array(await response.arrayBuffer())
+  );
+  assert.equal(decodedResponse.status, statusCode.invalidOperation);
+  assert.match(decodedResponse.message, /Unknown operation: 7/);
+  assert.equal(routed, false);
+});
+
+test("worker decodes only routing scope before Durable Object dispatch", async () => {
+  const validPrefix = StorageKitWireCodec.encodeRequest({
+    operation: operation.readiness,
+    scope: {
+      databaseID: "main",
+      tenantID: null,
+      workspaceID: null,
+    },
+  });
+  const requestBytes = new Uint8Array(validPrefix.length + 1);
+  requestBytes.set(validPrefix);
+  requestBytes[requestBytes.length - 1] = 0xff;
+  let forwarded = false;
+
+  await worker.fetch(new Request("https://storage-kit.example.test/", {
+    method: "POST",
+    headers: authorizedHeaders(),
+    body: requestBytes,
+  }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
+    STORAGEKIT_DURABLE_OBJECT: {
+      idFromName() {
+        return { name: "main" };
+      },
+      get() {
+        return {
+          fetch() {
+            forwarded = true;
+            return new Response(StorageKitWireCodec.encodeFailure(
+              statusCode.invalidOperation,
+              "Trailing bytes"
+            ));
+          },
+        };
+      },
+    },
+  });
+
+  assert.equal(forwarded, true);
 });
 
 test("worker returns a typed failure when the Durable Object binding is absent", async () => {
@@ -155,6 +255,34 @@ test("worker rejects oversized payloads before routing", async () => {
   });
 
   assert.equal(response.status, 413);
+});
+
+test("worker requires the StorageKit Wire media type", async () => {
+  const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+    },
+    body: new Uint8Array(),
+  }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
+  });
+
+  assert.equal(response.status, 415);
+});
+
+test("worker fails closed for an invalid request-size configuration", async () => {
+  const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
+    method: "POST",
+    headers: authorizedHeaders(),
+    body: new Uint8Array(),
+  }), {
+    STORAGEKIT_ACCESS_TOKEN: accessToken,
+    STORAGEKIT_MAX_REQUEST_BYTES: "0",
+  });
+
+  assert.equal(response.status, 500);
 });
 
 function authorizedHeaders(extra = {}) {

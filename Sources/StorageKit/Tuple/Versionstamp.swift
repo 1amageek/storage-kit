@@ -79,9 +79,22 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
     ///
     /// Layout: [10 bytes transaction version (big-endian)] [2 bytes user version (big-endian)]
     public func toBytes() -> Bytes {
-        var bytes = transactionVersion ?? Self.incompletePlaceholder
-        withUnsafeBytes(of: userVersion.bigEndian) { bytes.append(contentsOf: $0) }
-        return bytes
+        let version = transactionVersion ?? Self.incompletePlaceholder
+        return Bytes.copying(count: Self.totalSize) { output in
+            version.withUnsafeBytes { source in
+                let destination = UnsafeMutableRawBufferPointer(
+                    start: output.baseAddress,
+                    count: Self.transactionVersionSize
+                )
+                destination.copyMemory(from: source)
+            }
+            output[Self.transactionVersionSize] = UInt8(
+                truncatingIfNeeded: userVersion >> 8
+            )
+            output[Self.transactionVersionSize + 1] = UInt8(
+                truncatingIfNeeded: userVersion
+            )
+        }
     }
 
     /// Create from 12-byte representation.
@@ -93,12 +106,9 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
             throw TupleError.unexpectedEndOfData
         }
 
-        let trVersionBytes = Array(bytes.prefix(transactionVersionSize))
-        let userVersionBytes = bytes.suffix(userVersionSize)
-
-        let uv = userVersionBytes.withUnsafeBytes {
-            $0.load(as: UInt16.self).bigEndian
-        }
+        let trVersionBytes = bytes[0..<transactionVersionSize]
+        let uv = UInt16(bytes[transactionVersionSize]) << 8
+            | UInt16(bytes[transactionVersionSize + 1])
 
         let isIncomplete = trVersionBytes == incompletePlaceholder
         return Versionstamp(
@@ -111,10 +121,27 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
 
     public var description: String {
         if let tv = transactionVersion {
-            let tvHex = tv.map { String(format: "%02x", $0) }.joined()
+            let tvHex = String(
+                unsafeUninitializedCapacity: Self.transactionVersionSize * 2
+            ) { output in
+                tv.withUnsafeBytes { bytes in
+                    for index in bytes.indices {
+                        let byte = bytes[index]
+                        output[index * 2] = Self.hexadecimalCharacter(byte >> 4)
+                        output[index * 2 + 1] = Self.hexadecimalCharacter(
+                            byte & 0x0f
+                        )
+                    }
+                }
+                return Self.transactionVersionSize * 2
+            }
             return "Versionstamp(tr:\(tvHex), user:\(userVersion))"
         }
         return "Versionstamp(incomplete, user:\(userVersion))"
+    }
+
+    private static func hexadecimalCharacter(_ value: UInt8) -> UInt8 {
+        value < 10 ? 48 + value : 87 + value
     }
 }
 
@@ -129,17 +156,20 @@ extension Versionstamp: Comparable {
 // MARK: - TupleElement
 
 extension Versionstamp: TupleElement {
-    public func encodeTuple() -> Bytes {
-        var bytes: Bytes = [TupleTypeCode.versionstamp.rawValue]
-        bytes.append(contentsOf: toBytes())
-        return bytes
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        sink.writeByte(TupleTypeCode.versionstamp.rawValue)
+        sink.writeBytes(transactionVersion ?? Self.incompletePlaceholder)
+        sink.writeByte(UInt8(truncatingIfNeeded: userVersion >> 8))
+        sink.writeByte(UInt8(truncatingIfNeeded: userVersion))
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Versionstamp {
         guard offset + Versionstamp.totalSize <= bytes.count else {
             throw TupleError.unexpectedEndOfData
         }
-        let versionstampBytes = Array(bytes[offset..<(offset + Versionstamp.totalSize)])
+        let versionstampBytes = bytes[
+            offset..<(offset + Versionstamp.totalSize)
+        ]
         offset += Versionstamp.totalSize
         return try Versionstamp.fromBytes(versionstampBytes)
     }

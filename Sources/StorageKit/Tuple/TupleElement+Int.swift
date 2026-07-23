@@ -1,14 +1,16 @@
 // MARK: - Int64
 
 extension Int64: TupleElement {
-    public func encodeTuple() -> Bytes {
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
         if self == 0 {
-            return [TupleTypeCode.intZero.rawValue]
+            sink.writeByte(TupleTypeCode.intZero.rawValue)
+            return
         }
         if self > 0 {
-            return Self.encodePositive(UInt64(self))
+            Self.encodePositive(UInt64(self), to: &sink)
+        } else {
+            Self.encodeNegative(self, to: &sink)
         }
-        return Self.encodeNegative(self)
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Int64 {
@@ -45,18 +47,12 @@ extension Int64: TupleElement {
             }
 
             if n == 8 {
-                // n=8: raw two's complement bit pattern (FDB official spec)
-                var bp = Bytes(repeating: 0, count: 8)
+                var bitPattern: UInt64 = 0
                 for i in 0..<8 {
-                    bp[i] = bytes[offset + i]
+                    bitPattern = (bitPattern << 8) | UInt64(bytes[offset + i])
                 }
                 offset += 8
-                // big-endian → Int64
-                var result: Int64 = 0
-                for byte in bp {
-                    result = (result << 8) | Int64(byte)
-                }
-                return result
+                return Int64(bitPattern: bitPattern)
             }
 
             // n < 8: sizeLimits conversion
@@ -74,20 +70,22 @@ extension Int64: TupleElement {
         throw TupleError.invalidTypeCode(typeCode)
     }
 
-    private static func encodePositive(_ value: UInt64) -> Bytes {
+    private static func encodePositive(
+        _ value: UInt64,
+        to sink: inout TupleEncodingSink
+    ) {
         let n = byteCount(for: value)
         let typeCode = TupleTypeCode.intZero.rawValue + UInt8(n)
-        var result = Bytes(repeating: 0, count: n + 1)
-        result[0] = typeCode
-        var v = value
-        for i in stride(from: n, through: 1, by: -1) {
-            result[i] = UInt8(v & 0xFF)
-            v >>= 8
+        sink.writeByte(typeCode)
+        for shift in stride(from: (n - 1) * 8, through: 0, by: -8) {
+            sink.writeByte(UInt8(truncatingIfNeeded: value >> UInt64(shift)))
         }
-        return result
     }
 
-    private static func encodeNegative(_ value: Int64) -> Bytes {
+    private static func encodeNegative(
+        _ value: Int64,
+        to sink: inout TupleEncodingSink
+    ) {
         // Negate in UInt64 space (avoids overflow for Int64.min)
         let magnitude = 0 &- UInt64(bitPattern: value)
         let n = byteCount(for: magnitude)
@@ -98,14 +96,13 @@ extension Int64: TupleElement {
             // Python: struct.pack(">q", value)
             // Swift: big-endian representation of UInt64(bitPattern: value)
             let raw = UInt64(bitPattern: value)
-            var result = Bytes(repeating: 0, count: 9)
-            result[0] = typeCode
-            var v = raw
-            for i in stride(from: 8, through: 1, by: -1) {
-                result[i] = UInt8(v & 0xFF)
-                v >>= 8
+            sink.writeByte(typeCode)
+            for shift in stride(from: 56, through: 0, by: -8) {
+                sink.writeByte(
+                    UInt8(truncatingIfNeeded: raw >> UInt64(shift))
+                )
             }
-            return result
+            return
         }
 
         // n < 8: sizeLimits conversion
@@ -113,14 +110,12 @@ extension Int64: TupleElement {
         // sizeLimits[n-1] (StorageKit) == size_limits[n] (Python), so equivalent to limit - magnitude
         let limit = sizeLimits[n - 1]
         let encoded = limit - magnitude
-        var result = Bytes(repeating: 0, count: n + 1)
-        result[0] = typeCode
-        var v = encoded
-        for i in stride(from: n, through: 1, by: -1) {
-            result[i] = UInt8(v & 0xFF)
-            v >>= 8
+        sink.writeByte(typeCode)
+        for shift in stride(from: (n - 1) * 8, through: 0, by: -8) {
+            sink.writeByte(
+                UInt8(truncatingIfNeeded: encoded >> UInt64(shift))
+            )
         }
-        return result
     }
 
     private static func byteCount(for value: UInt64) -> Int {
@@ -136,8 +131,8 @@ extension Int64: TupleElement {
 // MARK: - Int
 
 extension Int: TupleElement {
-    public func encodeTuple() -> Bytes {
-        Int64(self).encodeTuple()
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        Int64(self).encodeTuple(to: &sink)
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Int {
@@ -150,8 +145,8 @@ extension Int: TupleElement {
 // MARK: - Int32
 
 extension Int32: TupleElement {
-    public func encodeTuple() -> Bytes {
-        Int64(self).encodeTuple()
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        Int64(self).encodeTuple(to: &sink)
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Int32 {
@@ -164,20 +159,17 @@ extension Int32: TupleElement {
 // MARK: - UInt64
 
 extension UInt64: TupleElement {
-    public func encodeTuple() -> Bytes {
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
         if self == 0 {
-            return [TupleTypeCode.intZero.rawValue]
+            sink.writeByte(TupleTypeCode.intZero.rawValue)
+            return
         }
         let n = byteCount(for: self)
         let typeCode = TupleTypeCode.intZero.rawValue + UInt8(n)
-        var result = Bytes(repeating: 0, count: n + 1)
-        result[0] = typeCode
-        var v = self
-        for i in stride(from: n, through: 1, by: -1) {
-            result[i] = UInt8(v & 0xFF)
-            v >>= 8
+        sink.writeByte(typeCode)
+        for shift in stride(from: (n - 1) * 8, through: 0, by: -8) {
+            sink.writeByte(UInt8(truncatingIfNeeded: self >> UInt64(shift)))
         }
-        return result
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> UInt64 {

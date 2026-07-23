@@ -1,3 +1,5 @@
+import { storageKitWireLimits } from "./StorageKitWireLimits.js";
+
 export const defaultStorageKitMaxRequestBytes = 4 * 1024 * 1024;
 
 export class StorageKitPayloadTooLargeError extends Error {
@@ -15,14 +17,25 @@ export class StorageKitInvalidContentLengthError extends Error {
   }
 }
 
+export class StorageKitHostConfigurationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "StorageKitHostConfigurationError";
+  }
+}
+
 export function storageKitMaxRequestBytes(env) {
   const configured = env?.STORAGEKIT_MAX_REQUEST_BYTES;
   if (configured === undefined || configured === null || configured === "") {
     return defaultStorageKitMaxRequestBytes;
   }
   const value = Number(configured);
-  if (!Number.isInteger(value) || value <= 0 || value > 0xffff_ffff) {
-    return defaultStorageKitMaxRequestBytes;
+  if (!Number.isInteger(value)
+      || value <= 0
+      || value > storageKitWireLimits.maxFrameBytes) {
+    throw new StorageKitHostConfigurationError(
+      `STORAGEKIT_MAX_REQUEST_BYTES must be an integer from 1 through ${storageKitWireLimits.maxFrameBytes}`
+    );
   }
   return value;
 }
@@ -71,6 +84,13 @@ export async function readBoundedRequestBytes(request, limit) {
     reader.releaseLock();
   }
 
+  if (chunks.length === 0) {
+    return new Uint8Array();
+  }
+  if (chunks.length === 1) {
+    return chunks[0];
+  }
+
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
@@ -86,6 +106,25 @@ export function payloadTooLargeResponse(limit) {
 
 export function invalidContentLengthResponse() {
   return new Response("Invalid Content-Length", { status: 400 });
+}
+
+export function hostConfigurationErrorResponse(error) {
+  return new Response(error.message, { status: 500 });
+}
+
+export function unsupportedMediaTypeResponse() {
+  return new Response("Content-Type must be application/octet-stream", {
+    status: 415,
+  });
+}
+
+export function hasStorageKitWireContentType(request) {
+  const value = request.headers.get("content-type");
+  if (value === null) {
+    return false;
+  }
+  return value.split(";", 1)[0].trim().toLowerCase()
+    === "application/octet-stream";
 }
 
 function parseContentLength(request) {

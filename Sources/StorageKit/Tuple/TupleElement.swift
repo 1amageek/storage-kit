@@ -33,9 +33,6 @@ public enum TupleTypeCode: UInt8, Sendable {
     case versionstamp   = 0x33
 }
 
-/// Byte array type for StorageKit (equivalent to FDB.Bytes).
-public typealias Bytes = [UInt8]
-
 /// strinc algorithm: returns the next prefix in lexicographic order.
 ///
 /// Strips trailing 0xFF bytes and increments the last byte.
@@ -59,8 +56,8 @@ public func strinc(_ bytes: Bytes) throws -> Bytes {
 /// Converts each type to/from byte arrays following the FDB Tuple Layer binary format.
 /// The encoded result preserves lexicographic order matching the logical order of values.
 public protocol TupleElement: Sendable, Hashable {
-    /// Encode this value into a byte array in FDB Tuple Layer format.
-    func encodeTuple() -> Bytes
+    /// Encode this value directly into an FDB Tuple Layer sink.
+    func encodeTuple(to sink: inout TupleEncodingSink)
 
     /// Decode a value of this type from a byte array at the specified position.
     ///
@@ -70,9 +67,24 @@ public protocol TupleElement: Sendable, Hashable {
     static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Self
 }
 
+extension TupleElement {
+    /// Encode into one exactly-sized owned allocation.
+    public func encodeTuple() -> Bytes {
+        var measuringSink = TupleEncodingSink(measuringFrom: 0)
+        encodeTuple(to: &measuringSink)
+        let byteCount = measuringSink.byteCount
+        return Bytes.copying(count: byteCount) { buffer in
+            var sink = TupleEncodingSink(buffer: buffer)
+            encodeTuple(to: &sink)
+            sink.validateFinalByteCount(byteCount)
+        }
+    }
+}
+
 /// Error type for the Tuple Layer.
 public enum TupleError: Error, Sendable {
     case unexpectedEndOfData
+    case invalidElementRange(lowerBound: Int, upperBound: Int, count: Int)
     case invalidTypeCode(UInt8)
     case integerOverflow
     case invalidUTF8

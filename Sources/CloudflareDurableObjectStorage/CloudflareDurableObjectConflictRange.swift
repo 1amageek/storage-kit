@@ -1,5 +1,5 @@
 /// Half-open key range used for Durable Object read conflict tracking.
-public struct CloudflareDurableObjectConflictRange: Sendable, Hashable, Codable {
+public struct CloudflareDurableObjectConflictRange: Sendable, Hashable {
     public let begin: CloudflareDurableObjectBytes?
     public let end: CloudflareDurableObjectBytes?
 
@@ -15,6 +15,17 @@ public struct CloudflareDurableObjectConflictRange: Sendable, Hashable, Codable 
         CloudflareDurableObjectConflictRange(
             begin: key,
             end: CloudflareDurableObjectBytes(key.rawValue + [0x00])
+        )
+    }
+
+    func detached() -> CloudflareDurableObjectConflictRange {
+        CloudflareDurableObjectConflictRange(
+            begin: begin.map {
+                CloudflareDurableObjectBytes($0.rawValue.detached())
+            },
+            end: end.map {
+                CloudflareDurableObjectBytes($0.rawValue.detached())
+            }
         )
     }
 }

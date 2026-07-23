@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// Storage backend identifier used for diagnostics and error classification.
 public enum StorageBackend: String, Sendable, Hashable, Codable {
@@ -34,17 +38,25 @@ public struct StorageError: Error, Sendable, LocalizedError, CustomStringConvert
     public enum Code: String, Sendable, Hashable, Codable {
         case transactionConflict = "transaction_conflict"
         case transactionTooOld = "transaction_too_old"
+        case transactionFutureVersion = "transaction_future_version"
+        case transactionTimedOut = "transaction_timed_out"
+        case transactionCancelled = "transaction_cancelled"
         case transactionBusy = "transaction_busy"
+        case transactionTooLarge = "transaction_too_large"
+        case keyTooLarge = "key_too_large"
+        case valueTooLarge = "value_too_large"
         /// The connection to the storage backend failed before the transaction
         /// reached its commit point. Retrying the whole transaction is safe.
         case connectionFailure = "connection_failure"
         /// The connection failed while a commit was in flight, so the outcome
-        /// is unknown. Retryable to match FoundationDB's `commit_unknown_result`
-        /// semantics; non-idempotent transactions may be applied twice.
+        /// is unknown. A higher-level idempotency protocol must resolve the
+        /// outcome before replaying the transaction.
         case commitUnknownResult = "commit_unknown_result"
         case keyNotFound = "key_not_found"
         case invalidOperation = "invalid_operation"
+        case unsupportedOperation = "unsupported_operation"
         case backendFailure = "backend_failure"
+        case backendContractViolation = "backend_contract_violation"
         case dataCorruption = "data_corruption"
         case resourceUnavailable = "resource_unavailable"
     }
@@ -53,31 +65,48 @@ public struct StorageError: Error, Sendable, LocalizedError, CustomStringConvert
     public let operation: StorageOperation
     public let backend: StorageBackend
     public let message: String
+    public let backendCode: Int32?
     public let underlyingDescription: String?
+    public let byteLimitViolation: StorageByteLimitViolation?
 
     public init(
         code: Code,
         operation: StorageOperation = .unknown,
         backend: StorageBackend = .unknown,
         message: String,
-        underlyingDescription: String? = nil
+        backendCode: Int32? = nil,
+        underlyingDescription: String? = nil,
+        byteLimitViolation: StorageByteLimitViolation? = nil
     ) {
         self.code = code
         self.operation = operation
         self.backend = backend
         self.message = message
+        self.backendCode = backendCode
         self.underlyingDescription = underlyingDescription
+        self.byteLimitViolation = byteLimitViolation
     }
 
-    public var isRetryable: Bool {
+    public var retryDisposition: StorageRetryDisposition {
         switch code {
-        case .transactionConflict, .transactionTooOld, .transactionBusy,
-             .connectionFailure, .commitUnknownResult:
-            return true
-        case .keyNotFound, .invalidOperation, .backendFailure, .dataCorruption, .resourceUnavailable:
-            return false
+        case .transactionConflict, .transactionTooOld, .transactionFutureVersion,
+             .transactionTimedOut,
+             .transactionBusy,
+             .connectionFailure:
+            return .safe
+        case .commitUnknownResult:
+            return .requiresIdempotency
+        case .transactionCancelled, .transactionTooLarge, .keyTooLarge,
+             .valueTooLarge, .keyNotFound, .invalidOperation,
+             .unsupportedOperation, .backendFailure, .backendContractViolation,
+             .dataCorruption,
+             .resourceUnavailable:
+            return .never
         }
     }
+
+    /// Whether a generic transaction runner may replay the whole transaction.
+    public var isRetryable: Bool { retryDisposition == .safe }
 
     public var errorDescription: String? {
         description
@@ -97,11 +126,20 @@ public struct StorageError: Error, Sendable, LocalizedError, CustomStringConvert
         if let underlyingDescription {
             parts.append("underlying=\(underlyingDescription)")
         }
+        if let backendCode {
+            parts.append("backendCode=\(backendCode)")
+        }
+        if let byteLimitViolation {
+            parts.append("resource=\(byteLimitViolation.resource.rawValue)")
+            parts.append("observedByteCount=\(byteLimitViolation.observedByteCount)")
+            parts.append("maximumByteCount=\(byteLimitViolation.maximumByteCount)")
+            parts.append("measurement=\(byteLimitViolation.measurement.rawValue)")
+        }
         return parts.joined(separator: ", ")
     }
 }
 
-// MARK: - Compatibility factories
+// MARK: - Convenience factories
 
 extension StorageError {
     public static var transactionConflict: StorageError {
@@ -117,6 +155,14 @@ extension StorageError {
             code: .transactionTooOld,
             operation: .read,
             message: "Transaction read version is too old"
+        )
+    }
+
+    public static var transactionTimedOut: StorageError {
+        StorageError(
+            code: .transactionTimedOut,
+            operation: .execute,
+            message: "Transaction timed out"
         )
     }
 
@@ -140,6 +186,19 @@ extension StorageError {
         StorageError(
             code: .invalidOperation,
             operation: .unknown,
+            message: message
+        )
+    }
+
+    public static func unsupportedOperation(
+        _ message: String,
+        operation: StorageOperation = .execute,
+        backend: StorageBackend = .unknown
+    ) -> StorageError {
+        StorageError(
+            code: .unsupportedOperation,
+            operation: operation,
+            backend: backend,
             message: message
         )
     }

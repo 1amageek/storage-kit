@@ -1,5 +1,5 @@
-/// Codable key-value row used by range, export, and import requests.
-public struct CloudflareDurableObjectKeyValue: Sendable, Hashable, Codable {
+/// StorageKit Wire key-value row returned by a range request.
+public struct CloudflareDurableObjectKeyValue: Sendable, Hashable {
     public let key: CloudflareDurableObjectBytes
     public let value: CloudflareDurableObjectBytes
 

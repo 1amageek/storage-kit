@@ -1,6 +1,8 @@
 import Testing
 import StorageKit
+import StorageKitEmbeddedCore
 import Synchronization
+import CloudflareDurableObjectStorageTesting
 @testable import CloudflareDurableObjectStorage
 
 @Suite("Cloudflare Durable Object Storage Transaction Tests")
@@ -9,7 +11,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
         let engine = try await makeEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
         }
 
         let tx = try engine.createTransaction()
@@ -22,11 +24,11 @@ struct CloudflareDurableObjectStorageTransactionTests {
         let engine = try await makeEngine()
         let tx = try engine.createTransaction()
 
-        tx.setValue([10], for: [0x01])
-        tx.atomicOp(key: [0x01], param: [5], mutationType: .add)
+        try tx.setValue([10], for: [0x01])
+        try tx.atomicOp(key: [0x01], param: [5], mutationType: .add)
         #expect(try await tx.getValue(for: [0x01]) == [15])
 
-        tx.clear(key: [0x01])
+        try tx.clear(key: [0x01])
         #expect(try await tx.getValue(for: [0x01]) == nil)
         try await tx.commit()
     }
@@ -34,14 +36,14 @@ struct CloudflareDurableObjectStorageTransactionTests {
     @Test func rangeAppliesLocalWriteOverlay() async throws {
         let engine = try await makeEngine()
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([20], for: [0x02])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([20], for: [0x02])
         }
 
         let tx = try engine.createTransaction()
-        tx.atomicOp(key: [0x01], param: [5], mutationType: .add)
-        tx.clear(key: [0x02])
-        tx.setValue([30], for: [0x03])
+        try tx.atomicOp(key: [0x01], param: [5], mutationType: .add)
+        try tx.clear(key: [0x02])
+        try tx.setValue([30], for: [0x03])
 
         let rows = try await tx.collectRange(begin: [0x01], end: [0x04])
         #expect(rows.map(\.0) == [[0x01], [0x03]])
@@ -52,14 +54,14 @@ struct CloudflareDurableObjectStorageTransactionTests {
     @Test func clearRangeParticipatesInReadYourWritesAndCommitPersistence() async throws {
         let engine = try await makeEngine()
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([2], for: [0x02])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([4], for: [0x04])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([2], for: [0x02])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([4], for: [0x04])
         }
 
         let tx = try engine.createTransaction()
-        tx.clearRange(beginKey: [0x02], endKey: [0x04])
+        try tx.clearRange(beginKey: [0x02], endKey: [0x04])
         #expect(try await tx.getValue(for: [0x02]) == nil)
         #expect(try await tx.getValue(for: [0x03]) == nil)
         #expect(try await tx.getValue(for: [0x04]) == [4])
@@ -75,23 +77,26 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func pagedRangeMergesLocalWritesInKeyOrder() async throws {
-        let limits = CloudflareDurableObjectLimits(
+        let limits = try CloudflareDurableObjectLimits(
             maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
             maxValueBytes: 10,
             maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
             maxRangeLimit: 1,
+            maxSplitPoints: 20,
             maxNameBytes: 512
         )
         let engine = try await makeEngine(limits: limits)
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([5], for: [0x05])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([5], for: [0x05])
         }
 
         let tx = try engine.createTransaction()
-        tx.setValue([0], for: [0x00])
-        tx.setValue([4], for: [0x04])
+        try tx.setValue([0], for: [0x00])
+        try tx.setValue([4], for: [0x04])
 
         let rows = try await tx.collectRange(begin: [0x00], end: [0x06], limit: 0)
 
@@ -99,21 +104,24 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func unlimitedRangeFetchesAcrossHostPages() async throws {
-        let limits = CloudflareDurableObjectLimits(
+        let limits = try CloudflareDurableObjectLimits(
             maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
             maxValueBytes: 10,
             maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
             maxRangeLimit: 2,
+            maxSplitPoints: 20,
             maxNameBytes: 512
         )
         let engine = try await makeEngine(limits: limits)
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([2], for: [0x02])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([4], for: [0x04])
-            tx.setValue([5], for: [0x05])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([2], for: [0x02])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([4], for: [0x04])
+            try tx.setValue([5], for: [0x05])
         }
 
         let tx = try engine.createTransaction()
@@ -124,23 +132,26 @@ struct CloudflareDurableObjectStorageTransactionTests {
 
     @Test func rangeIteratorFetchesOnlyFirstHostPageForFirstElement() async throws {
         let pageCallCount = Mutex(0)
-        let client = FakeCloudflareDurableObjectStorageClient(onRangeResponse: { _ in
+        let client = InMemoryCloudflareDurableObjectStorageClient(onRangeResponse: { _ in
             pageCallCount.withLock { $0 += 1 }
         })
-        let limits = CloudflareDurableObjectLimits(
+        let limits = try CloudflareDurableObjectLimits(
             maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
             maxValueBytes: 10,
             maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
             maxRangeLimit: 2,
+            maxSplitPoints: 20,
             maxNameBytes: 512
         )
         let engine = try await makeEngine(client: client, limits: limits)
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([2], for: [0x02])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([4], for: [0x04])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([2], for: [0x02])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([4], for: [0x04])
         }
 
         let tx = try engine.createTransaction()
@@ -153,20 +164,23 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func reverseRangeLimitReturnsLastKeys() async throws {
-        let limits = CloudflareDurableObjectLimits(
+        let limits = try CloudflareDurableObjectLimits(
             maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
             maxValueBytes: 10,
             maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
             maxRangeLimit: 2,
+            maxSplitPoints: 20,
             maxNameBytes: 512
         )
         let engine = try await makeEngine(limits: limits)
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([2], for: [0x02])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([4], for: [0x04])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([2], for: [0x02])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([4], for: [0x04])
         }
 
         let tx = try engine.createTransaction()
@@ -177,9 +191,9 @@ struct CloudflareDurableObjectStorageTransactionTests {
 
     @Test func rangePaginationConflictsWhenVersionChangesBetweenPages() async throws {
         let didInterfere = Mutex(false)
-        let clientHolder = Mutex<FakeCloudflareDurableObjectStorageClient?>(nil)
-        let client = FakeCloudflareDurableObjectStorageClient(onRangeResponse: { request in
-            guard request.cursor == nil else { return }
+        let clientHolder = Mutex<InMemoryCloudflareDurableObjectStorageClient?>(nil)
+        let client = InMemoryCloudflareDurableObjectStorageClient(onRangeResponse: { request in
+            guard request.cursorKey == nil else { return }
             let shouldInterfere = didInterfere.withLock { value in
                 guard !value else { return false }
                 value = true
@@ -201,19 +215,22 @@ struct CloudflareDurableObjectStorageTransactionTests {
             )
         })
         clientHolder.withLock { $0 = client }
-        let limits = CloudflareDurableObjectLimits(
+        let limits = try CloudflareDurableObjectLimits(
             maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
             maxValueBytes: 10,
             maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
             maxRangeLimit: 1,
+            maxSplitPoints: 20,
             maxNameBytes: 512
         )
         let engine = try await makeEngine(client: client, limits: limits)
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([2], for: [0x02])
-            tx.setValue([3], for: [0x03])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([2], for: [0x02])
+            try tx.setValue([3], for: [0x03])
         }
 
         let tx = try engine.createTransaction()
@@ -225,7 +242,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
     @Test func rangeSequenceAfterCommitThrowsInsteadOfReplayingCapturedWrites() async throws {
         let engine = try await makeEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x01])
+        try tx.setValue([1], for: [0x01])
 
         let sequence = tx.getRange(begin: [0x01], end: [0x02])
         try await tx.commit()
@@ -236,18 +253,18 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func scopesAreIsolated() async throws {
-        let client = FakeCloudflareDurableObjectStorageClient()
+        let client = InMemoryCloudflareDurableObjectStorageClient()
         let firstScope = try CloudflareDurableObjectStorageScope(databaseID: "main", tenantID: "tenant-a")
         let secondScope = try CloudflareDurableObjectStorageScope(databaseID: "main", tenantID: "tenant-b")
-        let factory = CloudflareDurableObjectStorageEngineFactory(client: client)
-        let first = try await factory.engine(for: firstScope)
-        let second = try await factory.engine(for: secondScope)
+        let router = CloudflareDurableObjectSharedClientRouter(client: client)
+        let first = try await router.engine(for: firstScope)
+        let second = try await router.engine(for: secondScope)
 
         try await first.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
+            try tx.setValue([1], for: [0x01])
         }
         try await second.withTransaction { tx in
-            tx.setValue([2], for: [0x01])
+            try tx.setValue([2], for: [0x01])
         }
 
         let firstTx = try first.createTransaction()
@@ -256,29 +273,262 @@ struct CloudflareDurableObjectStorageTransactionTests {
         #expect(try await secondTx.getValue(for: [0x01]) == [2])
     }
 
-    @Test func versionstampMutationFailsAtCommit() async throws {
+    @Test func versionstampMutationsMaterializeAndExposeCommittedStamp() async throws {
         let engine = try await makeEngine()
         let tx = try engine.createTransaction()
-        tx.atomicOp(key: [0x01], param: [0x01], mutationType: .setVersionstampedValue)
+        try tx.atomicOp(
+            key: versionstampOperand(prefix: [0x10], suffix: [0x11]),
+            param: [0x41],
+            mutationType: .setVersionstampedKey
+        )
+        try tx.atomicOp(
+            key: [0x20],
+            param: versionstampOperand(prefix: [0x21], suffix: [0x22]),
+            mutationType: .setVersionstampedValue
+        )
+
+        try await tx.commit()
+
+        let stamp: Bytes = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
+        #expect(try await tx.getVersionstamp() == stamp)
+
+        let read = try engine.createTransaction()
+        #expect(
+            try await read.getValue(
+                for: [0x10] + stamp + [0x11]
+            ) == [0x41]
+        )
+        #expect(
+            try await read.getValue(for: [0x20])
+                == [0x21] + stamp + [0x22]
+        )
+    }
+
+    @Test func rangeMetricsAreExactAndSplitPointsIncludeEndpoints() async throws {
+        let engine = try await makeEngine()
+        try await engine.withTransaction { tx in
+            try tx.setValue([0x10, 0x11], for: [0x01])
+            try tx.setValue([0x20, 0x21], for: [0x02])
+            try tx.setValue([0x30, 0x31, 0x32, 0x33], for: [0x03])
+        }
+
+        let tx = try engine.createTransaction()
+        #expect(
+            try await tx.getEstimatedRangeSizeBytes(
+                beginKey: [0x01],
+                endKey: [0x04]
+            ) == 11
+        )
+        #expect(
+            try await tx.getRangeSplitPoints(
+                beginKey: [0x01],
+                endKey: [0x04],
+                chunkSize: 6
+            ) == [[0x01], [0x03], [0x04]]
+        )
+    }
+
+    @Test func rangeMetricsIncludePendingMutations() async throws {
+        let engine = try await makeEngine()
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([0x10, 0x11], for: [0x01])
+            try transaction.setValue([0x20, 0x21], for: [0x02])
+        }
+
+        let transaction = try engine.createTransaction()
+        try transaction.clear(key: [0x01])
+        try transaction.setValue([0x30, 0x31, 0x32, 0x33], for: [0x03])
+        try transaction.setValue([0x40], for: [0x04])
+
+        #expect(
+            try await transaction.getEstimatedRangeSizeBytes(
+                beginKey: [0x01],
+                endKey: [0x05]
+            ) == 10
+        )
+        #expect(
+            try await transaction.getRangeSplitPoints(
+                beginKey: [0x01],
+                endKey: [0x05],
+                chunkSize: 6
+            ) == [[0x01], [0x03], [0x04], [0x05]]
+        )
+    }
+
+    @Test func readConflictProgressDoesNotRetainCallerKeyStorage() async throws {
+        let engine = try await makeEngine()
+        let transaction = try engine.createTransaction()
+        let releaseRecorder = TransactionReleaseRecorder()
+        var frame: Bytes? = makeTransactionOwnedBytes(
+            [0x00, 0x10, 0x20, 0x30],
+            releaseRecorder: releaseRecorder
+        )
+        var key = frame?[1..<2]
+
+        _ = try await transaction.getValue(for: key!)
+        frame = nil
+        key = nil
+
+        #expect(releaseRecorder.releaseCount == 1)
+        try await transaction.cancel()
+    }
+
+    @Test func explicitConflictRangeDoesNotRetainCallerStorage() async throws {
+        let engine = try await makeEngine()
+        let transaction = try engine.createTransaction()
+        let releaseRecorder = TransactionReleaseRecorder()
+        var frame: Bytes? = makeTransactionOwnedBytes(
+            [0x00, 0x10, 0x20, 0x30],
+            releaseRecorder: releaseRecorder
+        )
+        var begin = frame?[1..<2]
+        var end = frame?[2..<3]
+
+        try transaction.addConflictRange(
+            beginKey: begin!,
+            endKey: end!,
+            type: .read
+        )
+        frame = nil
+        begin = nil
+        end = nil
+
+        #expect(releaseRecorder.releaseCount == 1)
+        try await transaction.cancel()
+    }
+
+    @Test func pendingMutationSplitPointsEnforceConfiguredLimitDuringGeneration() async throws {
+        let limits = try CloudflareDurableObjectLimits(
+            maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
+            maxValueBytes: 10,
+            maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
+            maxRangeLimit: 2,
+            maxSplitPoints: 2,
+            maxNameBytes: 512
+        )
+        let engine = try await makeEngine(limits: limits)
+        let transaction = try engine.createTransaction()
+        try transaction.setValue([0x10], for: [0x01])
+        try transaction.setValue([0x20], for: [0x02])
 
         await #expect(throws: StorageError.self) {
-            try await tx.commit()
+            _ = try await transaction.getRangeSplitPoints(
+                beginKey: [0x01],
+                endKey: [0x03],
+                chunkSize: 1
+            )
         }
     }
 
-    @Test func writeDuringCommitIsRejectedByStateMachine() async throws {
+    @Test func getKeySupportsKeysLexicographicallyAfterFF() async throws {
+        let engine = try await makeEngine()
+        try await engine.withTransaction { tx in
+            try tx.setValue([0x41], for: [0xFF, 0x00])
+        }
+
+        let tx = try engine.createTransaction()
+        #expect(
+            try await tx.getKey(
+                selector: .firstGreaterOrEqual([0xFF]),
+                snapshot: true
+            ) == [0xFF, 0x00]
+        )
+    }
+
+    @Test func rangeMetricsRejectClosedTransactionsBeforeDispatch() async throws {
+        let engine = try await makeEngine()
+        let tx = try engine.createTransaction()
+        try await tx.cancel()
+
+        await #expect(throws: StorageError.self) {
+            _ = try await tx.getEstimatedRangeSizeBytes(
+                beginKey: [0x01],
+                endKey: [0x02]
+            )
+        }
+        await #expect(throws: StorageError.self) {
+            _ = try await tx.getRangeSplitPoints(
+                beginKey: [0x01],
+                endKey: [0x02],
+                chunkSize: 1
+            )
+        }
+    }
+
+    @Test func rangeSplitPointsRejectsResponsesAboveConfiguredLimit() async throws {
+        let client = InMemoryCloudflareDurableObjectStorageClient(
+            rangeSplitPointsResponseOverride: { request in
+                CloudflareDurableObjectRangeSplitPointsResponse(
+                    splitPoints: [
+                        request.begin,
+                        CloudflareDurableObjectBytes([0x02]),
+                        request.end,
+                    ],
+                    currentCommitVersion: 0
+                )
+            }
+        )
+        let limits = try CloudflareDurableObjectLimits(
+            maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
+            maxValueBytes: 10,
+            maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
+            maxRangeLimit: 2,
+            maxSplitPoints: 2,
+            maxNameBytes: 512
+        )
+        let engine = try await makeEngine(client: client, limits: limits)
+        let tx = try engine.createTransaction()
+
+        await #expect(throws: StorageError.self) {
+            _ = try await tx.getRangeSplitPoints(
+                beginKey: [0x01],
+                endKey: [0x03],
+                chunkSize: 1
+            )
+        }
+    }
+
+    private func versionstampOperand(
+        prefix: Bytes,
+        suffix: Bytes
+    ) -> Bytes {
+        let offset = UInt32(prefix.count)
+        return prefix
+            + Array(repeating: 0xFF, count: 10)
+            + suffix
+            + [
+                UInt8(truncatingIfNeeded: offset),
+                UInt8(truncatingIfNeeded: offset >> 8),
+                UInt8(truncatingIfNeeded: offset >> 16),
+                UInt8(truncatingIfNeeded: offset >> 24),
+            ]
+    }
+
+    @Test func writeDuringCommitIsRejectedByTransactionLifecycle() async throws {
         let holder = Mutex<CloudflareDurableObjectStorageTransaction?>(nil)
-        let client = FakeCloudflareDurableObjectStorageClient {
+        let rejection = Mutex<StorageError?>(nil)
+        let client = InMemoryCloudflareDurableObjectStorageClient {
             holder.withLock { transaction in
-                transaction?.setValue([99], for: [0x02])
+                do {
+                    try transaction?.setValue([99], for: [0x02])
+                } catch let error as StorageError {
+                    rejection.withLock { $0 = error }
+                } catch {
+                    Issue.record("Expected a StorageError, got \(error)")
+                }
             }
         }
         let engine = try await makeEngine(client: client)
         let tx = try engine.createTransaction()
         holder.withLock { $0 = tx }
 
-        tx.setValue([1], for: [0x01])
+        try tx.setValue([1], for: [0x01])
         try await tx.commit()
+        #expect(rejection.withLock { $0?.code } == .invalidOperation)
 
         let readTx = try engine.createTransaction()
         #expect(try await readTx.getValue(for: [0x01]) == [1])
@@ -286,7 +536,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func observedReadVersionConflictFailsCommit() async throws {
-        let client = FakeCloudflareDurableObjectStorageClient()
+        let client = InMemoryCloudflareDurableObjectStorageClient()
         let engine = try await makeEngine(client: client)
 
         let first = try engine.createTransaction()
@@ -294,8 +544,8 @@ struct CloudflareDurableObjectStorageTransactionTests {
         _ = try await first.getValue(for: [0x01])
         _ = try await second.getValue(for: [0x01])
 
-        first.setValue([1], for: [0x01])
-        second.setValue([2], for: [0x02])
+        try first.setValue([1], for: [0x01])
+        try second.setValue([2], for: [0x02])
 
         try await first.commit()
         await #expect(throws: StorageError.self) {
@@ -304,17 +554,17 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func unrelatedWriteAfterReadDoesNotConflictAtCommit() async throws {
-        let client = FakeCloudflareDurableObjectStorageClient()
+        let client = InMemoryCloudflareDurableObjectStorageClient()
         let engine = try await makeEngine(client: client)
 
         let first = try engine.createTransaction()
         _ = try await first.getValue(for: [0x01])
 
         let second = try engine.createTransaction()
-        second.setValue([2], for: [0x02])
+        try second.setValue([2], for: [0x02])
         try await second.commit()
 
-        first.setValue([3], for: [0x03])
+        try first.setValue([3], for: [0x03])
         try await first.commit()
 
         let readTx = try engine.createTransaction()
@@ -323,8 +573,8 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func commitUnknownResultLeavesTransactionNonReusable() async throws {
-        let client = CloudflareDurableObjectBinaryClient(
-            transport: ThrowingCloudflareDurableObjectBinaryTransport(
+        let client = CloudflareDurableObjectStorageWireClient(
+            transport: ConfiguredFailureCloudflareDurableObjectStorageTransport(
                 error: StorageError(
                     code: .connectionFailure,
                     operation: .execute,
@@ -334,9 +584,13 @@ struct CloudflareDurableObjectStorageTransactionTests {
             )
         )
         let scope = try CloudflareDurableObjectStorageScope(databaseID: "main")
-        let engine = try await CloudflareDurableObjectStorageEngineFactory(client: client).engine(for: scope)
-        let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x01])
+        let tx = CloudflareDurableObjectStorageTransaction(
+            scope: scope,
+            client: client,
+            limits: .default,
+            monotonicClock: SystemStorageClock()
+        )
+        try tx.setValue([1], for: [0x01])
 
         do {
             try await tx.commit()
@@ -344,7 +598,8 @@ struct CloudflareDurableObjectStorageTransactionTests {
         } catch let error as StorageError {
             #expect(error.code == .commitUnknownResult)
             #expect(error.operation == .commit)
-            #expect(error.isRetryable)
+            #expect(error.retryDisposition == .requiresIdempotency)
+            #expect(!error.isRetryable)
         }
 
         await #expect(throws: StorageError.self) {
@@ -355,18 +610,41 @@ struct CloudflareDurableObjectStorageTransactionTests {
         }
     }
 
+    @Test func negativeCommittedVersionProducesUnknownOutcome() async throws {
+        let client = InMemoryCloudflareDurableObjectStorageClient(
+            commitResponseOverride: { _ in
+                CloudflareDurableObjectCommitResponse(committedVersion: -1)
+            }
+        )
+        let engine = try await makeEngine(client: client)
+        let transaction = try engine.createTransaction()
+        try transaction.setValue([1], for: [0x01])
+
+        do {
+            try await transaction.commit()
+            Issue.record("Expected an unknown commit outcome")
+        } catch let error as StorageError {
+            #expect(error.code == .commitUnknownResult)
+            #expect(error.operation == .commit)
+        }
+
+        await #expect(throws: StorageError.self) {
+            try await transaction.commit()
+        }
+    }
+
     @Test func snapshotReadDoesNotParticipateInCommitConflict() async throws {
-        let client = FakeCloudflareDurableObjectStorageClient()
+        let client = InMemoryCloudflareDurableObjectStorageClient()
         let engine = try await makeEngine(client: client)
 
         let first = try engine.createTransaction()
         _ = try await first.getValue(for: [0x01], snapshot: true)
 
         let second = try engine.createTransaction()
-        second.setValue([1], for: [0x01])
+        try second.setValue([1], for: [0x01])
         try await second.commit()
 
-        first.setValue([2], for: [0x02])
+        try first.setValue([2], for: [0x02])
         try await first.commit()
 
         let readTx = try engine.createTransaction()
@@ -375,19 +653,22 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func keySelectorLastLessPatternsArePreservedByHostPagination() async throws {
-        let limits = CloudflareDurableObjectLimits(
+        let limits = try CloudflareDurableObjectLimits(
             maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
             maxValueBytes: 10,
             maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
             maxRangeLimit: 1,
+            maxSplitPoints: 20,
             maxNameBytes: 512
         )
         let engine = try await makeEngine(limits: limits)
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([5], for: [0x05])
-            tx.setValue([7], for: [0x07])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([5], for: [0x05])
+            try tx.setValue([7], for: [0x07])
         }
 
         let tx = try engine.createTransaction()
@@ -401,19 +682,22 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func allKeySelectorKindsArePreservedByPagedRangeScan() async throws {
-        let limits = CloudflareDurableObjectLimits(
+        let limits = try CloudflareDurableObjectLimits(
             maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
             maxValueBytes: 10,
             maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
             maxRangeLimit: 1,
+            maxSplitPoints: 20,
             maxNameBytes: 512
         )
         let engine = try await makeEngine(limits: limits)
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: [0x01])
-            tx.setValue([3], for: [0x03])
-            tx.setValue([5], for: [0x05])
-            tx.setValue([7], for: [0x07])
+            try tx.setValue([1], for: [0x01])
+            try tx.setValue([3], for: [0x03])
+            try tx.setValue([5], for: [0x05])
+            try tx.setValue([7], for: [0x07])
         }
 
         let cases: [(KeySelector, KeySelector, [Bytes])] = [
@@ -447,7 +731,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func rangeScanRejectsNonMonotonicHostRowsWithoutRememberingEveryEmittedKey() async throws {
-        let client = FakeCloudflareDurableObjectStorageClient(rangeResponseOverride: { request in
+        let client = InMemoryCloudflareDurableObjectStorageClient(rangeResponseOverride: { request in
             CloudflareDurableObjectRangeResponse(
                 rows: [
                     CloudflareDurableObjectKeyValue(
@@ -459,7 +743,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
                         value: CloudflareDurableObjectBytes([1])
                     )
                 ],
-                nextCursor: nil,
+                hasMore: false,
                 currentCommitVersion: request.expectedReadVersion ?? 0
             )
         })
@@ -472,10 +756,10 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     @Test func rangeScanRejectsEmptyHostPageWithCursorWithoutRememberingEveryCursor() async throws {
-        let client = FakeCloudflareDurableObjectStorageClient(rangeResponseOverride: { _ in
+        let client = InMemoryCloudflareDurableObjectStorageClient(rangeResponseOverride: { _ in
             CloudflareDurableObjectRangeResponse(
                 rows: [],
-                nextCursor: "stalled",
+                hasMore: true,
                 currentCommitVersion: 0
             )
         })
@@ -487,14 +771,85 @@ struct CloudflareDurableObjectStorageTransactionTests {
         }
     }
 
+    @Test func rangeScanRejectsPageThatDoesNotAdvancePastCursor() async throws {
+        let client = InMemoryCloudflareDurableObjectStorageClient(rangeResponseOverride: { request in
+            CloudflareDurableObjectRangeResponse(
+                rows: [
+                    CloudflareDurableObjectKeyValue(
+                        key: CloudflareDurableObjectBytes([0x01]),
+                        value: CloudflareDurableObjectBytes([1])
+                    )
+                ],
+                hasMore: true,
+                currentCommitVersion: 0
+            )
+        })
+        let engine = try await makeEngine(client: client)
+        let tx = try engine.createTransaction()
+
+        await #expect(throws: StorageError.self) {
+            _ = try await tx.collectRange(begin: [0x01], end: [0x03], limit: 0)
+        }
+    }
+
+    @Test func cloudflareTransactionOmitsUnsupportedPhysicalCompaction() async throws {
+        let engine = try await makeEngine()
+        let transaction = try engine.createTransaction()
+        #expect(
+            !((transaction as Any) is any DatabaseStorageCompactionTransaction)
+        )
+        try await transaction.cancel()
+    }
+
     private func makeEngine(
-        client: FakeCloudflareDurableObjectStorageClient = FakeCloudflareDurableObjectStorageClient(),
+        client: InMemoryCloudflareDurableObjectStorageClient = InMemoryCloudflareDurableObjectStorageClient(),
         limits: CloudflareDurableObjectLimits = .default
     ) async throws -> CloudflareDurableObjectStorageEngine {
         let scope = try CloudflareDurableObjectStorageScope(databaseID: "main")
-        return try await CloudflareDurableObjectStorageEngineFactory(
+        return try await CloudflareDurableObjectSharedClientRouter(
             client: client,
             limits: limits
         ).engine(for: scope)
+    }
+}
+
+private func makeTransactionOwnedBytes(
+    _ bytes: [UInt8],
+    releaseRecorder: TransactionReleaseRecorder
+) -> Bytes {
+    let pointer = UnsafeMutableRawPointer.allocate(
+        byteCount: bytes.count,
+        alignment: MemoryLayout<UInt8>.alignment
+    )
+    bytes.withUnsafeBytes { source in
+        if let sourceAddress = source.baseAddress {
+            pointer.copyMemory(
+                from: sourceAddress,
+                byteCount: source.count
+            )
+        }
+    }
+    let allocation = EmbeddedByteAllocation(
+        unsafeAddress: UInt(bitPattern: pointer),
+        count: bytes.count,
+        deallocator: { address, _ in
+            if let pointer = UnsafeMutableRawPointer(bitPattern: address) {
+                pointer.deallocate()
+            }
+            releaseRecorder.recordRelease()
+        }
+    )
+    return Bytes(EmbeddedBytes(allocation: allocation))
+}
+
+private final class TransactionReleaseRecorder: Sendable {
+    private let state = Mutex(0)
+
+    var releaseCount: Int {
+        state.withLock { $0 }
+    }
+
+    func recordRelease() {
+        state.withLock { $0 += 1 }
     }
 }

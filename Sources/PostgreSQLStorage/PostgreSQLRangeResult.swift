@@ -12,7 +12,7 @@ import StorageKit
 /// from the plan. A scan whose boundaries could not be resolved is represented as
 /// a `.failure`, which throws on the first `next()` rather than silently yielding
 /// nothing.
-public struct PostgreSQLRangeResult: AsyncSequence, Sendable {
+public struct PostgreSQLRangeResult: TransactionRangeResult {
 
     public typealias Element = (Bytes, Bytes)
 
@@ -48,12 +48,12 @@ public struct PostgreSQLRangeResult: AsyncSequence, Sendable {
 
     /// Keyset-pagination iterator.
     ///
-    /// Not `Sendable`: a single iterator is consumed by one task, while the
-    /// parent `PostgreSQLRangeResult` stays shareable across tasks.
-    public struct Iterator: AsyncIteratorProtocol {
+    /// A value is transferred between consumers, but each instance remains a
+    /// single-consumer iterator as required by `AsyncIteratorProtocol`.
+    public struct Iterator: TransactionRangeIterator, Sendable {
 
-        private let transaction: PostgreSQLStorageTransaction?
-        private let plan: RangeScanPlan?
+        private var transaction: PostgreSQLStorageTransaction?
+        private var plan: RangeScanPlan?
         private var pendingFailure: StorageError?
 
         /// Rows fetched in the current batch and the serving cursor into them.
@@ -88,27 +88,42 @@ public struct PostgreSQLRangeResult: AsyncSequence, Sendable {
         }
 
         public mutating func next() async throws -> (Bytes, Bytes)? {
+            do {
+                return try await nextEntry()
+            } catch {
+                finishState()
+                throw error
+            }
+        }
+
+        public mutating func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {
+            finishState()
+        }
+
+        private mutating func nextEntry() async throws -> (Bytes, Bytes)? {
             if done { return nil }
 
             if let failure = pendingFailure {
-                done = true
+                finishState()
                 throw failure
             }
 
             guard let transaction, let plan else {
-                done = true
+                finishState()
                 return nil
             }
 
             // Refill the buffer when the serving cursor has drained it.
             while bufferIndex >= buffer.count {
                 if exhausted {
-                    done = true
+                    finishState()
                     return nil
                 }
                 let remaining = plan.limit > 0 ? plan.limit - emitted : plan.batchSize
                 if remaining <= 0 {
-                    done = true
+                    finishState()
                     return nil
                 }
                 // Matches fetchRangeBatch's own LIMIT computation, so a batch
@@ -116,9 +131,13 @@ public struct PostgreSQLRangeResult: AsyncSequence, Sendable {
                 // `Swift.min` disambiguates from AsyncSequence.min() visible
                 // through the enclosing PostgreSQLRangeResult type.
                 let target = plan.limit > 0 ? Swift.min(plan.batchSize, remaining) : plan.batchSize
+                let queryCursor = lastKey?.detached()
+                lastKey = queryCursor
+                buffer.removeAll(keepingCapacity: false)
+                bufferIndex = 0
                 let batch = try await transaction.fetchRangeBatch(
                     plan: plan,
-                    after: lastKey,
+                    after: queryCursor,
                     remaining: remaining,
                     flushFirst: !started
                 )
@@ -129,7 +148,7 @@ public struct PostgreSQLRangeResult: AsyncSequence, Sendable {
                     exhausted = true
                 }
                 if batch.isEmpty {
-                    done = true
+                    finishState()
                     return nil
                 }
             }
@@ -142,6 +161,16 @@ public struct PostgreSQLRangeResult: AsyncSequence, Sendable {
                 exhausted = true
             }
             return entry
+        }
+
+        private mutating func finishState() {
+            transaction = nil
+            plan = nil
+            pendingFailure = nil
+            buffer.removeAll(keepingCapacity: false)
+            bufferIndex = 0
+            lastKey = nil
+            done = true
         }
     }
 }

@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 // MARK: - Float
 
@@ -9,37 +13,30 @@ extension Float: TupleElement {
     /// Negative values: flip all bits so negative lexicographic order is correct.
     ///
     /// FDB spec: flip sign bit for positive, flip all bits for negative.
-    public func encodeTuple() -> Bytes {
-        var bits = self.bitPattern.bigEndian
-        var rawBytes = withUnsafeBytes(of: &bits) { Array($0) }
-        if self.sign == .minus {
-            // Negative values (including -0.0): flip all bits
-            for i in 0..<rawBytes.count {
-                rawBytes[i] = ~rawBytes[i]
-            }
-        } else {
-            // Positive values (including +0.0, +Inf, NaN): flip sign bit only
-            rawBytes[0] ^= 0x80
-        }
-        return [TupleTypeCode.float.rawValue] + rawBytes
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        sink.writeByte(TupleTypeCode.float.rawValue)
+        let encoded = sign == .minus
+            ? ~bitPattern
+            : bitPattern ^ 0x8000_0000
+        sink.writeByte(UInt8(truncatingIfNeeded: encoded >> 24))
+        sink.writeByte(UInt8(truncatingIfNeeded: encoded >> 16))
+        sink.writeByte(UInt8(truncatingIfNeeded: encoded >> 8))
+        sink.writeByte(UInt8(truncatingIfNeeded: encoded))
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Float {
         guard offset + 4 <= bytes.count else { throw TupleError.unexpectedEndOfData }
-        var rawBytes = Array(bytes[offset..<(offset + 4)])
+        var encoded = UInt32(bytes[offset]) << 24
+            | UInt32(bytes[offset + 1]) << 16
+            | UInt32(bytes[offset + 2]) << 8
+            | UInt32(bytes[offset + 3])
         offset += 4
-
-        if rawBytes[0] & 0x80 != 0 {
-            // Positive value: restore sign bit only
-            rawBytes[0] ^= 0x80
+        if encoded & 0x8000_0000 != 0 {
+            encoded ^= 0x8000_0000
         } else {
-            // Negative value: restore by flipping all bits back
-            for i in 0..<rawBytes.count {
-                rawBytes[i] = ~rawBytes[i]
-            }
+            encoded = ~encoded
         }
-        let bits = rawBytes.withUnsafeBytes { $0.load(as: UInt32.self) }
-        return Float(bitPattern: UInt32(bigEndian: bits))
+        return Float(bitPattern: encoded)
     }
 }
 
@@ -47,32 +44,28 @@ extension Float: TupleElement {
 
 extension Double: TupleElement {
     /// IEEE 754 big-endian encoding (same algorithm as Float, 8 bytes).
-    public func encodeTuple() -> Bytes {
-        var bits = self.bitPattern.bigEndian
-        var rawBytes = withUnsafeBytes(of: &bits) { Array($0) }
-        if self.sign == .minus {
-            for i in 0..<rawBytes.count {
-                rawBytes[i] = ~rawBytes[i]
-            }
-        } else {
-            rawBytes[0] ^= 0x80
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        sink.writeByte(TupleTypeCode.double.rawValue)
+        let encoded = sign == .minus
+            ? ~bitPattern
+            : bitPattern ^ 0x8000_0000_0000_0000
+        for shift in stride(from: 56, through: 0, by: -8) {
+            sink.writeByte(UInt8(truncatingIfNeeded: encoded >> UInt64(shift)))
         }
-        return [TupleTypeCode.double.rawValue] + rawBytes
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Double {
         guard offset + 8 <= bytes.count else { throw TupleError.unexpectedEndOfData }
-        var rawBytes = Array(bytes[offset..<(offset + 8)])
-        offset += 8
-
-        if rawBytes[0] & 0x80 != 0 {
-            rawBytes[0] ^= 0x80
-        } else {
-            for i in 0..<rawBytes.count {
-                rawBytes[i] = ~rawBytes[i]
-            }
+        var encoded: UInt64 = 0
+        for index in 0..<8 {
+            encoded = (encoded << 8) | UInt64(bytes[offset + index])
         }
-        let bits = rawBytes.withUnsafeBytes { $0.load(as: UInt64.self) }
-        return Double(bitPattern: UInt64(bigEndian: bits))
+        offset += 8
+        if encoded & 0x8000_0000_0000_0000 != 0 {
+            encoded ^= 0x8000_0000_0000_0000
+        } else {
+            encoded = ~encoded
+        }
+        return Double(bitPattern: encoded)
     }
 }

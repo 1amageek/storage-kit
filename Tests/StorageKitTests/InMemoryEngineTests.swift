@@ -6,18 +6,17 @@ import Foundation
 struct InMemoryEngineTests {
 
     // =========================================================================
-    // MARK: - Write Buffer Reverse Scan
+    // MARK: - Ordered Write Buffer Replay
     //
-    // getValue iterates writeBuffer.reversed(). The FIRST matching operation
-    // found in reverse order determines the result. This is the core invariant
-    // of read-your-writes semantics.
+    // getValue replays operations in insertion order so atomic mutations can
+    // consume the value produced by earlier writes.
     // =========================================================================
 
     @Test func setThenClear_clearWins() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x01])
-        tx.clear(key: [0x01])
+        try tx.setValue([1], for: [0x01])
+        try tx.clear(key: [0x01])
         let value = try await tx.getValue(for: [0x01])
         #expect(value == nil)
     }
@@ -25,9 +24,9 @@ struct InMemoryEngineTests {
     @Test func setThenClearThenSet_lastSetWins() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x01])
-        tx.clear(key: [0x01])
-        tx.setValue([2], for: [0x01])
+        try tx.setValue([1], for: [0x01])
+        try tx.clear(key: [0x01])
+        try tx.setValue([2], for: [0x01])
         let value = try await tx.getValue(for: [0x01])
         #expect(value == [2])
     }
@@ -35,8 +34,8 @@ struct InMemoryEngineTests {
     @Test func setThenClearRange_clearRangeWins() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x02])
-        tx.clearRange(beginKey: [0x01], endKey: [0x05])
+        try tx.setValue([1], for: [0x02])
+        try tx.clearRange(beginKey: [0x01], endKey: [0x05])
         let value = try await tx.getValue(for: [0x02])
         #expect(value == nil)
     }
@@ -44,8 +43,8 @@ struct InMemoryEngineTests {
     @Test func clearRangeThenSet_setWins() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.clearRange(beginKey: [0x01], endKey: [0x05])
-        tx.setValue([99], for: [0x03])
+        try tx.clearRange(beginKey: [0x01], endKey: [0x05])
+        try tx.setValue([99], for: [0x03])
         let value = try await tx.getValue(for: [0x03])
         #expect(value == [99])
     }
@@ -53,9 +52,9 @@ struct InMemoryEngineTests {
     @Test func multipleOverwrites_lastWins() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x01])
-        tx.setValue([2], for: [0x01])
-        tx.setValue([3], for: [0x01])
+        try tx.setValue([1], for: [0x01])
+        try tx.setValue([2], for: [0x01])
+        try tx.setValue([3], for: [0x01])
         let value = try await tx.getValue(for: [0x01])
         #expect(value == [3])
     }
@@ -63,10 +62,10 @@ struct InMemoryEngineTests {
     @Test func setClearRangeSetClearRange_lastClearRangeWins() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x02])
-        tx.clearRange(beginKey: [0x01], endKey: [0x05])
-        tx.setValue([2], for: [0x02])
-        tx.clearRange(beginKey: [0x01], endKey: [0x05])
+        try tx.setValue([1], for: [0x02])
+        try tx.clearRange(beginKey: [0x01], endKey: [0x05])
+        try tx.setValue([2], for: [0x02])
+        try tx.clearRange(beginKey: [0x01], endKey: [0x05])
         let value = try await tx.getValue(for: [0x02])
         #expect(value == nil)
     }
@@ -75,12 +74,12 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
         }
 
         let tx = try engine.createTransaction()
         // Snapshot has [0x01]=10. Buffer overwrites it.
-        tx.setValue([20], for: [0x01])
+        try tx.setValue([20], for: [0x01])
         let value = try await tx.getValue(for: [0x01])
         #expect(value == [20])
     }
@@ -89,11 +88,11 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
         }
 
         let tx = try engine.createTransaction()
-        tx.clear(key: [0x01])
+        try tx.clear(key: [0x01])
         let value = try await tx.getValue(for: [0x01])
         #expect(value == nil)
     }
@@ -102,13 +101,13 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([20], for: [0x02])
-            tx.setValue([30], for: [0x03])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([20], for: [0x02])
+            try tx.setValue([30], for: [0x03])
         }
 
         let tx = try engine.createTransaction()
-        tx.clearRange(beginKey: [0x01], endKey: [0x03])
+        try tx.clearRange(beginKey: [0x01], endKey: [0x03])
         let cr1 = try await tx.getValue(for: [0x01])
         let cr2 = try await tx.getValue(for: [0x02])
         let cr3 = try await tx.getValue(for: [0x03])
@@ -121,12 +120,12 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
         }
 
         let tx = try engine.createTransaction()
         // Buffer has an operation on a DIFFERENT key
-        tx.setValue([99], for: [0xFF])
+        try tx.setValue([99], for: [0xFF])
         // [0x01] should fall through to snapshot
         let value = try await tx.getValue(for: [0x01])
         #expect(value == [10])
@@ -142,8 +141,8 @@ struct InMemoryEngineTests {
     @Test func clearRange_beginInclusive() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x02])
-        tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        try tx.setValue([1], for: [0x02])
+        try tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key == begin → inside range → nil
         let value = try await tx.getValue(for: [0x02])
         #expect(value == nil)
@@ -152,8 +151,8 @@ struct InMemoryEngineTests {
     @Test func clearRange_endExclusive() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x05])
-        tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        try tx.setValue([1], for: [0x05])
+        try tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key == end → outside range → value preserved
         let value = try await tx.getValue(for: [0x05])
         #expect(value == [1])
@@ -162,8 +161,8 @@ struct InMemoryEngineTests {
     @Test func clearRange_justBeforeEnd() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x04])
-        tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        try tx.setValue([1], for: [0x04])
+        try tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key < end → inside range → nil
         let value = try await tx.getValue(for: [0x04])
         #expect(value == nil)
@@ -172,8 +171,8 @@ struct InMemoryEngineTests {
     @Test func clearRange_justBeforeBegin() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x01])
-        tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        try tx.setValue([1], for: [0x01])
+        try tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key < begin → outside range → value preserved
         let value = try await tx.getValue(for: [0x01])
         #expect(value == [1])
@@ -182,8 +181,8 @@ struct InMemoryEngineTests {
     @Test func clearRange_justAfterEnd() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x06])
-        tx.clearRange(beginKey: [0x02], endKey: [0x05])
+        try tx.setValue([1], for: [0x06])
+        try tx.clearRange(beginKey: [0x02], endKey: [0x05])
         // key > end → outside range → value preserved
         let value = try await tx.getValue(for: [0x06])
         #expect(value == [1])
@@ -192,9 +191,9 @@ struct InMemoryEngineTests {
     @Test func clearRange_multiByteKeyBoundary() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x01, 0xFF])
-        tx.setValue([2], for: [0x02, 0x00])
-        tx.clearRange(beginKey: [0x02, 0x00], endKey: [0x03, 0x00])
+        try tx.setValue([1], for: [0x01, 0xFF])
+        try tx.setValue([2], for: [0x02, 0x00])
+        try tx.clearRange(beginKey: [0x02, 0x00], endKey: [0x03, 0x00])
         // [0x01, 0xFF] < begin → preserved
         let preservedValue = try await tx.getValue(for: [0x01, 0xFF])
         #expect(preservedValue == [1])
@@ -224,9 +223,9 @@ struct InMemoryEngineTests {
     @Test func consistency_setClearSet() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([1], for: [0x01])
-        tx.clear(key: [0x01])
-        tx.setValue([2], for: [0x01])
+        try tx.setValue([1], for: [0x01])
+        try tx.clear(key: [0x01])
+        try tx.setValue([2], for: [0x01])
 
         // getValue sees [2]
         let value = try await tx.getValue(for: [0x01])
@@ -243,14 +242,14 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([20], for: [0x02])
-            tx.setValue([30], for: [0x03])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([20], for: [0x02])
+            try tx.setValue([30], for: [0x03])
         }
 
         let tx = try engine.createTransaction()
-        tx.clearRange(beginKey: [0x01], endKey: [0x04])
-        tx.setValue([99], for: [0x02])
+        try tx.clearRange(beginKey: [0x01], endKey: [0x04])
+        try tx.setValue([99], for: [0x02])
 
         // getValue: [0x01]=nil (clearRange), [0x02]=99 (set after clearRange), [0x03]=nil (clearRange)
         let crts1 = try await tx.getValue(for: [0x01])
@@ -271,13 +270,13 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([20], for: [0x02])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([20], for: [0x02])
         }
 
         let tx = try engine.createTransaction()
-        tx.setValue([99], for: [0x01])    // overwrite 0x01
-        tx.clearRange(beginKey: [0x01], endKey: [0x03])  // then clear entire range
+        try tx.setValue([99], for: [0x01])    // overwrite 0x01
+        try tx.clearRange(beginKey: [0x01], endKey: [0x03])  // then clear entire range
 
         // getValue: both cleared by clearRange (which comes after set)
         let oc1 = try await tx.getValue(for: [0x01])
@@ -294,12 +293,12 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([30], for: [0x03])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([30], for: [0x03])
         }
 
         let tx = try engine.createTransaction()
-        tx.setValue([20], for: [0x02])  // new key in buffer
+        try tx.setValue([20], for: [0x02])  // new key in buffer
 
         let range = try await collectRange(tx, begin: [0x00], end: [0xFF])
         #expect(range.count == 3)
@@ -313,13 +312,13 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
-            tx.setValue([20], for: [0x02])
-            tx.setValue([30], for: [0x03])
+            try tx.setValue([10], for: [0x01])
+            try tx.setValue([20], for: [0x02])
+            try tx.setValue([30], for: [0x03])
         }
 
         let tx = try engine.createTransaction()
-        tx.clear(key: [0x02])
+        try tx.clear(key: [0x02])
 
         let range = try await collectRange(tx, begin: [0x00], end: [0xFF])
         #expect(range.count == 2)
@@ -338,7 +337,7 @@ struct InMemoryEngineTests {
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
-                tx.setValue([i * 10], for: [i])
+                try tx.setValue([i * 10], for: [i])
             }
         }
 
@@ -366,7 +365,7 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: [0x01])
+            try tx.setValue([10], for: [0x01])
         }
 
         // tx1 takes snapshot with [0x01]=10
@@ -374,12 +373,358 @@ struct InMemoryEngineTests {
 
         // tx2 overwrites [0x01] and commits
         try await engine.withTransaction { tx in
-            tx.setValue([20], for: [0x01])
+            try tx.setValue([20], for: [0x01])
         }
 
         // tx1 should still see [0x01]=10 from its snapshot
         let value = try await tx1.getValue(for: [0x01])
         #expect(value == [10])
+    }
+
+    // =========================================================================
+    // MARK: - Optimistic Concurrency
+    // =========================================================================
+
+    @Test func concurrentWritesToSameKey_allowExactlyOneCommit() async throws {
+        let engine = InMemoryEngine()
+        let first = try engine.createTransaction()
+        let second = try engine.createTransaction()
+        try first.setValue([1], for: [0x10])
+        try second.setValue([2], for: [0x10])
+
+        let outcomes = await commitConcurrently(first, second)
+
+        #expect(outcomes.filter { $0 == .success }.count == 1)
+        #expect(
+            outcomes.filter { $0 == .storageFailure(.transactionConflict) }.count == 1
+        )
+        let stored = try await readValue(engine, key: [0x10])
+        #expect(stored == [1] || stored == [2])
+    }
+
+    @Test func concurrentDisjointBlindWrites_bothCommit() async throws {
+        let engine = InMemoryEngine()
+        let first = try engine.createTransaction()
+        let second = try engine.createTransaction()
+        try first.setValue([1], for: [0x10])
+        try second.setValue([2], for: [0x20])
+
+        let outcomes = await commitConcurrently(first, second)
+
+        #expect(outcomes.filter { $0 == .success }.count == 2)
+        #expect(try await readValue(engine, key: [0x10]) == [1])
+        #expect(try await readValue(engine, key: [0x20]) == [2])
+    }
+
+    @Test func serializableAndSnapshotPointReads_haveDifferentConflicts() async throws {
+        let engine = InMemoryEngine()
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([1], for: [0x10])
+        }
+
+        let serializableReader = try engine.createTransaction()
+        let snapshotReader = try engine.createTransaction()
+        #expect(
+            try await serializableReader.getValue(
+                for: [0x10],
+                snapshot: false
+            ) == [1]
+        )
+        #expect(
+            try await snapshotReader.getValue(
+                for: [0x10],
+                snapshot: true
+            ) == [1]
+        )
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([2], for: [0x10])
+        }
+
+        #expect(
+            await Self.commitOutcome(serializableReader)
+                == .storageFailure(.transactionConflict)
+        )
+        #expect(await Self.commitOutcome(snapshotReader) == .success)
+    }
+
+    @Test func serializableEmptyRange_detectsPhantomAndRollsBackWrites() async throws {
+        let engine = InMemoryEngine()
+        let reader = try engine.createTransaction()
+        let rows = try await reader.collectRange(
+            begin: [0x10],
+            end: [0x20],
+            snapshot: false
+        )
+        #expect(rows.isEmpty)
+        try reader.setValue([9], for: [0x90])
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([1], for: [0x15])
+        }
+
+        #expect(
+            await Self.commitOutcome(reader)
+                == .storageFailure(.transactionConflict)
+        )
+        #expect(try await readValue(engine, key: [0x15]) == [1])
+        #expect(try await readValue(engine, key: [0x90]) == nil)
+    }
+
+    @Test func normalRange_doesNotConflictWithDisjointWrite() async throws {
+        let engine = InMemoryEngine()
+        let reader = try engine.createTransaction()
+        let rows = try await reader.collectRange(
+            begin: [0x10],
+            end: [0x20],
+            snapshot: false
+        )
+        #expect(rows.isEmpty)
+        try reader.setValue([9], for: [0x90])
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([3], for: [0x30])
+        }
+
+        try await reader.commit()
+        #expect(try await readValue(engine, key: [0x30]) == [3])
+        #expect(try await readValue(engine, key: [0x90]) == [9])
+    }
+
+    @Test func strictSelectorBoundary_doesNotConflictWithExcludedKey() async throws {
+        let engine = InMemoryEngine()
+        let reader = try engine.createTransaction()
+        let rows = try await reader.collectRange(
+            from: .firstGreaterThan([0x10]),
+            to: .firstGreaterOrEqual([0x20]),
+            snapshot: false
+        )
+        #expect(rows.isEmpty)
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([1], for: [0x10])
+        }
+
+        try await reader.commit()
+    }
+
+    @Test func complexSelector_usesConservativeConflictRange() async throws {
+        let engine = InMemoryEngine()
+        let reader = try engine.createTransaction()
+        let rows = try await reader.collectRange(
+            from: KeySelector(key: [0x10], orEqual: false, offset: 2),
+            to: KeySelector(key: [0x20], orEqual: false, offset: 3),
+            snapshot: false
+        )
+        #expect(rows.isEmpty)
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([1], for: [0xF0])
+        }
+
+        #expect(
+            await Self.commitOutcome(reader)
+                == .storageFailure(.transactionConflict)
+        )
+    }
+
+    @Test func concurrentAtomicOperationsToSameKey_allowExactlyOneCommit() async throws {
+        let engine = InMemoryEngine()
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([0], for: [0x10])
+        }
+        let first = try engine.createTransaction()
+        let second = try engine.createTransaction()
+        try first.atomicOp(key: [0x10], param: [1], mutationType: .add)
+        try second.atomicOp(key: [0x10], param: [1], mutationType: .add)
+
+        let outcomes = await commitConcurrently(first, second)
+
+        #expect(outcomes.filter { $0 == .success }.count == 1)
+        #expect(
+            outcomes.filter { $0 == .storageFailure(.transactionConflict) }.count == 1
+        )
+        #expect(try await readValue(engine, key: [0x10]) == [1])
+    }
+
+    @Test func concurrentClearRangeAndPointWrite_overlapConflicts() async throws {
+        let engine = InMemoryEngine()
+        let rangeWriter = try engine.createTransaction()
+        let pointWriter = try engine.createTransaction()
+        try rangeWriter.clearRange(beginKey: [0x10], endKey: [0x20])
+        try pointWriter.setValue([1], for: [0x15])
+
+        let outcomes = await commitConcurrently(rangeWriter, pointWriter)
+
+        #expect(outcomes.filter { $0 == .success }.count == 1)
+        #expect(
+            outcomes.filter { $0 == .storageFailure(.transactionConflict) }.count == 1
+        )
+    }
+
+    @Test func clearRangeEndBoundaryAndPointWrite_areDisjoint() async throws {
+        let engine = InMemoryEngine()
+        let rangeWriter = try engine.createTransaction()
+        let pointWriter = try engine.createTransaction()
+        try rangeWriter.clearRange(beginKey: [0x10], endKey: [0x20])
+        try pointWriter.setValue([1], for: [0x20])
+
+        let outcomes = await commitConcurrently(rangeWriter, pointWriter)
+
+        #expect(outcomes.filter { $0 == .success }.count == 2)
+        #expect(try await readValue(engine, key: [0x20]) == [1])
+    }
+
+    @Test func explicitReadConflictRange_detectsConcurrentWrite() async throws {
+        let engine = InMemoryEngine()
+        let protected = try engine.createTransaction()
+        try protected.addConflictRange(
+            beginKey: [0x10],
+            endKey: [0x20],
+            type: .read
+        )
+        try protected.setValue([9], for: [0x90])
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([1], for: [0x15])
+        }
+
+        #expect(
+            await Self.commitOutcome(protected)
+                == .storageFailure(.transactionConflict)
+        )
+        #expect(try await readValue(engine, key: [0x90]) == nil)
+    }
+
+    @Test func terminalTransactions_releaseRegistrationsAndPruneHistory() async throws {
+        let engine = InMemoryEngine()
+        let oldestTransaction = try engine.createTransaction()
+
+        for key: UInt8 in 1...3 {
+            try await engine.withTransaction { transaction in
+                try transaction.setValue([key], for: [key])
+            }
+        }
+
+        let retainedState = engine._store.withLock {
+            (
+                activeTransactions: $0.activeTransactionCount,
+                retainedVersions: $0.retainedConflictVersionCount
+            )
+        }
+        #expect(retainedState.activeTransactions == 1)
+        #expect(retainedState.retainedVersions == 3)
+
+        try await oldestTransaction.cancel()
+
+        let releasedState = engine._store.withLock {
+            (
+                activeTransactions: $0.activeTransactionCount,
+                retainedVersions: $0.retainedConflictVersionCount
+            )
+        }
+        #expect(releasedState.activeTransactions == 0)
+        #expect(releasedState.retainedVersions == 0)
+    }
+
+    @Test func mutationByteLimit_rejectsBeforeBufferAndConflictAdmission() async throws {
+        let engine = InMemoryEngine()
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([2], for: [0x20])
+            try transaction.setValue([3], for: [0x30])
+        }
+
+        let setTransaction = try engine.createTransaction()
+        try setTransaction.configureMutationByteLimit(maximumBytes: 18)
+        #expect(throws: TransactionMutationByteLimitError.self) {
+            try setTransaction.setValue([1], for: [0x10])
+        }
+        try await engine.withTransaction { competingTransaction in
+            try competingTransaction.setValue([7], for: [0x10])
+        }
+        try await setTransaction.commit()
+
+        let clearTransaction = try engine.createTransaction()
+        try await expectRejectedMutation(
+            maximumBytes: 9,
+            transaction: clearTransaction
+        ) {
+            try clearTransaction.clear(key: [0x20])
+        }
+
+        let clearRangeTransaction = try engine.createTransaction()
+        try await expectRejectedMutation(
+            maximumBytes: 18,
+            transaction: clearRangeTransaction
+        ) {
+            try clearRangeTransaction.clearRange(
+                beginKey: [0x20],
+                endKey: [0x40]
+            )
+        }
+
+        let atomicTransaction = try engine.createTransaction()
+        try await expectRejectedMutation(
+            maximumBytes: 22,
+            transaction: atomicTransaction
+        ) {
+            try atomicTransaction.atomicOp(
+                key: [0x30],
+                param: [1],
+                mutationType: .add
+            )
+        }
+
+        #expect(try await readValue(engine, key: [0x10]) == [7])
+        #expect(try await readValue(engine, key: [0x20]) == [2])
+        #expect(try await readValue(engine, key: [0x30]) == [3])
+    }
+
+    @Test func failedCommit_neverPublishesPartiallyAppliedWrites() async throws {
+        let engine = InMemoryEngine()
+        let transaction = try engine.createTransaction()
+        try transaction.setValue([1], for: [0x10])
+        try transaction.atomicOp(
+            key: [0x20],
+            param: [0],
+            mutationType: .setVersionstampedValue
+        )
+
+        let outcome = await Self.commitOutcome(transaction)
+
+        guard case .storageFailure(let code) = outcome else {
+            Issue.record("Expected a storage failure, got \(outcome)")
+            return
+        }
+        #expect(code == .invalidOperation)
+        #expect(try await readValue(engine, key: [0x10]) == nil)
+        #expect(try await readValue(engine, key: [0x20]) == nil)
+    }
+
+    @Test func conflictRetry_reexecutesAndPublishesOneLogicalEffect() async throws {
+        let engine = InMemoryEngine()
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([0], for: [0x10])
+        }
+
+        let attempts = try await runWithConflictRetry(
+            engine: engine,
+            maximumAttempts: 3
+        ) { transaction, attempt in
+            guard let value = try await transaction.getValue(for: [0x10]),
+                  let current = value.first else {
+                throw InMemoryCommitObservationError.missingCounter
+            }
+            if attempt == 1 {
+                try await engine.withTransaction { competingTransaction in
+                    try competingTransaction.setValue([10], for: [0x10])
+                }
+            }
+            try transaction.setValue([current + 1], for: [0x10])
+        }
+
+        #expect(attempts == 2)
+        #expect(try await readValue(engine, key: [0x10]) == [11])
     }
 
     // =========================================================================
@@ -389,7 +734,7 @@ struct InMemoryEngineTests {
     @Test func commitAppliesBufferToStore() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([42], for: [0x01])
+        try tx.setValue([42], for: [0x01])
         try await tx.commit()
         #expect(engine.count == 1)
     }
@@ -397,15 +742,15 @@ struct InMemoryEngineTests {
     @Test func cancelDiscards() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.setValue([42], for: [0x01])
-        tx.cancel()
+        try tx.setValue([42], for: [0x01])
+        try await tx.cancel()
         #expect(engine.count == 0)
     }
 
     @Test func cancelledTransactionThrowsOnGetValue() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.cancel()
+        try await tx.cancel()
         do {
             _ = try await tx.getValue(for: [0x01])
             Issue.record("Expected error")
@@ -420,7 +765,7 @@ struct InMemoryEngineTests {
     @Test func cancelledTransactionThrowsOnGetRange() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.cancel()
+        try await tx.cancel()
         do {
             let seq = tx.getRange(begin: [0x00], end: [0xFF], limit: 0, reverse: false)
             for try await _ in seq {
@@ -438,7 +783,7 @@ struct InMemoryEngineTests {
     @Test func cancelledTransactionThrowsOnCommit() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.cancel()
+        try await tx.cancel()
         do {
             try await tx.commit()
             Issue.record("Expected error")
@@ -450,27 +795,39 @@ struct InMemoryEngineTests {
         }
     }
 
-    @Test func writesAfterCancelAreSilentlyIgnored() async throws {
+    @Test func writesAfterCancelReportTerminalState() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
-        tx.cancel()
-        tx.setValue([42], for: [0x01])
-        tx.clear(key: [0x02])
-        tx.clearRange(beginKey: [0x03], endKey: [0x04])
+        try await tx.cancel()
+
+        for mutation in [
+            { try tx.setValue([42], for: [0x01]) },
+            { try tx.clear(key: [0x02]) },
+            { try tx.clearRange(beginKey: [0x03], endKey: [0x04]) },
+            { try tx.atomicOp(key: [0x05], param: [1], mutationType: .add) },
+        ] {
+            do {
+                try mutation()
+                Issue.record("Expected invalidOperation")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+            }
+        }
+
         #expect(engine.count == 0)
     }
 
     @Test func withTransaction_errorCausesRollback() async throws {
         let engine = InMemoryEngine()
 
-        struct TestError: Error {}
+        struct TransactionBodyFailure: Error {}
 
         do {
             try await engine.withTransaction { tx in
-                tx.setValue([42], for: [0x01])
-                throw TestError()
+                try tx.setValue([42], for: [0x01])
+                throw TransactionBodyFailure()
             }
-        } catch is TestError {}
+        } catch is TransactionBodyFailure {}
 
         #expect(engine.count == 0)
     }
@@ -479,7 +836,7 @@ struct InMemoryEngineTests {
         let engine = InMemoryEngine()
 
         try await engine.withTransaction { tx in
-            tx.setValue([42], for: [0x01])
+            try tx.setValue([42], for: [0x01])
         }
 
         #expect(engine.count == 1)
@@ -494,8 +851,8 @@ struct InMemoryEngineTests {
 
         try await engine.withTransaction { tx in
             for i: UInt16 in 0..<500 {
-                let key = withUnsafeBytes(of: i.bigEndian) { Array($0) }
-                tx.setValue(key, for: key)
+                let key = withUnsafeBytes(of: i.bigEndian) { Bytes($0) }
+                try tx.setValue(key, for: key)
             }
         }
 
@@ -521,7 +878,7 @@ struct InMemoryEngineTests {
             for i: UInt8 in 0..<10 {
                 group.addTask {
                     try await engine.withTransaction { tx in
-                        tx.setValue([i], for: [i])
+                        try tx.setValue([i], for: [i])
                     }
                 }
             }
@@ -540,15 +897,164 @@ struct InMemoryEngineTests {
         let spaceB = Subspace("beta")
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: spaceA.pack(Tuple(Int64(1))))
-            tx.setValue([2], for: spaceA.pack(Tuple(Int64(2))))
-            tx.setValue([3], for: spaceB.pack(Tuple(Int64(1))))
+            try tx.setValue([1], for: spaceA.pack(Tuple(Int64(1))))
+            try tx.setValue([2], for: spaceA.pack(Tuple(Int64(2))))
+            try tx.setValue([3], for: spaceB.pack(Tuple(Int64(1))))
         }
 
         try await engine.withTransaction { tx in
             let (begin, end) = spaceA.range()
             let range = try await collectRange(tx, begin: begin, end: end)
             #expect(range.count == 2)
+        }
+    }
+
+    private func readValue(
+        _ engine: InMemoryEngine,
+        key: Bytes
+    ) async throws -> Bytes? {
+        let transaction = try engine.createTransaction()
+        let value = try await transaction.getValue(for: key, snapshot: true)
+        try await transaction.commit()
+        return value
+    }
+
+    private func commitConcurrently(
+        _ first: InMemoryTransaction,
+        _ second: InMemoryTransaction
+    ) async -> [InMemoryCommitOutcome] {
+        let barrier = InMemoryCommitBarrier(participantCount: 2)
+        return await withTaskGroup(of: InMemoryCommitOutcome.self) { group in
+            group.addTask {
+                await barrier.arriveAndWait()
+                return await Self.commitOutcome(first)
+            }
+            group.addTask {
+                await barrier.arriveAndWait()
+                return await Self.commitOutcome(second)
+            }
+            var outcomes: [InMemoryCommitOutcome] = []
+            outcomes.reserveCapacity(2)
+            for await outcome in group {
+                outcomes.append(outcome)
+            }
+            return outcomes
+        }
+    }
+
+    private static func commitOutcome(
+        _ transaction: InMemoryTransaction
+    ) async -> InMemoryCommitOutcome {
+        do {
+            try await transaction.commit()
+            return .success
+        } catch let error as StorageError {
+            return .storageFailure(error.code)
+        } catch {
+            return .unexpectedFailure(String(describing: error))
+        }
+    }
+
+    private func runWithConflictRetry(
+        engine: InMemoryEngine,
+        maximumAttempts: Int,
+        operation: (InMemoryTransaction, Int) async throws -> Void
+    ) async throws -> Int {
+        precondition(maximumAttempts > 0)
+        for attempt in 1...maximumAttempts {
+            let transaction = try engine.createTransaction()
+            do {
+                try await operation(transaction, attempt)
+                try await transaction.commit()
+                return attempt
+            } catch let error as StorageError
+                where error.code == .transactionConflict {
+                let conflictError = error
+                do {
+                    try await transaction.cancel()
+                } catch {
+                    throw StorageTransactionCleanupError(
+                        operationError: conflictError,
+                        cancellationError: error
+                    )
+                }
+                if attempt == maximumAttempts {
+                    throw conflictError
+                }
+            } catch {
+                let operationError = error
+                do {
+                    try await transaction.cancel()
+                } catch {
+                    throw StorageTransactionCleanupError(
+                        operationError: operationError,
+                        cancellationError: error
+                    )
+                }
+                throw operationError
+            }
+        }
+        preconditionFailure("Retry loop exhausted without returning or throwing")
+    }
+
+    private func expectRejectedMutation(
+        maximumBytes: Int,
+        transaction: InMemoryTransaction,
+        mutation: () throws -> Void
+    ) async throws {
+        try transaction.configureMutationByteLimit(
+            maximumBytes: maximumBytes
+        )
+        #expect(throws: TransactionMutationByteLimitError.self) {
+            try mutation()
+        }
+        try await transaction.commit()
+    }
+}
+
+private enum InMemoryCommitOutcome: Sendable, Equatable, CustomStringConvertible {
+    case success
+    case storageFailure(StorageError.Code)
+    case unexpectedFailure(String)
+
+    var description: String {
+        switch self {
+        case .success:
+            return "success"
+        case .storageFailure(let code):
+            return "storageFailure(\(code.rawValue))"
+        case .unexpectedFailure(let description):
+            return "unexpectedFailure(\(description))"
+        }
+    }
+}
+
+private enum InMemoryCommitObservationError: Error {
+    case missingCounter
+}
+
+private actor InMemoryCommitBarrier {
+    private let participantCount: Int
+    private var arrivalCount = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(participantCount: Int) {
+        precondition(participantCount > 0)
+        self.participantCount = participantCount
+    }
+
+    func arriveAndWait() async {
+        arrivalCount += 1
+        if arrivalCount == participantCount {
+            let readyWaiters = waiters
+            waiters.removeAll(keepingCapacity: false)
+            for waiter in readyWaiters {
+                waiter.resume()
+            }
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
         }
     }
 }

@@ -1,26 +1,23 @@
 # Cloudflare Durable Object Storage Host
 
-This Worker exposes the `StorageKit` binary storage protocol on top of Durable
+This Worker exposes `StorageKit Wire v1` on top of Durable
 Object SQLite.
 
 ```mermaid
 flowchart LR
-  Client["StorageKit binary client"] --> Worker["Worker fetch"]
+  Client["StorageKit Wire client"] --> Worker["Worker fetch"]
   Worker --> Auth["Bearer authorization"]
   Auth --> Limit["bounded request body"]
   Limit --> Route["databaseID / tenantID / workspaceID routing"]
   Route --> DO["Durable Object"]
   DO --> SQLite["ctx.storage.sql"]
-  DO -. optional .-> WASM["StorageKit WASM mutation applier"]
 ```
 
 ## Runtime Boundary
 
-Swift WASM is the storage-compatible execution kernel. JavaScript remains the
-Cloudflare host layer because Workers and Durable Objects expose `fetch`,
-bindings, secrets, request streams, and `ctx.storage.sql` through the JavaScript
-runtime. Keep this layer thin: it should route requests, enforce limits,
-authorize callers, and bridge to Durable Object SQLite.
+The full database runtime consumes this storage service through StorageKit Wire.
+JavaScript owns Cloudflare request routing, limits, authorization, and Durable
+Object SQLite host operations; database semantics remain in the Swift runtime.
 
 ## Scope Routing
 
@@ -53,7 +50,7 @@ deploy:
 wrangler secret put STORAGEKIT_ACCESS_TOKEN
 ```
 
-`STORAGEKIT_MAX_REQUEST_BYTES` controls the maximum accepted binary request
+`STORAGEKIT_MAX_REQUEST_BYTES` controls the maximum accepted StorageKit Wire request
 size. The default configured value is `4194304`.
 
 ## Storage Semantics

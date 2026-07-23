@@ -1,31 +1,45 @@
 import StorageKitEmbeddedCore
 
 public struct CloudflareDurableObjectEmbeddedReadResponse: Sendable, Hashable {
-    public let value: [UInt8]?
+    public let value: EmbeddedBytes?
     public let currentCommitVersion: Int64
 
-    public init(value: [UInt8]?, currentCommitVersion: Int64) {
+    public init(value: EmbeddedBytes?, currentCommitVersion: Int64) {
         self.value = value
         self.currentCommitVersion = currentCommitVersion
     }
 
-    func encode(into writer: inout EmbeddedBinaryWriter) throws(CloudflareDurableObjectEmbeddedError) {
+    func encode(into writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) {
         if let value {
             writer.writeBool(true)
-            try CloudflareDurableObjectEmbeddedError.writeBytes(value, into: &writer)
+            try CloudflareDurableObjectEmbeddedError.writeBytes(
+                value,
+                maximum: EmbeddedLimits.cloudflareDurableObject.maxValueBytes,
+                into: &writer
+            )
         } else {
             writer.writeBool(false)
+        }
+        guard currentCommitVersion >= 0 else {
+            throw .invalidVersion(currentCommitVersion)
         }
         writer.writeInt64(currentCommitVersion)
     }
 
-    init(from reader: inout EmbeddedBinaryReader) throws(CloudflareDurableObjectEmbeddedError) {
+    init(from reader: inout EmbeddedWireReader) throws(CloudflareDurableObjectEmbeddedError) {
         let hasValue = try CloudflareDurableObjectEmbeddedError.readBool(from: &reader)
         if hasValue {
-            self.value = try CloudflareDurableObjectEmbeddedError.readBytes(from: &reader)
+            self.value = try CloudflareDurableObjectEmbeddedError.readBytes(
+                from: &reader,
+                maximum: EmbeddedLimits.cloudflareDurableObject.maxValueBytes
+            )
         } else {
             self.value = nil
         }
-        self.currentCommitVersion = try CloudflareDurableObjectEmbeddedError.readInt64(from: &reader)
+        let version = try CloudflareDurableObjectEmbeddedError.readInt64(from: &reader)
+        guard version >= 0 else {
+            throw .invalidVersion(version)
+        }
+        self.currentCommitVersion = version
     }
 }

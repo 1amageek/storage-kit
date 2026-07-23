@@ -350,7 +350,7 @@ struct VersionstampTests {
         #expect(vs.description == "Versionstamp(incomplete, user:0)")
     }
 
-    // MARK: - Binary Format Verification
+    // MARK: - Versionstamp Encoding Verification
 
     @Test func typeCode() {
         #expect(TupleTypeCode.versionstamp.rawValue == 0x33)

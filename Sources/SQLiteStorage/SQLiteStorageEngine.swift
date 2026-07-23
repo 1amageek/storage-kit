@@ -1,31 +1,13 @@
 import StorageKit
-import Foundation
 import Synchronization
 
-/// SQLite backend StorageEngine implementation.
+/// SQLite `StorageEngine` with lazily acquired FIFO transaction leases.
 ///
-/// Uses a `WITHOUT ROWID` table for efficient BLOB primary key B-tree storage.
-/// SQLite is single-writer, so transactions are serialized with `NSLock`.
-///
-/// ## Nested Transaction Safety
-///
-/// SQLite does not support concurrent transactions on a single connection.
-/// This engine uses `ActiveTransactionScope` (TaskLocal) to detect nested
-/// calls without acquiring a second writer lock. Nested `withTransaction()`
-/// reuses the active transaction. Nested `createTransaction()` returns a
-/// buffered child transaction whose commit merges into the parent and whose
-/// cancel only discards child writes.
-///
-/// ## Usage
-/// ```swift
-/// // File-based
-/// let engine = try SQLiteStorageEngine(configuration: .file("/path/to/db.sqlite"))
-///
-/// // In-memory (for testing)
-/// let engine = try SQLiteStorageEngine(configuration: .inMemory)
-/// ```
+/// Synchronous mutations are buffered without acquiring SQLite. The first
+/// async read, range iteration, maintenance operation, or commit enters the
+/// coordinator actor, which owns `BEGIN IMMEDIATE` through terminal cleanup.
+/// Nested transactions use native savepoints and strict LIFO ordering.
 public final class SQLiteStorageEngine: StorageEngine, Sendable {
-
     public struct Configuration: Sendable {
         public var path: String
 
@@ -33,12 +15,10 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
             self.path = path
         }
 
-        /// File-based database.
         public static func file(_ path: String) -> Configuration {
             Configuration(path: path)
         }
 
-        /// In-memory database (for testing).
         public static var inMemory: Configuration {
             Configuration(path: ":memory:")
         }
@@ -46,58 +26,120 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
 
     public typealias TransactionType = SQLiteStorageTransaction
 
-    private let transactionLock = NSLock()
+    private struct EngineState: Sendable {
+        var nextTransactionIdentifier: UInt64 = 1
+    }
+
     private let connection: SQLiteConnectionHandle
+    private let lifetime: SQLiteStorageLifetime
+    private let coordinator: SQLiteTransactionCoordinator
+    private let state = Mutex(EngineState())
 
     public init(configuration: Configuration) throws {
-        self.connection = try SQLiteConnectionHandle(path: configuration.path)
+        let connection = try SQLiteConnectionHandle(path: configuration.path)
+        let lifetime = SQLiteStorageLifetime()
+        self.connection = connection
+        self.lifetime = lifetime
+        self.coordinator = SQLiteTransactionCoordinator(
+            connection: connection,
+            lifetime: lifetime
+        )
     }
 
     public func createTransaction() throws -> SQLiteStorageTransaction {
-        // Detect nested call via TaskLocal and return a buffered child.
-        if let existing = ActiveTransactionScope.current as? SQLiteStorageTransaction {
-            return SQLiteStorageTransaction(parent: existing)
+        guard !lifetime.isClosed else {
+            throw Self.closedError(operation: .beginTransaction)
+        }
+        let identifier = try allocateTransactionIdentifier()
+
+        if let existing = ActiveTransactionScope.current
+            as? SQLiteStorageTransaction,
+           existing.belongs(to: lifetime) {
+            return try existing.makeChild(identifier: identifier)
         }
 
-        transactionLock.lock()
-        do {
-            try connection.execute("BEGIN IMMEDIATE", operation: .beginTransaction)
-        } catch {
-            transactionLock.unlock()
-            throw error
-        }
-        return SQLiteStorageTransaction(connection: connection, lock: transactionLock)
+        return SQLiteStorageTransaction(
+            identifier: identifier,
+            coordinator: coordinator,
+            connection: connection,
+            lifetime: lifetime
+        )
     }
 
     public func withTransaction<T: Sendable>(
         _ operation: (any Transaction) async throws -> T
     ) async throws -> T {
-        // Detect nested call via TaskLocal — reuse existing transaction
-        if let existing = ActiveTransactionScope.current {
-            return try await operation(existing)
-        }
-
-        let tx = try createTransaction()
-        return try await ActiveTransactionScope.$current.withValue(tx) {
+        let transaction = try createTransaction()
+        return try await ActiveTransactionScope.$current.withValue(transaction) {
             do {
-                let result = try await operation(tx)
-                try await tx.commit()
+                let result = try await operation(transaction)
+                try await transaction.commit()
                 return result
             } catch {
-                tx.cancel()
-                throw error
+                let operationError = error
+                do {
+                    try await transaction.cancel()
+                } catch {
+                    throw StorageTransactionCleanupError(
+                        operationError: operationError,
+                        cancellationError: error
+                    )
+                }
+                throw operationError
             }
         }
     }
 
-    /// Closes the database connection.
+    /// Closes the connection and wakes every queued lease waiter with a typed
+    /// failure. Closing is idempotent.
     public func close() {
-        transactionLock.lock()
-        defer { transactionLock.unlock() }
+        guard lifetime.close() else { return }
         connection.close()
+        let coordinator = coordinator
+        Task {
+            await coordinator.shutdown()
+        }
     }
 
     public func shutdown() {
         close()
+    }
+
+    var rangeInstrumentation: SQLiteRangeInstrumentation {
+        connection.rangeInstrumentation
+    }
+
+    var leaseInstrumentation: SQLiteLeaseInstrumentation {
+        get async {
+            await coordinator.leaseInstrumentation
+        }
+    }
+
+    private func allocateTransactionIdentifier() throws -> UInt64 {
+        try state.withLock { state in
+            let identifier = state.nextTransactionIdentifier
+            let (next, overflow) = identifier.addingReportingOverflow(1)
+            guard !overflow else {
+                throw StorageError(
+                    code: .resourceUnavailable,
+                    operation: .beginTransaction,
+                    backend: .sqlite,
+                    message: "SQLite transaction identifier space is exhausted"
+                )
+            }
+            state.nextTransactionIdentifier = next
+            return identifier
+        }
+    }
+
+    private static func closedError(
+        operation: StorageOperation
+    ) -> StorageError {
+        StorageError(
+            code: .invalidOperation,
+            operation: operation,
+            backend: .sqlite,
+            message: "SQLite storage engine is closed"
+        )
     }
 }

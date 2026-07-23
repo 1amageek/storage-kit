@@ -5,11 +5,17 @@ import { rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
 import {
-  keySelectorKind,
   mutationType,
   operation,
   statusCode,
 } from "../src/StorageKitWireConstants.js";
+
+const keySelectorKind = Object.freeze({
+  firstGreaterOrEqual: "firstGreaterOrEqual",
+  firstGreaterThan: "firstGreaterThan",
+  lastLessOrEqual: "lastLessOrEqual",
+  lastLessThan: "lastLessThan",
+});
 
 const host = process.env.STORAGEKIT_SMOKE_HOST ?? "127.0.0.1";
 const port = Number(process.env.STORAGEKIT_SMOKE_PORT ?? "18787");
@@ -38,7 +44,7 @@ try {
   await waitForWorker();
   await smokeHttpGuards();
   await smokeReadiness();
-  await smokeWasmAtomicReadRangeAndPagination();
+  await smokeAtomicReadRangeAndPagination();
   await smokeQuerySelectorMatrix();
   await smokeBytewisePrefixQuery();
   await smokeClearRangeAndReverseRange();
@@ -122,7 +128,7 @@ async function smokeReadiness() {
   assert.equal(response.metadataInitialized, true);
 }
 
-async function smokeWasmAtomicReadRangeAndPagination() {
+async function smokeAtomicReadRangeAndPagination() {
   const testScope = scope("atomic-range");
   expectOk(await send({
     operation: operation.commit,
@@ -149,32 +155,32 @@ async function smokeWasmAtomicReadRangeAndPagination() {
   response = expectOk(await send({
     operation: operation.range,
     scope: testScope,
-    begin: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x01) },
-    end: { kind: keySelectorKind.firstGreaterThan, key: bytes(0x03) },
+    begin: selector(keySelectorKind.firstGreaterOrEqual, [0x01]),
+    end: selector(keySelectorKind.firstGreaterThan, [0x03]),
     limit: 2,
     reverse: false,
     snapshot: false,
     expectedReadVersion: 1n,
-    cursor: null,
+    cursorKey: null,
   }));
   assert.deepEqual(response.rows.map((row) => [...row.key]), [[0x01], [0x02]]);
-  assert.notEqual(response.nextCursor, null);
-  assert.deepEqual([...response.conflictRange.begin], [0x01]);
-  assert.deepEqual([...response.conflictRange.end], [0x03, 0x00]);
+  assert.equal(response.hasMore, true);
+  assert.deepEqual([...onlyConflictRange(response).begin], [0x01]);
+  assert.deepEqual([...onlyConflictRange(response).end], [0x03, 0x00]);
 
   response = expectOk(await send({
     operation: operation.range,
     scope: testScope,
-    begin: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x01) },
-    end: { kind: keySelectorKind.firstGreaterThan, key: bytes(0x03) },
+    begin: selector(keySelectorKind.firstGreaterOrEqual, [0x01]),
+    end: selector(keySelectorKind.firstGreaterThan, [0x03]),
     limit: 2,
     reverse: false,
     snapshot: false,
     expectedReadVersion: 1n,
-    cursor: response.nextCursor,
+    cursorKey: response.rows[response.rows.length - 1].key,
   }));
   assert.deepEqual(response.rows.map((row) => [...row.key]), [[0x03]]);
-  assert.equal(response.nextCursor, null);
+  assert.equal(response.hasMore, false);
 }
 
 async function smokeQuerySelectorMatrix() {
@@ -233,7 +239,7 @@ async function smokeQuerySelectorMatrix() {
   for (const pattern of patterns) {
     const response = expectOk(await send(rangeRequest(testScope, pattern)));
     assertRangeKeys(response, pattern.expected);
-    assert.equal(response.nextCursor, null);
+    assert.equal(response.hasMore, false);
   }
 
   let page = expectOk(await send(rangeRequest(testScope, {
@@ -243,27 +249,27 @@ async function smokeQuerySelectorMatrix() {
     reverse: true,
   })));
   assertRangeKeys(page, [[0x50], [0x40]]);
-  assert.notEqual(page.nextCursor, null);
+  assert.equal(page.hasMore, true);
 
   page = expectOk(await send(rangeRequest(testScope, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterThan, [0x50]),
     limit: 2,
     reverse: true,
-    cursor: page.nextCursor,
+    cursorKey: page.rows[page.rows.length - 1].key,
   })));
   assertRangeKeys(page, [[0x30], [0x20]]);
-  assert.notEqual(page.nextCursor, null);
+  assert.equal(page.hasMore, true);
 
   page = expectOk(await send(rangeRequest(testScope, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterThan, [0x50]),
     limit: 2,
     reverse: true,
-    cursor: page.nextCursor,
+    cursorKey: page.rows[page.rows.length - 1].key,
   })));
   assertRangeKeys(page, [[0x10]]);
-  assert.equal(page.nextCursor, null);
+  assert.equal(page.hasMore, false);
 
   const snapshotResponse = expectOk(await send(rangeRequest(testScope, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
@@ -317,26 +323,26 @@ async function smokeClearRangeAndReverseRange() {
   let response = expectOk(await send({
     operation: operation.range,
     scope: testScope,
-    begin: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x01) },
-    end: { kind: keySelectorKind.firstGreaterThan, key: bytes(0x04) },
+    begin: selector(keySelectorKind.firstGreaterOrEqual, [0x01]),
+    end: selector(keySelectorKind.firstGreaterThan, [0x04]),
     limit: 10,
     reverse: false,
     snapshot: false,
     expectedReadVersion: 1n,
-    cursor: null,
+    cursorKey: null,
   }));
   assert.deepEqual(response.rows.map((row) => [...row.key]), [[0x01], [0x04]]);
 
   response = expectOk(await send({
     operation: operation.range,
     scope: testScope,
-    begin: { kind: keySelectorKind.firstGreaterOrEqual, key: bytes(0x01) },
-    end: { kind: keySelectorKind.firstGreaterThan, key: bytes(0x04) },
+    begin: selector(keySelectorKind.firstGreaterOrEqual, [0x01]),
+    end: selector(keySelectorKind.firstGreaterThan, [0x04]),
     limit: 10,
     reverse: true,
     snapshot: false,
     expectedReadVersion: 1n,
-    cursor: null,
+    cursorKey: null,
   }));
   assert.deepEqual(response.rows.map((row) => [...row.key]), [[0x04], [0x01]]);
 }
@@ -463,8 +469,8 @@ async function smokeRangeConflictGaps() {
     expectedReadVersion: 1n,
   })));
   assert.deepEqual(rangeResponse.rows.map((row) => [...row.key]), [[0x15]]);
-  assert.deepEqual([...rangeResponse.conflictRange.begin], [0x10]);
-  assert.deepEqual([...rangeResponse.conflictRange.end], [0x20]);
+  assert.deepEqual([...onlyConflictRange(rangeResponse).begin], [0x10]);
+  assert.deepEqual([...onlyConflictRange(rangeResponse).end], [0x20]);
 
   expectOk(await send({
     operation: operation.commit,
@@ -483,7 +489,7 @@ async function smokeRangeConflictGaps() {
     mutations: [
       { tag: 1, key: bytes(0x40), value: bytes(40) },
     ],
-    readConflictRanges: [rangeResponse.conflictRange],
+    readConflictRanges: rangeResponse.readConflictRanges,
   }));
   assert.equal(commitResponse.committedVersion, 3n);
 
@@ -521,7 +527,7 @@ async function smokeRangeConflictGaps() {
     mutations: [
       { tag: 1, key: bytes(0x40), value: bytes(40) },
     ],
-    readConflictRanges: [rangeResponse.conflictRange],
+    readConflictRanges: rangeResponse.readConflictRanges,
   });
   assert.equal(commitResponse.status, statusCode.transactionConflict);
 }
@@ -607,7 +613,7 @@ function rangeRequest(testScope, {
   reverse = false,
   snapshot = false,
   expectedReadVersion = 1n,
-  cursor = null,
+  cursorKey = null,
 }) {
   return {
     operation: operation.range,
@@ -618,15 +624,23 @@ function rangeRequest(testScope, {
     reverse,
     snapshot,
     expectedReadVersion,
-    cursor,
+    cursorKey,
   };
 }
 
 function selector(kind, key) {
-  return {
-    kind,
-    key: bytes(...key),
-  };
+  switch (kind) {
+    case keySelectorKind.firstGreaterOrEqual:
+      return { key: bytes(...key), orEqual: false, offset: 1n };
+    case keySelectorKind.firstGreaterThan:
+      return { key: bytes(...key), orEqual: true, offset: 1n };
+    case keySelectorKind.lastLessOrEqual:
+      return { key: bytes(...key), orEqual: true, offset: 0n };
+    case keySelectorKind.lastLessThan:
+      return { key: bytes(...key), orEqual: false, offset: 0n };
+    default:
+      throw new Error(`Unknown selector kind: ${kind}`);
+  }
 }
 
 function assertRangeKeys(response, expected) {
@@ -650,6 +664,11 @@ function singleKeyRange(key) {
   end.set(key, 0);
   end[key.length] = 0;
   return { begin: key, end };
+}
+
+function onlyConflictRange(response) {
+  assert.equal(response.readConflictRanges.length, 1);
+  return response.readConflictRanges[0];
 }
 
 function delay(milliseconds) {

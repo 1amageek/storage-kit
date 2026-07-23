@@ -12,10 +12,12 @@
 /// Required methods: `getValue`, `getRange`, `setValue`, `clear`, `clearRange`,
 /// `atomicOp`, `commit`, `cancel`.
 /// Others have default implementations provided via extension (non-FDB backends are automatically covered).
+/// Every production backend must own one `TransactionMutationByteMeter` per
+/// transaction attempt and record accepted writes before buffering or
+/// dispatching them.
 ///
-/// `atomicOp` must be implemented by every backend. Non-FDB backends buffer the
-/// mutation and apply it via `MutationType.apply(to:param:)`; versionstamp
-/// mutations surface an error at the first read/flush/commit that touches them.
+/// `atomicOp` must be implemented by every backend. Backends that support
+/// versionstamp mutations materialize them with the transaction's commit version.
 public protocol Transaction: Sendable {
 
     // MARK: - Associated type (zero-copy getRange)
@@ -25,8 +27,19 @@ public protocol Transaction: Sendable {
     /// FDB: `FDB.AsyncKVSequence` (lazy batch fetching)
     /// SQLite: cursor-based AsyncSequence
     /// InMemory: array-based AsyncSequence
-    associatedtype RangeResult: AsyncSequence & Sendable
-        where RangeResult.Element == (Bytes, Bytes)
+    associatedtype RangeResult: TransactionRangeResult
+
+    /// Optional semantics implemented by this concrete backend.
+    var capabilities: TransactionCapabilities { get }
+
+    /// The configured portable logical mutation limit, if this transaction is
+    /// bounded. A non-nil value must remain attached to the transaction when it
+    /// crosses task boundaries.
+    var mutationByteLimit: Int? { get }
+
+    /// Configures mutation admission before the transaction accepts writes.
+    /// Production backends must implement this with transaction-owned state.
+    func configureMutationByteLimit(maximumBytes: Int?) throws
 
     // MARK: - Read
 
@@ -65,17 +78,17 @@ public protocol Transaction: Sendable {
     // MARK: - Write
 
     /// Set a value for a key (overwrites existing value).
-    func setValue(_ value: Bytes, for key: Bytes)
+    func setValue(_ value: Bytes, for key: Bytes) throws
 
     /// Delete a key.
-    func clear(key: Bytes)
+    func clear(key: Bytes) throws
 
     /// Delete all keys within a range.
     ///
     /// - Parameters:
     ///   - beginKey: Start key (inclusive).
     ///   - endKey: End key (exclusive).
-    func clearRange(beginKey: Bytes, endKey: Bytes)
+    func clearRange(beginKey: Bytes, endKey: Bytes) throws
 
     // MARK: - Atomic Operations
 
@@ -85,20 +98,20 @@ public protocol Transaction: Sendable {
     ///   - key: The target key.
     ///   - param: Operation parameter (operation-dependent byte array).
     ///   - mutationType: The type of mutation operation.
-    func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType)
+    func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) throws
 
     // MARK: - Transaction Control
 
     /// Commit the transaction.
     func commit() async throws
 
-    /// Cancel the transaction (discards uncommitted changes).
-    func cancel()
+    /// Cancel the transaction and wait until backend cleanup is authoritative.
+    func cancel() async throws
 
     // MARK: - Version Management
 
     /// Set the read version (e.g. restoring from cache).
-    func setReadVersion(_ version: Int64)
+    func setReadVersion(_ version: Int64) throws
 
     /// Get the read version of this transaction.
     func getReadVersion() async throws -> Int64
@@ -129,11 +142,16 @@ public protocol Transaction: Sendable {
 
     // MARK: - Statistics
 
-    /// Get the estimated byte size of a key range.
+    /// Get the byte-size metric for a key range in the transaction view.
+    /// Pending mutations are included.
     func getEstimatedRangeSizeBytes(beginKey: Bytes, endKey: Bytes) async throws -> Int
 
-    /// Get split points that divide a key range into chunks of the specified size.
-    func getRangeSplitPoints(beginKey: Bytes, endKey: Bytes, chunkSize: Int) async throws -> [[UInt8]]
+    /// Get split points for the transaction view, including pending mutations.
+    func getRangeSplitPoints(
+        beginKey: Bytes,
+        endKey: Bytes,
+        chunkSize: Int
+    ) async throws -> [Bytes]
 
     // MARK: - Versionstamp
 
@@ -144,6 +162,22 @@ public protocol Transaction: Sendable {
 // MARK: - Convenience (default parameters)
 
 extension Transaction {
+
+    /// Backends expose no optional semantics unless they declare them.
+    public var capabilities: TransactionCapabilities { .none }
+
+    /// Custom backends fail closed when a bounded transaction is requested but
+    /// they have not implemented transaction-owned mutation admission.
+    public var mutationByteLimit: Int? { nil }
+
+    public func configureMutationByteLimit(maximumBytes: Int?) throws {
+        guard maximumBytes == nil else {
+            throw StorageError.unsupportedOperation(
+                "Transaction backend does not implement mutation byte admission",
+                operation: .beginTransaction
+            )
+        }
+    }
 
     /// Convenience with snapshot defaulting to false.
     ///
@@ -185,33 +219,6 @@ extension Transaction {
         )
     }
 
-    // MARK: - FDB Legacy compatible overloads
-
-    /// FDB TransactionProtocol compatible: beginSelector/endSelector labels.
-    public func getRange(
-        beginSelector: KeySelector, endSelector: KeySelector,
-        snapshot: Bool = false
-    ) -> RangeResult {
-        getRange(
-            from: beginSelector, to: endSelector,
-            limit: 0, reverse: false,
-            snapshot: snapshot, streamingMode: .wantAll
-        )
-    }
-
-    /// FDB TransactionProtocol compatible: beginKey/endKey labels.
-    public func getRange(
-        beginKey: Bytes, endKey: Bytes,
-        snapshot: Bool = false
-    ) -> RangeResult {
-        getRange(
-            from: .firstGreaterOrEqual(beginKey),
-            to: .firstGreaterOrEqual(endKey),
-            limit: 0, reverse: false,
-            snapshot: snapshot, streamingMode: .wantAll
-        )
-    }
-
     // MARK: - Collecting (type-safe even via any Transaction)
 
     /// A collecting convenience that is type-safe even via `any Transaction`.
@@ -224,12 +231,12 @@ extension Transaction {
         snapshot: Bool = false, streamingMode: StreamingMode = .wantAll
     ) async throws -> [(Bytes, Bytes)] {
         var result: [(Bytes, Bytes)] = []
-        for try await pair in getRange(
+        try await forEachInRange(
             from: begin, to: end,
             limit: limit, reverse: reverse,
             snapshot: snapshot, streamingMode: streamingMode
-        ) {
-            result.append(pair)
+        ) { key, value in
+            result.append((key, value))
         }
         return result
     }
@@ -260,13 +267,12 @@ extension Transaction {
         snapshot: Bool = false, streamingMode: StreamingMode = .wantAll,
         body: (Bytes, Bytes) async throws -> Void
     ) async throws {
-        for try await (key, value) in getRange(
+        let rows = getRange(
             from: begin, to: end,
             limit: limit, reverse: reverse,
             snapshot: snapshot, streamingMode: streamingMode
-        ) {
-            try await body(key, value)
-        }
+        )
+        try await rows.consumeRows(body)
     }
 
     // MARK: - setOption String compatible
@@ -277,7 +283,7 @@ extension Transaction {
     }
 }
 
-// MARK: - Default Implementations
+// MARK: - Default Transaction Behavior
 
 /// Default implementations for non-FDB backends.
 ///
@@ -285,50 +291,161 @@ extension Transaction {
 /// commit, cancel) must be implemented by each backend. The rest work with defaults.
 extension Transaction {
 
-    /// Default: implements getKey via getRange (snapshot defaults to false).
+    /// Default: implements getKey with adjacent selectors, without assuming a
+    /// maximum sentinel key for the backend keyspace.
     public func getKey(selector: KeySelector, snapshot: Bool = false) async throws -> Bytes? {
-        // firstGreaterOrEqual / firstGreaterThan: fetch 1 entry from the start key
-        let seq = getRange(
+        let (nextOffset, overflow) = selector.offset.addingReportingOverflow(1)
+        guard !overflow else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: .rangeRead,
+                message: "KeySelector offset cannot be advanced"
+            )
+        }
+        var result: Bytes?
+        try await forEachInRange(
             from: selector,
-            to: KeySelector(key: [0xFF], orEqual: true, offset: 1),
+            to: KeySelector(
+                key: selector.key,
+                orEqual: selector.orEqual,
+                offset: nextOffset
+            ),
             limit: 1,
             reverse: false,
             snapshot: snapshot,
             streamingMode: .exact
-        )
-        for try await (key, _) in seq {
-            return key
+        ) { key, _ in
+            result = key
         }
-        return nil
+        return result
     }
 
-    /// Default: no-op.
-    public func setReadVersion(_ version: Int64) {}
+    /// Default: the backend does not expose historical read versions.
+    public func setReadVersion(_ version: Int64) throws {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not support setting a read version",
+            operation: .read
+        )
+    }
 
-    /// Default: returns 0.
-    public func getReadVersion() async throws -> Int64 { 0 }
+    /// Default: the backend does not expose a read version.
+    public func getReadVersion() async throws -> Int64 {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not expose a read version",
+            operation: .read
+        )
+    }
 
-    /// Default: returns 0.
-    public func getCommittedVersion() throws -> Int64 { 0 }
+    /// Default: the backend does not expose a committed version.
+    public func getCommittedVersion() throws -> Int64 {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not expose a committed version",
+            operation: .read
+        )
+    }
 
-    /// Default: no-op.
-    public func setOption(forOption option: TransactionOption) throws {}
+    /// Default: options must be implemented explicitly by a backend.
+    public func setOption(forOption option: TransactionOption) throws {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not support transaction options",
+            operation: .execute
+        )
+    }
 
-    /// Default: no-op.
-    public func setOption(to value: Bytes?, forOption option: TransactionOption) throws {}
+    /// Default: options must be implemented explicitly by a backend.
+    public func setOption(to value: Bytes?, forOption option: TransactionOption) throws {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not support byte-valued transaction options",
+            operation: .execute
+        )
+    }
 
-    /// Default: no-op.
-    public func setOption(to value: Int, forOption option: TransactionOption) throws {}
+    /// Default: options must be implemented explicitly by a backend.
+    public func setOption(to value: Int, forOption option: TransactionOption) throws {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not support integer-valued transaction options",
+            operation: .execute
+        )
+    }
 
-    /// Default: no-op (single-writer has no conflicts).
-    public func addConflictRange(beginKey: Bytes, endKey: Bytes, type: ConflictRangeType) throws {}
+    /// Default: conflict tracking must be implemented explicitly by a backend.
+    public func addConflictRange(
+        beginKey: Bytes,
+        endKey: Bytes,
+        type: ConflictRangeType
+    ) throws {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not support explicit conflict ranges",
+            operation: .write
+        )
+    }
 
-    /// Default: returns 0.
-    public func getEstimatedRangeSizeBytes(beginKey: Bytes, endKey: Bytes) async throws -> Int { 0 }
+    /// Default: computes the exact stored key and value byte count by scanning
+    /// the transaction view. Backends may use a native implementation when no
+    /// pending mutations can change the result.
+    public func getEstimatedRangeSizeBytes(
+        beginKey: Bytes,
+        endKey: Bytes
+    ) async throws -> Int {
+        guard compareBytes(beginKey, endKey) <= 0 else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: .rangeRead,
+                message: "Range size boundaries are not ordered"
+            )
+        }
+        return try await StorageRangeMetrics.exactSize(
+            getRange(
+                begin: beginKey,
+                end: endKey,
+                snapshot: true,
+                streamingMode: .wantAll
+            )
+        )
+    }
 
-    /// Default: returns an empty array.
-    public func getRangeSplitPoints(beginKey: Bytes, endKey: Bytes, chunkSize: Int) async throws -> [[UInt8]] { [] }
+    /// Default: returns ordered chunk boundaries, including `beginKey` and
+    /// `endKey`, whose exact stored byte count is approximately `chunkSize`.
+    public func getRangeSplitPoints(
+        beginKey: Bytes,
+        endKey: Bytes,
+        chunkSize: Int
+    ) async throws -> [Bytes] {
+        guard compareBytes(beginKey, endKey) <= 0 else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: .rangeRead,
+                message: "Split point boundaries are not ordered"
+            )
+        }
+        guard chunkSize > 0 else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: .rangeRead,
+                message: "Split point chunk size must be positive"
+            )
+        }
 
-    /// Default: returns nil.
-    public func getVersionstamp() async throws -> Bytes? { nil }
+        return try await StorageRangeMetrics.splitPoints(
+            beginKey: beginKey,
+            endKey: endKey,
+            chunkSize: chunkSize,
+            maximumPointCount: StorageRangeMetrics
+                .defaultMaximumSplitPointCount,
+            rows: getRange(
+                begin: beginKey,
+                end: endKey,
+                snapshot: true,
+                streamingMode: .wantAll
+            )
+        )
+    }
+
+    /// Default: versionstamps must be implemented explicitly by a backend.
+    public func getVersionstamp() async throws -> Bytes? {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not expose a versionstamp",
+            operation: .read
+        )
+    }
 }

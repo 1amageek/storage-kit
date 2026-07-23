@@ -1,7 +1,7 @@
 import StorageKit
 
-/// Codable representation of a StorageKit key selector.
-public struct CloudflareDurableObjectKeySelector: Sendable, Hashable, Codable {
+/// Wire representation of a StorageKit key selector.
+public struct CloudflareDurableObjectKeySelector: Sendable, Hashable {
     public let key: CloudflareDurableObjectBytes
     public let orEqual: Bool
     public let offset: Int

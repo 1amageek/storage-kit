@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Synchronization
 @testable import StorageKit
 
 @Suite("KeyValueSequence Tests")
@@ -104,6 +105,23 @@ struct KeyValueSequenceTests {
         }
     }
 
+    @Test func rangeResult_errorIsConsumedOnce() async throws {
+        let result = KeyValueRangeResult(
+            error: StorageError.invalidOperation("test error")
+        )
+        var iterator = result.makeAsyncIterator()
+
+        do {
+            _ = try await iterator.next()
+            Issue.record("Expected the first iteration to throw")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+        }
+
+        let terminal = try await iterator.next()
+        #expect(terminal == nil)
+    }
+
     @Test func rangeResult_normalIteration() async throws {
         let result = KeyValueRangeResult([
             (key: [0x01] as Bytes, value: [10] as Bytes),
@@ -125,5 +143,81 @@ struct KeyValueSequenceTests {
             count += 1
         }
         #expect(count == 0)
+    }
+
+    @Test func rangeResultIteratorReleasesBackingAfterFinalElement() async throws {
+        let firstReleaseRecorder = RangeResultReleaseRecorder()
+        let secondReleaseRecorder = RangeResultReleaseRecorder()
+        var result: KeyValueRangeResult? = KeyValueRangeResult([
+            (
+                key: Bytes(retaining: RangeResultBytesOwner(
+                    bytes: [0x01],
+                    releaseRecorder: firstReleaseRecorder
+                )),
+                value: [0x11] as Bytes
+            ),
+            (
+                key: Bytes(retaining: RangeResultBytesOwner(
+                    bytes: [0x02],
+                    releaseRecorder: secondReleaseRecorder
+                )),
+                value: [0x22] as Bytes
+            ),
+        ])
+        var iterator = try #require(result?.makeAsyncIterator())
+        result = nil
+
+        var first = try await iterator.next()
+        #expect(first?.0 == [0x01])
+        #expect(firstReleaseRecorder.releaseCount == 0)
+        #expect(secondReleaseRecorder.releaseCount == 0)
+        first = nil
+        #expect(firstReleaseRecorder.releaseCount == 0)
+
+        var second = try await iterator.next()
+        #expect(second?.0 == [0x02])
+        #expect(firstReleaseRecorder.releaseCount == 1)
+        #expect(secondReleaseRecorder.releaseCount == 0)
+        second = nil
+        #expect(secondReleaseRecorder.releaseCount == 1)
+
+        let terminal = try await iterator.next()
+        #expect(terminal == nil)
+    }
+}
+
+private final class RangeResultBytesOwner: BytesOwner {
+    let bytes: [UInt8]
+    let releaseRecorder: RangeResultReleaseRecorder
+
+    init(bytes: [UInt8], releaseRecorder: RangeResultReleaseRecorder) {
+        self.bytes = bytes
+        self.releaseRecorder = releaseRecorder
+    }
+
+    deinit {
+        releaseRecorder.recordRelease()
+    }
+
+    var count: Int {
+        bytes.count
+    }
+
+    func borrowBytes(
+        _ body: (UnsafeRawBufferPointer) throws -> Void
+    ) rethrows {
+        try bytes.withUnsafeBytes(body)
+    }
+}
+
+private final class RangeResultReleaseRecorder: Sendable {
+    private let state = Mutex(0)
+
+    var releaseCount: Int {
+        state.withLock { $0 }
+    }
+
+    func recordRelease() {
+        state.withLock { $0 += 1 }
     }
 }

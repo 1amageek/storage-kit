@@ -2,7 +2,9 @@
 public enum EmbeddedBase64URL {
     private static let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".utf8)
 
-    public static func encode(_ bytes: [UInt8]) -> String {
+    public static func encode<Bytes: RandomAccessCollection>(
+        _ bytes: Bytes
+    ) -> String where Bytes.Element == UInt8, Bytes.Index == Int {
         if bytes.isEmpty {
             return ""
         }
@@ -34,17 +36,21 @@ public enum EmbeddedBase64URL {
         return ""
     }
 
-    public static func decode(_ value: String) throws(EmbeddedWireError) -> [UInt8] {
-        let input = Array(value.utf8)
-        if input.isEmpty {
+    public static func decode(
+        _ value: String
+    ) throws(EmbeddedWireError) -> EmbeddedBytes {
+        if value.isEmpty {
             return []
         }
+        guard value.utf8.count % 4 != 1 else {
+            throw EmbeddedWireError.invalidCursor
+        }
         var output: [UInt8] = []
-        output.reserveCapacity((input.count * 3) / 4)
+        output.reserveCapacity((value.utf8.count * 3) / 4)
 
         var buffer: UInt32 = 0
         var bitCount = 0
-        for byte in input {
+        for byte in value.utf8 {
             guard let sixBits = decode(byte) else {
                 throw EmbeddedWireError.invalidCursor
             }
@@ -61,7 +67,10 @@ public enum EmbeddedBase64URL {
             }
         }
 
-        return output
+        guard encode(output) == value else {
+            throw EmbeddedWireError.invalidCursor
+        }
+        return EmbeddedBytes(output)
     }
 
     private static func decode(_ byte: UInt8) -> UInt8? {

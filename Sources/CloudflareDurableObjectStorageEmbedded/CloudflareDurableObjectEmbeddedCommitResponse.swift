@@ -7,11 +7,18 @@ public struct CloudflareDurableObjectEmbeddedCommitResponse: Sendable, Hashable 
         self.committedVersion = committedVersion
     }
 
-    func encode(into writer: inout EmbeddedBinaryWriter) {
+    func encode(into writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) {
+        guard committedVersion >= 0 else {
+            throw .invalidVersion(committedVersion)
+        }
         writer.writeInt64(committedVersion)
     }
 
-    init(from reader: inout EmbeddedBinaryReader) throws(CloudflareDurableObjectEmbeddedError) {
-        self.committedVersion = try CloudflareDurableObjectEmbeddedError.readInt64(from: &reader)
+    init(from reader: inout EmbeddedWireReader) throws(CloudflareDurableObjectEmbeddedError) {
+        let version = try CloudflareDurableObjectEmbeddedError.readInt64(from: &reader)
+        guard version >= 0 else {
+            throw .invalidVersion(version)
+        }
+        self.committedVersion = version
     }
 }

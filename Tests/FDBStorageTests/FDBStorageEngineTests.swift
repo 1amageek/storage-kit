@@ -17,7 +17,7 @@ struct FDBStorageEngineTests {
 
     private func testPrefix() -> Bytes {
         let uuid = UUID().uuidString.prefix(8)
-        return Array("_test_\(uuid)_".utf8)
+        return Bytes("_test_\(uuid)_".utf8)
     }
 
     private func prefixedKey(_ prefix: Bytes, _ suffix: [UInt8]) -> Bytes {
@@ -26,7 +26,7 @@ struct FDBStorageEngineTests {
 
     private func cleanup(engine: FDBStorageEngine, prefix: Bytes) async throws {
         try await engine.withTransaction { tx in
-            tx.clearRange(beginKey: prefix, endKey: prefix + [0xFF, 0xFF])
+            try tx.clearRange(beginKey: prefix, endKey: prefix + [0xFF, 0xFF])
         }
     }
 
@@ -38,6 +38,95 @@ struct FDBStorageEngineTests {
         var result: [(key: Bytes, value: Bytes)] = []
         for try await (key, value) in seq { result.append((key: key, value: value)) }
         return result
+    }
+
+    @Test func fdbResultsRemainBorrowedUntilExplicitDetach() async throws {
+        let engine = try await makeEngine()
+        let prefix = testPrefix()
+        let key = prefixedKey(prefix, [0x01])
+        let expectedValue = Bytes(repeating: 0xA5, count: 4_096)
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue(expectedValue, for: key)
+        }
+
+        try await engine.withTransaction { transaction in
+            let value = try #require(
+                await transaction.getValue(for: key, snapshot: true)
+            )
+            let detachedValue = value.detached()
+            let valueAddress = try #require(value.withUnsafeBytes {
+                $0.baseAddress.map { UInt(bitPattern: $0) }
+            })
+            let detachedValueAddress = try #require(
+                detachedValue.withUnsafeBytes {
+                    $0.baseAddress.map { UInt(bitPattern: $0) }
+                }
+            )
+            #expect(value == detachedValue)
+            #expect(valueAddress != detachedValueAddress)
+
+            var cursor = transaction.rangeCursor(
+                from: .firstGreaterOrEqual(key),
+                to: .firstGreaterThan(key),
+                limit: 1,
+                snapshot: true,
+                streamingMode: .exact
+            )
+            let row = try #require(await cursor.next())
+            try await cursor.finish()
+
+            let detachedKey = row.0.detached()
+            let rangeValue = row.1.detached()
+            let keyAddress = try #require(row.0.withUnsafeBytes {
+                $0.baseAddress.map { UInt(bitPattern: $0) }
+            })
+            let detachedKeyAddress = try #require(
+                detachedKey.withUnsafeBytes {
+                    $0.baseAddress.map { UInt(bitPattern: $0) }
+                }
+            )
+            let rowValueAddress = try #require(row.1.withUnsafeBytes {
+                $0.baseAddress.map { UInt(bitPattern: $0) }
+            })
+            let rangeValueAddress = try #require(
+                rangeValue.withUnsafeBytes {
+                    $0.baseAddress.map { UInt(bitPattern: $0) }
+                }
+            )
+            #expect(row.0 == detachedKey)
+            #expect(row.1 == rangeValue)
+            #expect(keyAddress != detachedKeyAddress)
+            #expect(rowValueAddress != rangeValueAddress)
+        }
+
+        try await cleanup(engine: engine, prefix: prefix)
+    }
+
+    @Test func taskCancellationRemainsCancellationErrorAcrossStorageBoundary() async throws {
+        let engine = try await makeEngine()
+        let transaction = try engine.createTransaction()
+
+        let task = Task {
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            return try await transaction.getValue(
+                for: [0x01],
+                snapshot: true
+            )
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected CancellationError")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            Issue.record("Expected CancellationError, got \(error)")
+        }
+        try await transaction.cancel()
     }
 
     // =========================================================================
@@ -54,7 +143,7 @@ struct FDBStorageEngineTests {
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
-                tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
+                try tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
             }
         }
 
@@ -77,7 +166,7 @@ struct FDBStorageEngineTests {
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
-                tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
+                try tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
             }
         }
 
@@ -103,7 +192,7 @@ struct FDBStorageEngineTests {
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
-                tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
+                try tx.setValue([i * 10], for: prefixedKey(prefix, [i]))
             }
         }
 
@@ -136,7 +225,10 @@ struct FDBStorageEngineTests {
         try await engine.withTransaction { tx in
             for i: UInt16 in 0..<500 {
                 let key = prefix + withUnsafeBytes(of: i.bigEndian) { Array($0) }
-                tx.setValue(withUnsafeBytes(of: i) { Array($0) }, for: key)
+                try tx.setValue(
+                    withUnsafeBytes(of: i) { Bytes($0) },
+                    for: key
+                )
             }
         }
 
@@ -165,7 +257,10 @@ struct FDBStorageEngineTests {
         try await engine.withTransaction { tx in
             for i: UInt16 in 0..<500 {
                 let key = prefix + withUnsafeBytes(of: i.bigEndian) { Array($0) }
-                tx.setValue(withUnsafeBytes(of: i) { Array($0) }, for: key)
+                try tx.setValue(
+                    withUnsafeBytes(of: i) { Bytes($0) },
+                    for: key
+                )
             }
         }
 
@@ -203,13 +298,13 @@ struct FDBStorageEngineTests {
         let key = prefixedKey(prefix, [0x01])
 
         let tx1 = try engine.createTransaction()
-        tx1.setValue([42], for: key)
+        try tx1.setValue([42], for: key)
         try await tx1.commit()
 
         let tx2 = try engine.createTransaction()
         let value = try await tx2.getValue(for: key)
         #expect(value == [42])
-        tx2.cancel()
+        try await tx2.cancel()
 
         try await cleanup(engine: engine, prefix: prefix)
     }
@@ -220,13 +315,13 @@ struct FDBStorageEngineTests {
         let key = prefixedKey(prefix, [0x01])
 
         let tx1 = try engine.createTransaction()
-        tx1.setValue([42], for: key)
-        tx1.cancel()
+        try tx1.setValue([42], for: key)
+        try await tx1.cancel()
 
         let tx2 = try engine.createTransaction()
         let cancelledValue = try await tx2.getValue(for: key)
         #expect(cancelledValue == nil)
-        tx2.cancel()
+        try await tx2.cancel()
     }
 
     // =========================================================================
@@ -242,7 +337,7 @@ struct FDBStorageEngineTests {
         let key = prefixedKey(prefix, [0x01])
 
         try await engine.withTransaction { tx in
-            tx.setValue([42], for: key)
+            try tx.setValue([42], for: key)
             let value = try await tx.getValue(for: key)
             #expect(value == [42])
         }
@@ -256,11 +351,11 @@ struct FDBStorageEngineTests {
         let key = prefixedKey(prefix, [0x01])
 
         try await engine.withTransaction { tx in
-            tx.setValue([42], for: key)
+            try tx.setValue([42], for: key)
         }
 
         try await engine.withTransaction { tx in
-            tx.clear(key: key)
+            try tx.clear(key: key)
             let value = try await tx.getValue(for: key)
             #expect(value == nil)
         }
@@ -271,12 +366,12 @@ struct FDBStorageEngineTests {
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
-            tx.setValue([10], for: prefixedKey(prefix, [0x01]))
-            tx.setValue([30], for: prefixedKey(prefix, [0x03]))
+            try tx.setValue([10], for: prefixedKey(prefix, [0x01]))
+            try tx.setValue([30], for: prefixedKey(prefix, [0x03]))
         }
 
         try await engine.withTransaction { tx in
-            tx.setValue([20], for: prefixedKey(prefix, [0x02]))
+            try tx.setValue([20], for: prefixedKey(prefix, [0x02]))
             let range = try await collectRange(
                 tx, begin: prefix, end: prefix + [0xFF]
             )
@@ -297,11 +392,11 @@ struct FDBStorageEngineTests {
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: prefixedKey(prefix, [0x01]))
-            tx.setValue([2], for: prefixedKey(prefix, [0x02]))
-            tx.setValue([3], for: prefixedKey(prefix, [0x03]))
-            tx.setValue([4], for: prefixedKey(prefix, [0x04]))
-            tx.setValue([5], for: prefixedKey(prefix, [0x05]))
+            try tx.setValue([1], for: prefixedKey(prefix, [0x01]))
+            try tx.setValue([2], for: prefixedKey(prefix, [0x02]))
+            try tx.setValue([3], for: prefixedKey(prefix, [0x03]))
+            try tx.setValue([4], for: prefixedKey(prefix, [0x04]))
+            try tx.setValue([5], for: prefixedKey(prefix, [0x05]))
         }
 
         try await engine.withTransaction { tx in
@@ -323,7 +418,7 @@ struct FDBStorageEngineTests {
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: prefixedKey(prefix, [0x05]))
+            try tx.setValue([1], for: prefixedKey(prefix, [0x05]))
         }
 
         try await engine.withTransaction { tx in
@@ -351,7 +446,7 @@ struct FDBStorageEngineTests {
         let key = prefixedKey(prefix, [0x01])
 
         try await engine.withTransaction { tx in
-            tx.setValue([99], for: key)
+            try tx.setValue([99], for: key)
         }
 
         try await engine.withTransaction { tx in
@@ -367,33 +462,21 @@ struct FDBStorageEngineTests {
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
 
-        struct TestError: Error {}
+        struct TransactionBodyFailure: Error {}
 
         do {
             try await engine.withTransaction { tx in
-                tx.setValue([42], for: key)
-                throw TestError()
+                try tx.setValue([42], for: key)
+                throw TransactionBodyFailure()
             }
         } catch {
-            // FDB wraps TestError → StorageError.backendError
+            // FDB wraps TransactionBodyFailure → StorageError.backendError
         }
 
         try await engine.withTransaction { tx in
             let rolledBackValue = try await tx.getValue(for: key)
             #expect(rolledBackValue == nil)
         }
-    }
-
-    // =========================================================================
-    // MARK: - FDB-Specific: fdbTransaction Access
-    // =========================================================================
-
-    @Test func fdbTransactionAccess() async throws {
-        let engine = try await makeEngine()
-        let tx = try engine.createTransaction()
-        // Verify the underlying FDB transaction is accessible
-        _ = tx.fdbTransaction
-        tx.cancel()
     }
 
     // =========================================================================
@@ -405,15 +488,15 @@ struct FDBStorageEngineTests {
         let prefix = testPrefix()
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: prefixedKey(prefix, [0x01]))
-            tx.setValue([2], for: prefixedKey(prefix, [0x02]))
-            tx.setValue([3], for: prefixedKey(prefix, [0x03]))
-            tx.setValue([4], for: prefixedKey(prefix, [0x04]))
-            tx.setValue([5], for: prefixedKey(prefix, [0x05]))
+            try tx.setValue([1], for: prefixedKey(prefix, [0x01]))
+            try tx.setValue([2], for: prefixedKey(prefix, [0x02]))
+            try tx.setValue([3], for: prefixedKey(prefix, [0x03]))
+            try tx.setValue([4], for: prefixedKey(prefix, [0x04]))
+            try tx.setValue([5], for: prefixedKey(prefix, [0x05]))
         }
 
         try await engine.withTransaction { tx in
-            tx.clearRange(
+            try tx.clearRange(
                 beginKey: prefixedKey(prefix, [0x02]),
                 endKey: prefixedKey(prefix, [0x05])
             )
@@ -445,10 +528,10 @@ struct FDBStorageEngineTests {
 
         try await engine.withTransaction { tx in
             // Insert in non-sorted order
-            tx.setValue([5], for: prefixedKey(prefix, [0x05]))
-            tx.setValue([1], for: prefixedKey(prefix, [0x01]))
-            tx.setValue([3], for: prefixedKey(prefix, [0x03]))
-            tx.setValue([2], for: prefixedKey(prefix, [0x02]))
+            try tx.setValue([5], for: prefixedKey(prefix, [0x05]))
+            try tx.setValue([1], for: prefixedKey(prefix, [0x01]))
+            try tx.setValue([3], for: prefixedKey(prefix, [0x03]))
+            try tx.setValue([2], for: prefixedKey(prefix, [0x02]))
         }
 
         try await engine.withTransaction { tx in
@@ -473,9 +556,9 @@ struct FDBStorageEngineTests {
         let spaceB = Subspace(prefix + Array("beta".utf8))
 
         try await engine.withTransaction { tx in
-            tx.setValue([1], for: spaceA.pack(Tuple(Int64(1))))
-            tx.setValue([2], for: spaceA.pack(Tuple(Int64(2))))
-            tx.setValue([3], for: spaceB.pack(Tuple(Int64(1))))
+            try tx.setValue([1], for: spaceA.pack(Tuple(Int64(1))))
+            try tx.setValue([2], for: spaceA.pack(Tuple(Int64(2))))
+            try tx.setValue([3], for: spaceB.pack(Tuple(Int64(1))))
         }
 
         try await engine.withTransaction { tx in

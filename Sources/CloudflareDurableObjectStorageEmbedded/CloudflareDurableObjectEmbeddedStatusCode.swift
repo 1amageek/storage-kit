@@ -5,4 +5,5 @@ public enum CloudflareDurableObjectEmbeddedStatusCode: UInt8, Sendable, Hashable
     case invalidOperation = 2
     case backendFailure = 3
     case resourceUnavailable = 4
+    case backendContractViolation = 5
 }

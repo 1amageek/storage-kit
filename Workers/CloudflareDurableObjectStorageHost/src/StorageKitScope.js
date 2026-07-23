@@ -1,5 +1,6 @@
 import { encodeBase64URL } from "./StorageKitBase64URL.js";
 import { StorageKitWireError } from "./StorageKitWireError.js";
+import { storageKitWireLimits } from "./StorageKitWireLimits.js";
 
 export function validateScope(scope) {
   validateComponent(scope.databaseID);
@@ -18,10 +19,26 @@ export function nameForScope(scope) {
   const database = encodeBase64URL(encoder.encode(scope.databaseID));
   const tenant = scope.tenantID === null ? "_" : encodeBase64URL(encoder.encode(scope.tenantID));
   const workspace = scope.workspaceID === null ? "_" : encodeBase64URL(encoder.encode(scope.workspaceID));
-  return `storage-kit/cfdo/v1/database/${database}/tenant/${tenant}/workspace/${workspace}`;
+  const name = `storage-kit/cfdo/v1/database/${database}/tenant/${tenant}/workspace/${workspace}`;
+  if (encoder.encode(name).byteLength > storageKitWireLimits.maxCanonicalScopeNameBytes) {
+    throw StorageKitWireError.limitExceeded(
+      "Canonical storage scope name bytes",
+      storageKitWireLimits.maxCanonicalScopeNameBytes
+    );
+  }
+  return name;
 }
 
 function validateComponent(value) {
+  if (typeof value !== "string") {
+    throw StorageKitWireError.invalidScope();
+  }
+  if (new TextEncoder().encode(value).byteLength > storageKitWireLimits.maxScopeComponentBytes) {
+    throw StorageKitWireError.limitExceeded(
+      "Storage scope component bytes",
+      storageKitWireLimits.maxScopeComponentBytes
+    );
+  }
   if (isASCIIBlank(value)) {
     throw StorageKitWireError.invalidScope();
   }

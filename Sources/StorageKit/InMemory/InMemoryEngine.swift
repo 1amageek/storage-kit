@@ -1,5 +1,85 @@
 import Synchronization
 
+private enum InMemoryConflictCutSide: Sendable {
+    case before
+    case after
+}
+
+/// A position immediately before or after one exact key. Cut-based ranges
+/// represent point keys and strict KeySelector boundaries without constructing
+/// synthetic `key + 0x00` buffers.
+private struct InMemoryConflictCut: Sendable {
+    let key: Bytes
+    let side: InMemoryConflictCutSide
+
+    static func compare(
+        _ left: InMemoryConflictCut,
+        _ right: InMemoryConflictCut
+    ) -> Int {
+        let keyComparison = compareBytes(left.key, right.key)
+        guard keyComparison == 0 else { return keyComparison }
+        switch (left.side, right.side) {
+        case (.before, .after):
+            return -1
+        case (.after, .before):
+            return 1
+        case (.before, .before), (.after, .after):
+            return 0
+        }
+    }
+}
+
+/// A non-empty half-open conflict range. Nil lower and upper cuts mean negative
+/// and positive infinity respectively.
+private struct InMemoryConflictRegion: Sendable {
+    let lower: InMemoryConflictCut?
+    let upper: InMemoryConflictCut?
+
+    static var entireKeyspace: InMemoryConflictRegion {
+        InMemoryConflictRegion(lower: nil, upper: nil)
+    }
+
+    static func point(_ key: Bytes) -> InMemoryConflictRegion {
+        InMemoryConflictRegion(
+            lower: InMemoryConflictCut(key: key, side: .before),
+            upper: InMemoryConflictCut(key: key, side: .after)
+        )
+    }
+
+    static func halfOpen(begin: Bytes, end: Bytes) -> InMemoryConflictRegion? {
+        let lower = InMemoryConflictCut(key: begin, side: .before)
+        let upper = InMemoryConflictCut(key: end, side: .before)
+        guard InMemoryConflictCut.compare(lower, upper) < 0 else {
+            return nil
+        }
+        return InMemoryConflictRegion(lower: lower, upper: upper)
+    }
+
+    static func between(
+        _ lower: InMemoryConflictCut,
+        _ upper: InMemoryConflictCut
+    ) -> InMemoryConflictRegion? {
+        guard InMemoryConflictCut.compare(lower, upper) < 0 else {
+            return nil
+        }
+        return InMemoryConflictRegion(lower: lower, upper: upper)
+    }
+
+    func overlaps(_ other: InMemoryConflictRegion) -> Bool {
+        Self.lowerPrecedesUpper(lower, other.upper)
+            && Self.lowerPrecedesUpper(other.lower, upper)
+    }
+
+    private static func lowerPrecedesUpper(
+        _ lower: InMemoryConflictCut?,
+        _ upper: InMemoryConflictCut?
+    ) -> Bool {
+        guard let lower else { return true }
+        guard let upper else { return true }
+        return InMemoryConflictCut.compare(lower, upper) < 0
+    }
+}
+
 /// In-memory KV storage for testing and standalone client use.
 ///
 /// Maintains lexicographic order via `SortedKeyValueStore`.
@@ -16,16 +96,88 @@ public final class InMemoryEngine: StorageEngine, Sendable {
 
     public typealias TransactionType = InMemoryTransaction
 
-    /// Sorted KV store (internal buffer).
-    let _store: Mutex<SortedKeyValueStore>
+    struct StoreState: Sendable {
+        var store = SortedKeyValueStore()
+        var version: Int64 = 0
+        var nextTransactionIdentifier: UInt64 = 0
+        var activeSnapshotVersions: [UInt64: Int64] = [:]
+        fileprivate var committedWriteHistory: [CommittedWriteSet] = []
+
+        var activeTransactionCount: Int { activeSnapshotVersions.count }
+        var retainedConflictVersionCount: Int { committedWriteHistory.count }
+
+        mutating func registerTransaction() throws -> UInt64 {
+            let identifier = nextTransactionIdentifier
+            let (nextIdentifier, overflow) = identifier.addingReportingOverflow(1)
+            guard !overflow else {
+                throw StorageError(
+                    code: .resourceUnavailable,
+                    operation: .beginTransaction,
+                    backend: .inMemory,
+                    message: "In-memory transaction identifier exhausted"
+                )
+            }
+            nextTransactionIdentifier = nextIdentifier
+            activeSnapshotVersions[identifier] = version
+            return identifier
+        }
+
+        mutating func releaseTransaction(_ identifier: UInt64) {
+            activeSnapshotVersions.removeValue(forKey: identifier)
+            pruneCommittedWriteHistory()
+        }
+
+        private mutating func pruneCommittedWriteHistory() {
+            guard let minimumSnapshotVersion = activeSnapshotVersions.values.min() else {
+                committedWriteHistory.removeAll(keepingCapacity: false)
+                return
+            }
+            let firstRequiredIndex = committedWriteHistory.firstIndex {
+                $0.version > minimumSnapshotVersion
+            } ?? committedWriteHistory.endIndex
+            guard firstRequiredIndex > committedWriteHistory.startIndex else {
+                return
+            }
+            committedWriteHistory.removeSubrange(
+                committedWriteHistory.startIndex..<firstRequiredIndex
+            )
+        }
+    }
+
+    fileprivate struct CommittedWriteSet: Sendable {
+        let version: Int64
+        let regions: [InMemoryConflictRegion]
+    }
+
+    /// Sorted KV store and its commit version. Both change under one lock so a
+    /// transaction can never observe a version that belongs to another state.
+    let _store: Mutex<StoreState>
 
     public init(configuration: Configuration = .init()) {
-        self._store = Mutex(SortedKeyValueStore())
+        self._store = Mutex(StoreState())
     }
 
     public func createTransaction() throws -> InMemoryTransaction {
-        let snapshot = _store.withLock { SortedKeyValueStore($0.entries) }
-        return InMemoryTransaction(engine: self, snapshot: snapshot)
+        let snapshot = try _store.withLock { state in
+            let transactionIdentifier = try state.registerTransaction()
+            return (
+                store: SortedKeyValueStore(state.store.entries),
+                version: state.version,
+                transactionIdentifier: transactionIdentifier
+            )
+        }
+        return InMemoryTransaction(
+            engine: self,
+            snapshot: snapshot.store,
+            snapshotVersion: snapshot.version,
+            transactionIdentifier: snapshot.transactionIdentifier
+        )
+    }
+
+    fileprivate func releaseTransaction(_ identifier: UInt64) {
+        _store.withLock { state in
+            state.releaseTransaction(identifier)
+        }
     }
 
     public func withTransaction<T: Sendable>(
@@ -38,15 +190,23 @@ public final class InMemoryEngine: StorageEngine, Sendable {
                 try await tx.commit()
                 return result
             } catch {
-                tx.cancel()
-                throw error
+                let operationError = error
+                do {
+                    try await tx.cancel()
+                } catch {
+                    throw StorageTransactionCleanupError(
+                        operationError: operationError,
+                        cancellationError: error
+                    )
+                }
+                throw operationError
             }
         }
     }
 
     /// Current store size (for testing).
     public var count: Int {
-        _store.withLock { $0.count }
+        _store.withLock { $0.store.count }
     }
 }
 
@@ -58,13 +218,38 @@ public final class InMemoryTransaction: Transaction, Sendable {
 
     public typealias RangeResult = KeyValueRangeResult
 
+    public static let declaredCapabilities = TransactionCapabilities(
+            readVersion: true,
+            committedVersion: true,
+            committedVersionstamp: true
+    )
+
+    public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
+
+    public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
+
     private let engine: InMemoryEngine
     private let snapshot: SortedKeyValueStore
+    private let snapshotVersion: Int64
+    private let transactionIdentifier: UInt64
+    private let mutationByteMeter = TransactionMutationByteMeter()
 
     private struct MutableState: Sendable {
         var writeBuffer: [WriteOp] = []
-        var committed = false
-        var cancelled = false
+        var readConflictRegions: [InMemoryConflictRegion] = []
+        var writeConflictRegions: [InMemoryConflictRegion] = []
+        var lifecycle: Lifecycle = .open
+        var committedVersion: Int64?
+        var versionstamp: Bytes?
+    }
+
+    private enum Lifecycle: Sendable {
+        case open
+        case committing(TransactionOperationCompletion)
+        case committed
+        case cancelling(TransactionOperationCompletion)
+        case cancelled
+        case failed(StorageError)
     }
     private let _state: Mutex<MutableState>
 
@@ -75,47 +260,76 @@ public final class InMemoryTransaction: Transaction, Sendable {
         case atomic(key: Bytes, param: Bytes, mutationType: MutationType)
     }
 
-    init(engine: InMemoryEngine, snapshot: SortedKeyValueStore) {
+    private struct CommitPayload: Sendable {
+        let operations: [WriteOp]
+        let readConflictRegions: [InMemoryConflictRegion]
+        let writeConflictRegions: [InMemoryConflictRegion]
+    }
+
+    init(
+        engine: InMemoryEngine,
+        snapshot: SortedKeyValueStore,
+        snapshotVersion: Int64,
+        transactionIdentifier: UInt64
+    ) {
         self.engine = engine
         self.snapshot = snapshot
+        self.snapshotVersion = snapshotVersion
+        self.transactionIdentifier = transactionIdentifier
         self._state = Mutex(MutableState())
+    }
+
+    deinit {
+        engine.releaseTransaction(transactionIdentifier)
+    }
+
+    public func configureMutationByteLimit(maximumBytes: Int?) throws {
+        try mutationByteMeter.configure(maximumBytes: maximumBytes)
     }
 
     // MARK: - Read
 
     public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
-        let writeBuffer = try _state.withLock { state in
-            guard !state.cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
-            return state.writeBuffer
-        }
-
-        // Replay the write buffer in order on top of the snapshot value.
-        // Atomic mutations depend on the value produced by preceding operations,
-        // so forward replay is required (a reverse scan cannot resolve them).
-        var value = self.snapshot.get(key)
-        for op in writeBuffer {
-            switch op {
-            case .set(let k, let v) where k == key:
-                value = v
-            case .clear(let k) where k == key:
-                value = nil
-            case .clearRange(let begin, let end)
-                where compareBytes(key, begin) >= 0 && compareBytes(key, end) < 0:
-                value = nil
-            case .atomic(let k, let param, let mutationType) where k == key:
-                switch try mutationType.apply(to: value, param: param) {
-                case .set(let bytes):
-                    value = bytes
-                case .clear:
-                    value = nil
-                case .unchanged:
-                    break
-                }
-            default:
-                continue
+        try _state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .read)
+            if !snapshot {
+                state.readConflictRegions.append(.point(key))
             }
+
+            // Replay the write buffer in order on top of the snapshot value.
+            // Atomic mutations depend on preceding operations, so forward
+            // replay is required.
+            var value = self.snapshot.get(key)
+            for operation in state.writeBuffer {
+                switch operation {
+                case .set(let operationKey, let operationValue)
+                    where operationKey == key:
+                    value = operationValue
+                case .clear(let operationKey) where operationKey == key:
+                    value = nil
+                case .clearRange(let begin, let end)
+                    where compareBytes(key, begin) >= 0
+                        && compareBytes(key, end) < 0:
+                    value = nil
+                case .atomic(
+                    let operationKey,
+                    let parameter,
+                    let mutationType
+                ) where operationKey == key:
+                    switch try mutationType.apply(to: value, param: parameter) {
+                    case .set(let bytes):
+                        value = bytes
+                    case .clear:
+                        value = nil
+                    case .unchanged:
+                        break
+                    }
+                default:
+                    continue
+                }
+            }
+            return value
         }
-        return value
     }
 
     public func getRange(
@@ -126,143 +340,481 @@ public final class InMemoryTransaction: Transaction, Sendable {
         snapshot: Bool,
         streamingMode: StreamingMode
     ) -> KeyValueRangeResult {
-        let (cancelled, writeBuffer) = _state.withLock { ($0.cancelled, $0.writeBuffer) }
-        guard !cancelled else {
-            return KeyValueRangeResult(error: StorageError.invalidOperation("Transaction cancelled"))
-        }
-
-        // Build effective store by applying write buffer to snapshot
-        var effective = self.snapshot
-        for op in writeBuffer {
-            switch op {
-            case .set(let key, let value):
-                effective.set(key, value)
-            case .clear(let key):
-                effective.delete(key)
-            case .clearRange(let rangeBegin, let rangeEnd):
-                effective.deleteRange(begin: rangeBegin, end: rangeEnd)
-            case .atomic(let key, let param, let mutationType):
-                do {
-                    switch try mutationType.apply(to: effective.get(key), param: param) {
-                    case .set(let bytes):
-                        effective.set(key, bytes)
-                    case .clear:
-                        effective.delete(key)
-                    case .unchanged:
-                        break
-                    }
-                } catch {
-                    return KeyValueRangeResult(error: error)
+        do {
+            return try _state.withLock { state in
+                try Self.validateOpen(state.lifecycle, operation: .rangeRead)
+                if !snapshot,
+                   let conflictRegion = Self.readConflictRegion(
+                       from: begin,
+                       to: end
+                   ) {
+                    state.readConflictRegions.append(conflictRegion)
                 }
+
+                // Build the transaction view by applying pending writes to the
+                // immutable snapshot. The backing array remains shared when the
+                // write buffer is empty.
+                var effective = self.snapshot
+                for operation in state.writeBuffer {
+                    switch operation {
+                    case .set(let key, let value):
+                        effective.set(key, value)
+                    case .clear(let key):
+                        effective.delete(key)
+                    case .clearRange(let rangeBegin, let rangeEnd):
+                        effective.deleteRange(begin: rangeBegin, end: rangeEnd)
+                    case .atomic(let key, let parameter, let mutationType):
+                        switch try mutationType.apply(
+                            to: effective.get(key),
+                            param: parameter
+                        ) {
+                        case .set(let bytes):
+                            effective.set(key, bytes)
+                        case .clear:
+                            effective.delete(key)
+                        case .unchanged:
+                            break
+                        }
+                    }
+                }
+
+                // Resolve KeySelectors using the FDB-compatible algorithm.
+                let allKeys = effective.keys
+                let startIndex = begin.resolve(in: allKeys)
+                let endIndex = end.resolve(in: allKeys)
+
+                guard startIndex < endIndex else {
+                    return KeyValueRangeResult([])
+                }
+
+                let slice = effective.slice(startIndex..<endIndex)
+                var results: [(key: Bytes, value: Bytes)]
+
+                if reverse {
+                    results = Array(slice.reversed())
+                } else {
+                    results = Array(slice)
+                }
+
+                if limit > 0 && results.count > limit {
+                    results.removeSubrange(limit..<results.endIndex)
+                }
+
+                return KeyValueRangeResult(results)
             }
+        } catch {
+            return KeyValueRangeResult(error: error)
         }
-
-        // Resolve KeySelectors using FDB-compatible algorithm
-        let allKeys = effective.keys
-        let startIdx = begin.resolve(in: allKeys)
-        let endIdx = end.resolve(in: allKeys)
-
-        guard startIdx < endIdx else {
-            return KeyValueRangeResult([])
-        }
-
-        // Collect entries in the resolved range [startIdx, endIdx)
-        let slice = effective.slice(startIdx..<endIdx)
-        var results: [(key: Bytes, value: Bytes)]
-
-        if reverse {
-            results = Array(slice.reversed())
-        } else {
-            results = Array(slice)
-        }
-
-        if limit > 0 && results.count > limit {
-            results = Array(results.prefix(limit))
-        }
-
-        return KeyValueRangeResult(results)
     }
 
     // MARK: - Write
 
-    public func setValue(_ value: Bytes, for key: Bytes) {
-        _state.withLock { state in
-            guard !state.cancelled else { return }
+    public func setValue(_ value: Bytes, for key: Bytes) throws {
+        try _state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .write)
+            try mutationByteMeter.recordSet(
+                key: key,
+                value: value
+            )
             state.writeBuffer.append(.set(key: key, value: value))
+            state.writeConflictRegions.append(.point(key))
         }
     }
 
-    public func clear(key: Bytes) {
-        _state.withLock { state in
-            guard !state.cancelled else { return }
+    public func clear(key: Bytes) throws {
+        try _state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .delete)
+            try mutationByteMeter.recordClear(key: key)
             state.writeBuffer.append(.clear(key: key))
+            state.writeConflictRegions.append(.point(key))
         }
     }
 
-    public func clearRange(beginKey: Bytes, endKey: Bytes) {
-        _state.withLock { state in
-            guard !state.cancelled else { return }
+    public func clearRange(beginKey: Bytes, endKey: Bytes) throws {
+        try _state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .deleteRange)
+            try mutationByteMeter.recordClearRange(
+                beginKey: beginKey,
+                endKey: endKey
+            )
             state.writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
+            if let conflictRegion = InMemoryConflictRegion.halfOpen(
+                begin: beginKey,
+                end: endKey
+            ) {
+                state.writeConflictRegions.append(conflictRegion)
+            }
         }
     }
 
     // MARK: - Atomic Operations
 
-    public func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) {
-        _state.withLock { state in
-            guard !state.cancelled else { return }
+    public func atomicOp(
+        key: Bytes,
+        param: Bytes,
+        mutationType: MutationType
+    ) throws {
+        try _state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .write)
+            try mutationByteMeter.recordAtomic(
+                key: key,
+                parameter: param
+            )
             state.writeBuffer.append(.atomic(key: key, param: param, mutationType: mutationType))
+            state.writeConflictRegions.append(.point(key))
+        }
+    }
+
+    public func addConflictRange(
+        beginKey: Bytes,
+        endKey: Bytes,
+        type: ConflictRangeType
+    ) throws {
+        guard let conflictRegion = InMemoryConflictRegion.halfOpen(
+            begin: beginKey,
+            end: endKey
+        ) else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: .write,
+                backend: .inMemory,
+                message: "Conflict range must be non-empty and ordered"
+            )
+        }
+        try _state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .write)
+            switch type {
+            case .read:
+                state.readConflictRegions.append(conflictRegion)
+            case .write:
+                state.writeConflictRegions.append(conflictRegion)
+            }
         }
     }
 
     // MARK: - Transaction Management
 
     public func commit() async throws {
-        let ops = try _state.withLock { state -> [WriteOp] in
-            guard !state.cancelled else { throw StorageError.invalidOperation("Transaction cancelled") }
-            guard !state.committed else { return [] }
-            state.committed = true
-            let ops = state.writeBuffer
-            state.writeBuffer.removeAll()
-            return ops
+        enum Start {
+            case leader(TransactionOperationCompletion, CommitPayload)
+            case wait(TransactionOperationCompletion)
+            case committed
+            case failed(StorageError)
         }
 
-        guard !ops.isEmpty else { return }
+        let start = _state.withLock { state -> Start in
+            switch state.lifecycle {
+            case .open:
+                let completion = TransactionOperationCompletion()
+                let payload = CommitPayload(
+                    operations: state.writeBuffer,
+                    readConflictRegions: state.readConflictRegions,
+                    writeConflictRegions: state.writeConflictRegions
+                )
+                state.writeBuffer.removeAll(keepingCapacity: false)
+                state.readConflictRegions.removeAll(keepingCapacity: false)
+                state.writeConflictRegions.removeAll(keepingCapacity: false)
+                state.lifecycle = .committing(completion)
+                return .leader(completion, payload)
+            case .committing(let completion):
+                return .wait(completion)
+            case .committed:
+                return .committed
+            case .cancelling(let completion):
+                return .wait(completion)
+            case .cancelled:
+                return .failed(Self.stateError("Transaction cancelled", operation: .commit))
+            case .failed(let error):
+                return .failed(error)
+            }
+        }
 
-        // Stage all operations on a copy and swap at the end, so a throwing
-        // atomic mutation (versionstamp) leaves the store untouched.
-        // Atomics apply to the store's value at commit time (FDB semantics),
-        // not to the transaction's read snapshot.
-        try engine._store.withLock { store in
-            var staged = store
-            for op in ops {
-                switch op {
-                case .set(let key, let value):
-                    staged.set(key, value)
-                case .clear(let key):
-                    staged.delete(key)
-                case .clearRange(let begin, let end):
-                    staged.deleteRange(begin: begin, end: end)
-                case .atomic(let key, let param, let mutationType):
-                    switch try mutationType.apply(to: staged.get(key), param: param) {
-                    case .set(let bytes):
-                        staged.set(key, bytes)
-                    case .clear:
-                        staged.delete(key)
-                    case .unchanged:
-                        break
-                    }
+        switch start {
+        case .leader(let completion, let payload):
+            let result = commitOperations(payload)
+            _state.withLock { state in
+                switch result {
+                case .success(let committedVersion):
+                    state.lifecycle = .committed
+                    state.committedVersion = committedVersion
+                    state.versionstamp = Self.versionstamp(for: committedVersion)
+                case .failure(let error):
+                    state.lifecycle = .failed(error)
                 }
             }
-            store = staged
+            let completionResult = result.map { _ in () }
+            await completion.resolve(completionResult)
+            try completionResult.get()
+        case .wait(let completion):
+            let result = await completion.wait()
+            try result.get()
+            let lifecycle = _state.withLock { $0.lifecycle }
+            if case .cancelled = lifecycle {
+                throw Self.stateError("Transaction cancelled", operation: .commit)
+            }
+        case .committed:
+            return
+        case .failed(let error):
+            throw error
         }
     }
 
-    public func cancel() {
-        _state.withLock { state in
-            guard !state.committed, !state.cancelled else { return }
-            state.cancelled = true
-            state.writeBuffer.removeAll()
+    public func cancel() async throws {
+        enum Start {
+            case leader(TransactionOperationCompletion)
+            case waitForCancellation(TransactionOperationCompletion)
+            case waitForCommit(TransactionOperationCompletion)
+            case cancelled
+            case committed
+            case failed
+        }
+
+        let start = _state.withLock { state -> Start in
+            switch state.lifecycle {
+            case .open:
+                let completion = TransactionOperationCompletion()
+                state.lifecycle = .cancelling(completion)
+                state.writeBuffer.removeAll(keepingCapacity: false)
+                return .leader(completion)
+            case .committing(let completion):
+                return .waitForCommit(completion)
+            case .committed:
+                return .committed
+            case .cancelling(let completion):
+                return .waitForCancellation(completion)
+            case .cancelled:
+                return .cancelled
+            case .failed:
+                return .failed
+            }
+        }
+
+        switch start {
+        case .leader(let completion):
+            engine.releaseTransaction(transactionIdentifier)
+            _state.withLock { $0.lifecycle = .cancelled }
+            await completion.resolve(.success(()))
+        case .waitForCancellation(let completion):
+            try await completion.wait().get()
+        case .waitForCommit(let completion):
+            let result = await completion.wait()
+            switch result {
+            case .success:
+                throw Self.stateError("Transaction committed", operation: .cancel)
+            case .failure:
+                return
+            }
+        case .cancelled, .failed:
+            return
+        case .committed:
+            throw Self.stateError("Transaction committed", operation: .cancel)
+        }
+    }
+
+    public func setReadVersion(_ version: Int64) throws {
+        try _state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .read)
+            guard version == snapshotVersion else {
+                throw StorageError.unsupportedOperation(
+                    "In-memory transactions cannot switch to a historical snapshot",
+                    operation: .read,
+                    backend: .inMemory
+                )
+            }
+        }
+    }
+
+    public func getReadVersion() async throws -> Int64 {
+        try _state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .read)
+            return snapshotVersion
+        }
+    }
+
+    public func getCommittedVersion() throws -> Int64 {
+        try _state.withLock { state in
+            guard case .committed = state.lifecycle,
+                  let committedVersion = state.committedVersion else {
+                throw Self.stateError(
+                    "Committed version is unavailable before a successful commit",
+                    operation: .read
+                )
+            }
+            return committedVersion
+        }
+    }
+
+    public func getVersionstamp() async throws -> Bytes? {
+        try _state.withLock { state in
+            guard case .committed = state.lifecycle else {
+                throw Self.stateError(
+                    "Versionstamp is unavailable before a successful commit",
+                    operation: .read
+                )
+            }
+            return state.versionstamp
+        }
+    }
+
+    private func commitOperations(
+        _ payload: CommitPayload
+    ) -> Result<Int64, StorageError> {
+        do {
+            let version = try engine._store.withLock { state -> Int64 in
+                defer {
+                    state.releaseTransaction(transactionIdentifier)
+                }
+
+                for writeSet in state.committedWriteHistory
+                where writeSet.version > snapshotVersion {
+                    if Self.intersects(
+                        payload.readConflictRegions,
+                        writeSet.regions
+                    ) || Self.intersects(
+                        payload.writeConflictRegions,
+                        writeSet.regions
+                    ) {
+                        throw StorageError(
+                            code: .transactionConflict,
+                            operation: .commit,
+                            backend: .inMemory,
+                            message: "Transaction conflict"
+                        )
+                    }
+                }
+
+                var staged = state.store
+                for operation in payload.operations {
+                    switch operation {
+                    case .set(let key, let value):
+                        staged.set(key, value)
+                    case .clear(let key):
+                        staged.delete(key)
+                    case .clearRange(let begin, let end):
+                        staged.deleteRange(begin: begin, end: end)
+                    case .atomic(let key, let param, let mutationType):
+                        switch try mutationType.apply(to: staged.get(key), param: param) {
+                        case .set(let bytes):
+                            staged.set(key, bytes)
+                        case .clear:
+                            staged.delete(key)
+                        case .unchanged:
+                            break
+                        }
+                    }
+                }
+                guard !payload.operations.isEmpty
+                        || !payload.writeConflictRegions.isEmpty else {
+                    return state.version
+                }
+                let (nextVersion, overflow) = state.version.addingReportingOverflow(1)
+                guard !overflow else {
+                    throw StorageError(
+                        code: .resourceUnavailable,
+                        operation: .commit,
+                        backend: .inMemory,
+                        message: "In-memory commit version exhausted"
+                    )
+                }
+                state.store = staged
+                state.version = nextVersion
+                if !payload.writeConflictRegions.isEmpty {
+                    state.committedWriteHistory.append(
+                        InMemoryEngine.CommittedWriteSet(
+                            version: nextVersion,
+                            regions: payload.writeConflictRegions
+                        )
+                    )
+                }
+                return nextVersion
+            }
+            return .success(version)
+        } catch let error as StorageError {
+            return .failure(error)
+        } catch {
+            return .failure(
+                StorageError(
+                    code: .backendFailure,
+                    operation: .commit,
+                    backend: .inMemory,
+                    message: "In-memory transaction commit failed",
+                    underlyingDescription: String(describing: error)
+                )
+            )
+        }
+    }
+
+    private static func readConflictRegion(
+        from begin: KeySelector,
+        to end: KeySelector
+    ) -> InMemoryConflictRegion? {
+        guard begin.offset == 1, end.offset == 1 else {
+            return .entireKeyspace
+        }
+        let lower = InMemoryConflictCut(
+            key: begin.key,
+            side: begin.orEqual ? .after : .before
+        )
+        let upper = InMemoryConflictCut(
+            key: end.key,
+            side: end.orEqual ? .after : .before
+        )
+        return .between(lower, upper)
+    }
+
+    private static func intersects(
+        _ left: [InMemoryConflictRegion],
+        _ right: [InMemoryConflictRegion]
+    ) -> Bool {
+        for leftRegion in left {
+            for rightRegion in right where leftRegion.overlaps(rightRegion) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func validateOpen(
+        _ lifecycle: Lifecycle,
+        operation: StorageOperation
+    ) throws {
+        switch lifecycle {
+        case .open:
+            return
+        case .committing:
+            throw stateError("Transaction is committing", operation: operation)
+        case .committed:
+            throw stateError("Transaction committed", operation: operation)
+        case .cancelling:
+            throw stateError("Transaction is cancelling", operation: operation)
+        case .cancelled:
+            throw stateError("Transaction cancelled", operation: operation)
+        case .failed(let error):
+            throw error
+        }
+    }
+
+    private static func stateError(
+        _ message: String,
+        operation: StorageOperation
+    ) -> StorageError {
+        StorageError(
+            code: .invalidOperation,
+            operation: operation,
+            backend: .inMemory,
+            message: message
+        )
+    }
+
+    private static func versionstamp(for version: Int64) -> Bytes {
+        let raw = UInt64(bitPattern: version).bigEndian
+        return Bytes.copying(count: 10) { destination in
+            withUnsafeBytes(of: raw) { source in
+                UnsafeMutableRawBufferPointer(rebasing: destination[0..<8])
+                    .copyMemory(from: source)
+            }
+            destination[8] = 0
+            destination[9] = 0
         }
     }
 }

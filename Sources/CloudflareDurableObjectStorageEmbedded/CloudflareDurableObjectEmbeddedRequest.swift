@@ -6,6 +6,10 @@ public enum CloudflareDurableObjectEmbeddedRequest: Sendable, Hashable {
     case read(CloudflareDurableObjectEmbeddedReadRequest)
     case range(CloudflareDurableObjectEmbeddedRangeRequest)
     case commit(CloudflareDurableObjectEmbeddedCommitRequest)
+    case rangeSize(CloudflareDurableObjectEmbeddedRangeSizeRequest)
+    case rangeSplitPoints(
+        CloudflareDurableObjectEmbeddedRangeSplitPointsRequest
+    )
 
     public var operation: CloudflareDurableObjectEmbeddedOperation {
         switch self {
@@ -17,10 +21,14 @@ public enum CloudflareDurableObjectEmbeddedRequest: Sendable, Hashable {
             return .range
         case .commit:
             return .commit
+        case .rangeSize:
+            return .rangeSize
+        case .rangeSplitPoints:
+            return .rangeSplitPoints
         }
     }
 
-    public func encode(into writer: inout EmbeddedBinaryWriter) throws(CloudflareDurableObjectEmbeddedError) {
+    public func encode(into writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) {
         operation.encode(into: &writer)
         switch self {
         case .readiness(let request):
@@ -31,10 +39,14 @@ public enum CloudflareDurableObjectEmbeddedRequest: Sendable, Hashable {
             try request.encode(into: &writer)
         case .commit(let request):
             try request.encode(into: &writer)
+        case .rangeSize(let request):
+            try request.encode(into: &writer)
+        case .rangeSplitPoints(let request):
+            try request.encode(into: &writer)
         }
     }
 
-    public init(from reader: inout EmbeddedBinaryReader) throws(CloudflareDurableObjectEmbeddedError) {
+    public init(from reader: inout EmbeddedWireReader) throws(CloudflareDurableObjectEmbeddedError) {
         switch try CloudflareDurableObjectEmbeddedOperation(from: &reader) {
         case .readiness:
             self = .readiness(try CloudflareDurableObjectEmbeddedReadinessRequest(from: &reader))
@@ -44,6 +56,18 @@ public enum CloudflareDurableObjectEmbeddedRequest: Sendable, Hashable {
             self = .range(try CloudflareDurableObjectEmbeddedRangeRequest(from: &reader))
         case .commit:
             self = .commit(try CloudflareDurableObjectEmbeddedCommitRequest(from: &reader))
+        case .rangeSize:
+            self = .rangeSize(
+                try CloudflareDurableObjectEmbeddedRangeSizeRequest(
+                    from: &reader
+                )
+            )
+        case .rangeSplitPoints:
+            self = .rangeSplitPoints(
+                try CloudflareDurableObjectEmbeddedRangeSplitPointsRequest(
+                    from: &reader
+                )
+            )
         }
     }
 }

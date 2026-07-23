@@ -4,8 +4,8 @@
 public struct TupleNil: TupleElement, Sendable {
     public init() {}
 
-    public func encodeTuple() -> Bytes {
-        [TupleTypeCode.null.rawValue]
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        sink.writeByte(TupleTypeCode.null.rawValue)
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> TupleNil {

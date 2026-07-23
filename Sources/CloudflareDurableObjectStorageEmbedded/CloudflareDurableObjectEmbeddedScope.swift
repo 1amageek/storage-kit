@@ -11,7 +11,14 @@ public struct CloudflareDurableObjectEmbeddedScope: Sendable, Hashable {
         tenantID: String? = nil,
         workspaceID: String? = nil
     ) throws(CloudflareDurableObjectEmbeddedError) {
-        guard Self.isValid(databaseID), Self.isValidOptional(tenantID), Self.isValidOptional(workspaceID) else {
+        guard Self.isValid(databaseID),
+              Self.isValidOptional(tenantID),
+              Self.isValidOptional(workspaceID),
+              Self.canonicalNameByteCount(
+                databaseID: databaseID,
+                tenantID: tenantID,
+                workspaceID: workspaceID
+              ) <= EmbeddedLimits.cloudflareDurableObject.maxCanonicalScopeNameBytes else {
             throw CloudflareDurableObjectEmbeddedError.invalidScope
         }
         self.databaseID = databaseID
@@ -19,13 +26,13 @@ public struct CloudflareDurableObjectEmbeddedScope: Sendable, Hashable {
         self.workspaceID = workspaceID
     }
 
-    public func encode(into writer: inout EmbeddedBinaryWriter) throws(CloudflareDurableObjectEmbeddedError) {
+    public func encode(into writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) {
         try CloudflareDurableObjectEmbeddedError.writeString(databaseID, into: &writer)
         try Self.writeOptional(tenantID, into: &writer)
         try Self.writeOptional(workspaceID, into: &writer)
     }
 
-    public init(from reader: inout EmbeddedBinaryReader) throws(CloudflareDurableObjectEmbeddedError) {
+    public init(from reader: inout EmbeddedWireReader) throws(CloudflareDurableObjectEmbeddedError) {
         try self.init(
             databaseID: try CloudflareDurableObjectEmbeddedError.readString(from: &reader),
             tenantID: try Self.readOptional(from: &reader),
@@ -35,7 +42,7 @@ public struct CloudflareDurableObjectEmbeddedScope: Sendable, Hashable {
 
     private static func writeOptional(
         _ value: String?,
-        into writer: inout EmbeddedBinaryWriter
+        into writer: inout EmbeddedWireWriter
     ) throws(CloudflareDurableObjectEmbeddedError) {
         if let value {
             writer.writeBool(true)
@@ -46,7 +53,7 @@ public struct CloudflareDurableObjectEmbeddedScope: Sendable, Hashable {
     }
 
     private static func readOptional(
-        from reader: inout EmbeddedBinaryReader
+        from reader: inout EmbeddedWireReader
     ) throws(CloudflareDurableObjectEmbeddedError) -> String? {
         let hasValue = try CloudflareDurableObjectEmbeddedError.readBool(from: &reader)
         guard hasValue else {
@@ -63,7 +70,8 @@ public struct CloudflareDurableObjectEmbeddedScope: Sendable, Hashable {
     }
 
     private static func isValid(_ value: String) -> Bool {
-        guard !isASCIIBlank(value) else {
+        guard value.utf8.count <= EmbeddedLimits.cloudflareDurableObject.maxScopeComponentBytes,
+              !isASCIIBlank(value) else {
             return false
         }
         for byte in value.utf8 where byte < 0x20 || byte == 0x7f {
@@ -85,6 +93,37 @@ public struct CloudflareDurableObjectEmbeddedScope: Sendable, Hashable {
             return true
         default:
             return false
+        }
+    }
+
+    private static func canonicalNameByteCount(
+        databaseID: String,
+        tenantID: String?,
+        workspaceID: String?
+    ) -> Int {
+        let fixedCount = "storage-kit/cfdo/v1/database//tenant//workspace/".utf8.count
+        return fixedCount
+            + base64URLCount(databaseID.utf8.count)
+            + optionalBase64URLCount(tenantID)
+            + optionalBase64URLCount(workspaceID)
+    }
+
+    private static func optionalBase64URLCount(_ value: String?) -> Int {
+        guard let value else {
+            return 1
+        }
+        return base64URLCount(value.utf8.count)
+    }
+
+    private static func base64URLCount(_ byteCount: Int) -> Int {
+        let completeGroups = byteCount / 3
+        switch byteCount % 3 {
+        case 0:
+            return completeGroups * 4
+        case 1:
+            return completeGroups * 4 + 2
+        default:
+            return completeGroups * 4 + 3
         }
     }
 }

@@ -1,7 +1,8 @@
 /// Transaction options.
 ///
 /// An abstraction of FDB's transaction options.
-/// Ignored by default in non-FDB backends.
+/// Backends must either implement an option completely or throw a typed
+/// `StorageError.unsupportedOperation`; options are never accepted as no-ops.
 public enum TransactionOption: Sendable {
     /// Transaction timeout (in milliseconds).
     case timeout(milliseconds: Int)

@@ -1,4 +1,4 @@
-import { compareBytes, equalBytes } from "./StorageKitByteOrdering.js";
+import { equalBytes } from "./StorageKitByteOrdering.js";
 import { mutationType } from "./StorageKitWireConstants.js";
 import { StorageKitWireError } from "./StorageKitWireError.js";
 
@@ -39,7 +39,7 @@ function add(existing, param) {
 
 function bitAnd(existing, param) {
   if (existing === null) {
-    return new Uint8Array(param);
+    return param;
   }
   const result = adjusted(existing, param.length);
   for (let index = 0; index < param.length; index += 1) {
@@ -65,16 +65,18 @@ function bitXor(existing, param) {
 }
 
 function max(existing, param) {
-  const current = adjusted(existing, param.length);
-  return compareLittleEndian(current, param) >= 0 ? current : new Uint8Array(param);
+  return compareAdjustedLittleEndian(existing, param) >= 0
+    ? adjustedWinner(existing, param.length)
+    : param;
 }
 
 function min(existing, param) {
   if (existing === null) {
-    return new Uint8Array(param);
+    return param;
   }
-  const current = adjusted(existing, param.length);
-  return compareLittleEndian(current, param) <= 0 ? current : new Uint8Array(param);
+  return compareAdjustedLittleEndian(existing, param) <= 0
+    ? adjustedWinner(existing, param.length)
+    : param;
 }
 
 function adjusted(value, length) {
@@ -89,14 +91,24 @@ function adjusted(value, length) {
   return result;
 }
 
-function compareLittleEndian(lhs, rhs) {
-  return compareBytes(reverse(lhs), reverse(rhs));
+function adjustedWinner(value, length) {
+  if (value.length === length) {
+    return value;
+  }
+  if (value.length > length) {
+    return value.subarray(0, length);
+  }
+  const result = new Uint8Array(length);
+  result.set(value);
+  return result;
 }
 
-function reverse(value) {
-  const result = new Uint8Array(value.length);
-  for (let index = 0; index < value.length; index += 1) {
-    result[index] = value[value.length - index - 1];
+function compareAdjustedLittleEndian(existing, param) {
+  for (let index = param.length - 1; index >= 0; index -= 1) {
+    const currentByte = index < existing.length ? existing[index] : 0;
+    if (currentByte !== param[index]) {
+      return currentByte < param[index] ? -1 : 1;
+    }
   }
-  return result;
+  return 0;
 }

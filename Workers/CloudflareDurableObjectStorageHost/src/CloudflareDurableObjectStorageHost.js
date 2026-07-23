@@ -1,16 +1,19 @@
 import { StorageKitDurableObjectHost } from "./StorageKitDurableObjectHost.js";
 import {
   invalidContentLengthResponse,
+  hostConfigurationErrorResponse,
+  hasStorageKitWireContentType,
   payloadTooLargeResponse,
   readBoundedRequestBytes,
   rejectOversizedContentLength,
   storageKitMaxRequestBytes,
   StorageKitInvalidContentLengthError,
+  StorageKitHostConfigurationError,
+  unsupportedMediaTypeResponse,
   StorageKitPayloadTooLargeError,
 } from "./StorageKitHostLimits.js";
 import { StorageKitRequestAuthorizer } from "./StorageKitRequestAuthorizer.js";
 import { nameForScope } from "./StorageKitScope.js";
-import { StorageKitWasmBridge } from "./StorageKitWasmBridge.js";
 import { statusCode } from "./StorageKitWireConstants.js";
 import { StorageKitWireCodec } from "./StorageKitWireCodec.js";
 
@@ -22,14 +25,19 @@ export class CloudflareDurableObjectStorageHost {
     this.env = env;
     this.host = new StorageKitDurableObjectHost(
       ctx.storage.sql,
-      (callback) => ctx.storage.transactionSync(callback)
+      (operation) => ctx.storage.transactionSync(operation)
     );
-    this.bridgePromise = null;
+    ctx.blockConcurrencyWhile(async () => {
+      this.host.migrate();
+    });
   }
 
   async fetch(request) {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
+    }
+    if (!hasStorageKitWireContentType(request)) {
+      return unsupportedMediaTypeResponse();
     }
 
     let requestBytes;
@@ -42,9 +50,12 @@ export class CloudflareDurableObjectStorageHost {
       if (error instanceof StorageKitInvalidContentLengthError) {
         return invalidContentLengthResponse();
       }
+      if (error instanceof StorageKitHostConfigurationError) {
+        return hostConfigurationErrorResponse(error);
+      }
       throw error;
     }
-    const responseBytes = await this.dispatch(requestBytes);
+    const responseBytes = this.dispatch(requestBytes);
     return new Response(responseBytes, {
       headers: {
         "content-type": "application/octet-stream",
@@ -52,23 +63,8 @@ export class CloudflareDurableObjectStorageHost {
     });
   }
 
-  async dispatch(requestBytes) {
-    if (this.env?.STORAGEKIT_WASM === undefined || this.env?.STORAGEKIT_WASM === null) {
-      return this.host.dispatchBytes(requestBytes);
-    }
-    const bridge = await this.bridge();
-    return bridge.dispatch(requestBytes);
-  }
-
-  bridge() {
-    if (this.bridgePromise === null) {
-      this.bridgePromise = StorageKitWasmBridge.instantiate(this.env.STORAGEKIT_WASM, this.host)
-        .then((bridge) => {
-          this.host.setMutationApplier(bridge);
-          return bridge;
-        });
-    }
-    return this.bridgePromise;
+  dispatch(requestBytes) {
+    return this.host.dispatchBytes(requestBytes);
   }
 }
 
@@ -82,8 +78,19 @@ export default {
     if (!authorization.allowed) {
       return authorization.response;
     }
+    if (!hasStorageKitWireContentType(request)) {
+      return unsupportedMediaTypeResponse();
+    }
 
-    const limit = storageKitMaxRequestBytes(env);
+    let limit;
+    try {
+      limit = storageKitMaxRequestBytes(env);
+    } catch (error) {
+      if (error instanceof StorageKitHostConfigurationError) {
+        return hostConfigurationErrorResponse(error);
+      }
+      throw error;
+    }
     const oversizedResponse = rejectOversizedContentLength(request, limit);
     if (oversizedResponse !== null) {
       return oversizedResponse;
@@ -103,9 +110,9 @@ export default {
     }
     let decodedRequest;
     try {
-      decodedRequest = StorageKitWireCodec.decodeRequest(requestBytes);
+      decodedRequest = StorageKitWireCodec.decodeRoutingScope(requestBytes);
     } catch (error) {
-      return binaryResponse(StorageKitWireCodec.encodeFailure(
+      return storageWireResponse(StorageKitWireCodec.encodeFailure(
         statusCode.invalidOperation,
         errorMessage(error)
       ));
@@ -113,7 +120,7 @@ export default {
 
     const namespace = env?.[durableObjectBindingName];
     if (namespace === undefined || namespace === null) {
-      return binaryResponse(StorageKitWireCodec.encodeFailure(
+      return storageWireResponse(StorageKitWireCodec.encodeFailure(
         statusCode.resourceUnavailable,
         "Cloudflare Durable Object binding is not configured"
       ));
@@ -125,7 +132,7 @@ export default {
       const id = namespace.idFromName(durableObjectName);
       stub = namespace.get(id);
     } catch (error) {
-      return binaryResponse(StorageKitWireCodec.encodeFailure(
+      return storageWireResponse(StorageKitWireCodec.encodeFailure(
         statusCode.invalidOperation,
         errorMessage(error)
       ));
@@ -141,7 +148,7 @@ export default {
   },
 };
 
-function binaryResponse(bytes) {
+function storageWireResponse(bytes) {
   return new Response(bytes, {
     headers: {
       "content-type": "application/octet-stream",

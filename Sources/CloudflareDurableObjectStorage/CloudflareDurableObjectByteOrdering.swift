@@ -1,19 +1,9 @@
 import StorageKit
+import StorageKitEmbeddedCore
 
 enum CloudflareDurableObjectByteOrdering {
     static func compare(_ lhs: Bytes, _ rhs: Bytes) -> Int {
-        let minCount = min(lhs.count, rhs.count)
-        var index = 0
-        while index < minCount {
-            if lhs[index] != rhs[index] {
-                return lhs[index] < rhs[index] ? -1 : 1
-            }
-            index += 1
-        }
-        if lhs.count == rhs.count {
-            return 0
-        }
-        return lhs.count < rhs.count ? -1 : 1
+        EmbeddedByteOrdering.compare(lhs, rhs)
     }
 
     static func sortedUnique(_ keys: [Bytes]) -> [Bytes] {

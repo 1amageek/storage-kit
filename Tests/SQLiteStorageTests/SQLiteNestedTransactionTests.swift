@@ -35,19 +35,20 @@ struct SQLiteNestedTransactionTests {
     // MARK: - Nested withTransaction
     //
     // SQLiteStorageEngine uses ActiveTransactionScope (TaskLocal) to detect
-    // nested withTransaction calls. The inner call reuses the existing
-    // transaction instead of acquiring a new lock.
+    // nested withTransaction calls. The inner call opens a SQLite savepoint on
+    // the active FIFO connection lease.
     // =========================================================================
 
-    @Test func nestedWithTransaction_reusesExistingTransaction() async throws {
+    @Test func nestedTransactionUsesSQLiteSavepoint() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
+        let leaseBaseline = await engine.leaseInstrumentation
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
-            // Nested withTransaction should reuse the same transaction
+            // Nested withTransaction enters a child savepoint.
             try await engine.withTransaction { innerTx in
-                innerTx.setValue([20], for: [0x02])
+                try innerTx.setValue([20], for: [0x02])
 
                 // Inner should see outer's writes
                 let v1 = try await innerTx.getValue(for: [0x01])
@@ -66,23 +67,37 @@ struct SQLiteNestedTransactionTests {
             #expect(v1 == [10])
             #expect(v2 == [20])
         }
+
+        let leaseMeasured = await engine.leaseInstrumentation
+        #expect(
+            leaseMeasured.savepointBeginCount
+                == leaseBaseline.savepointBeginCount + 1
+        )
+        #expect(
+            leaseMeasured.savepointReleaseCount
+                == leaseBaseline.savepointReleaseCount + 1
+        )
+        #expect(
+            leaseMeasured.savepointRollbackCount
+                == leaseBaseline.savepointRollbackCount
+        )
     }
 
     @Test func nestedWithTransaction_errorInInner_propagatesToOuter() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        struct InnerError: Error {}
+        struct NestedTransactionBodyFailure: Error {}
 
         do {
             try await engine.withTransaction { outerTx in
-                outerTx.setValue([10], for: [0x01])
+                try outerTx.setValue([10], for: [0x01])
 
                 try await engine.withTransaction { innerTx in
-                    innerTx.setValue([20], for: [0x02])
-                    throw InnerError()
+                    try innerTx.setValue([20], for: [0x02])
+                    throw NestedTransactionBodyFailure()
                 }
             }
             Issue.record("Expected error")
-        } catch is InnerError {}
+        } catch is NestedTransactionBodyFailure {}
 
         // Everything should be rolled back
         try await engine.withTransaction { tx in
@@ -97,15 +112,15 @@ struct SQLiteNestedTransactionTests {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
-            // createTransaction inside withTransaction should create a child
-            // transaction backed by its own write buffer.
+            // createTransaction inside withTransaction creates a child whose
+            // first async operation opens a SQLite savepoint.
             let childTx = try engine.createTransaction()
             let inheritedValue = try await childTx.getValue(for: [0x01])
             #expect(inheritedValue == [10])
 
-            childTx.setValue([20], for: [0x02])
+            try childTx.setValue([20], for: [0x02])
             try await childTx.commit()
 
             // Outer should see committed child writes.
@@ -118,15 +133,15 @@ struct SQLiteNestedTransactionTests {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             let childTx = try engine.createTransaction()
-            childTx.setValue([20], for: [0x02])
+            try childTx.setValue([20], for: [0x02])
 
             let childRange = try await collectRange(childTx, begin: [0x00], end: [0xFF])
             #expect(childRange.map(\.key) == [[0x01], [0x02]])
 
-            childTx.cancel()
+            try await childTx.cancel()
 
             let outerValue = try await outerTx.getValue(for: [0x01])
             let cancelledChildValue = try await outerTx.getValue(for: [0x02])
@@ -146,11 +161,11 @@ struct SQLiteNestedTransactionTests {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             let childTx = try engine.createTransaction()
-            childTx.setValue([20], for: [0x02])
-            childTx.atomicOp(key: [0x03], param: [0x00], mutationType: .setVersionstampedKey)
+            try childTx.setValue([20], for: [0x02])
+            try childTx.atomicOp(key: [0x03], param: [0x00], mutationType: .setVersionstampedKey)
 
             do {
                 try await childTx.commit()
@@ -162,7 +177,7 @@ struct SQLiteNestedTransactionTests {
             let childValue = try await outerTx.getValue(for: [0x02])
             #expect(childValue == nil)
 
-            outerTx.setValue([30], for: [0x04])
+            try outerTx.setValue([30], for: [0x04])
         }
 
         try await engine.withTransaction { tx in
@@ -179,10 +194,10 @@ struct SQLiteNestedTransactionTests {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             let childTx = try engine.createTransaction()
-            childTx.atomicOp(key: [0x01], param: [5], mutationType: .add)
+            try childTx.atomicOp(key: [0x01], param: [5], mutationType: .add)
             try await childTx.commit()
 
             let value = try await outerTx.getValue(for: [0x01])
@@ -195,24 +210,35 @@ struct SQLiteNestedTransactionTests {
         }
     }
 
-    @Test func nestedCreateTransaction_parentDoesNotSeeUncommittedChildAfterRange() async throws {
+    @Test func nestedCreateTransaction_parentIsSuspendedUntilChildCancellation() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             let childTx = try engine.createTransaction()
-            childTx.setValue([20], for: [0x02])
+            try childTx.setValue([20], for: [0x02])
 
             let childRange = try await collectRange(childTx, begin: [0x00], end: [0xFF])
             #expect(childRange.map(\.key) == [[0x01], [0x02]])
 
+            do {
+                _ = try await outerTx.getValue(for: [0x02])
+                Issue.record("Expected the parent read to be suspended")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+            }
+
+            try await childTx.cancel()
+
             let parentPointRead = try await outerTx.getValue(for: [0x02])
-            let parentRange = try await collectRange(outerTx, begin: [0x00], end: [0xFF])
+            let parentRange = try await collectRange(
+                outerTx,
+                begin: [0x00],
+                end: [0xFF]
+            )
             #expect(parentPointRead == nil)
             #expect(parentRange.map(\.key) == [[0x01]])
-
-            childTx.cancel()
         }
     }
 
@@ -220,16 +246,21 @@ struct SQLiteNestedTransactionTests {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             let childTx = try engine.createTransaction()
-            childTx.setValue([20], for: [0x02])
+            try childTx.setValue([20], for: [0x02])
 
             let childRange = try await collectRange(childTx, begin: [0x00], end: [0xFF])
             #expect(childRange.map(\.key) == [[0x01], [0x02]])
 
-            outerTx.setValue([30], for: [0x03])
-            childTx.atomicOp(key: [0x04], param: [0x00], mutationType: .setVersionstampedKey)
+            do {
+                try outerTx.setValue([30], for: [0x03])
+                Issue.record("Expected the parent write to be suspended")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+            }
+            try childTx.atomicOp(key: [0x04], param: [0x00], mutationType: .setVersionstampedKey)
 
             do {
                 try await childTx.commit()
@@ -237,6 +268,8 @@ struct SQLiteNestedTransactionTests {
             } catch let error as StorageError {
                 #expect(error.code == .invalidOperation)
             }
+
+            try outerTx.setValue([30], for: [0x03])
 
             #expect(try await outerTx.getValue(for: [0x01]) == [10])
             #expect(try await outerTx.getValue(for: [0x02]) == nil)
@@ -253,22 +286,52 @@ struct SQLiteNestedTransactionTests {
         }
     }
 
-    @Test func nestedCreateTransaction_rangeSeesParentWritesAfterChildCreation() async throws {
+    @Test func nestedCreateTransaction_parentMutationsResumeAfterChildCancellation() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
             let childTx = try engine.createTransaction()
 
-            outerTx.setValue([20], for: [0x02])
-            childTx.setValue([30], for: [0x03])
+            do {
+                try outerTx.setValue([20], for: [0x02])
+                Issue.record("Expected the parent write to be suspended")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+            }
+            try childTx.setValue([30], for: [0x03])
 
             let childRange = try await collectRange(childTx, begin: [0x00], end: [0xFF])
-            #expect(childRange.map(\.key) == [[0x01], [0x02], [0x03]])
+            #expect(childRange.map(\.key) == [[0x01], [0x03]])
 
-            childTx.cancel()
+            try await childTx.cancel()
+            try outerTx.setValue([20], for: [0x02])
             let outerRange = try await collectRange(outerTx, begin: [0x00], end: [0xFF])
             #expect(outerRange.map(\.key) == [[0x01], [0x02]])
+        }
+    }
+
+    @Test func rejectedParentMutationDoesNotConsumeAdmissionBudget() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+
+        try await engine.withTransaction { parent in
+            try parent.configureMutationByteLimit(maximumBytes: 19)
+            let child = try engine.createTransaction()
+
+            do {
+                try parent.setValue([0xA1], for: [0x01])
+                Issue.record("Expected the parent write to be suspended")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+            }
+
+            try await child.cancel()
+            try parent.setValue([0xA1], for: [0x01])
+        }
+
+        try await engine.withTransaction { transaction in
+            let storedValue = try await transaction.getValue(for: [0x01])
+            #expect(storedValue == [0xA1])
         }
     }
 
@@ -276,11 +339,11 @@ struct SQLiteNestedTransactionTests {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([20], for: [0x20])
-            outerTx.setValue([30], for: [0x30])
+            try outerTx.setValue([20], for: [0x20])
+            try outerTx.setValue([30], for: [0x30])
 
             let childTx = try engine.createTransaction()
-            childTx.clear(key: [0x30])
+            try childTx.clear(key: [0x30])
 
             let childRange = try await collectRange(
                 childTx,
@@ -289,26 +352,33 @@ struct SQLiteNestedTransactionTests {
             )
 
             #expect(childRange.map(\.key) == [[0x20]])
-            childTx.cancel()
+            try await childTx.cancel()
         }
     }
 
-    @Test func nestedCreateTransaction_siblingCommitSurvivesEarlierChildCancel() async throws {
+    @Test func nestedCreateTransaction_enforcesStrictLIFOBeforeSequentialSibling() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             let firstChild = try engine.createTransaction()
-            firstChild.setValue([20], for: [0x02])
+            try firstChild.setValue([20], for: [0x02])
             let firstRange = try await collectRange(firstChild, begin: [0x00], end: [0xFF])
             #expect(firstRange.map(\.key) == [[0x01], [0x02]])
 
-            let secondChild = try engine.createTransaction()
-            secondChild.setValue([30], for: [0x03])
-            try await secondChild.commit()
+            do {
+                _ = try engine.createTransaction()
+                Issue.record("Expected strict LIFO child creation rejection")
+            } catch let error as StorageError {
+                #expect(error.code == .invalidOperation)
+            }
 
-            firstChild.cancel()
+            try await firstChild.cancel()
+
+            let secondChild = try engine.createTransaction()
+            try secondChild.setValue([30], for: [0x03])
+            try await secondChild.commit()
 
             #expect(try await outerTx.getValue(for: [0x02]) == nil)
             #expect(try await outerTx.getValue(for: [0x03]) == [30])
@@ -324,18 +394,50 @@ struct SQLiteNestedTransactionTests {
         }
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func releasedActiveChildRollsBackSavepointAndResumesParent() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+        let leaseBaseline = await engine.leaseInstrumentation
+
+        try await engine.withTransaction { parent in
+            let sqliteParent = try #require(
+                parent as? SQLiteStorageTransaction
+            )
+            try parent.setValue([0xA1], for: [0x01])
+            var child: SQLiteStorageTransaction? = try engine.createTransaction()
+            try child?.setValue([0xA2], for: [0x02])
+            #expect(try await child?.getValue(for: [0x02]) == [0xA2])
+
+            child = nil
+            for _ in 0..<10_000 {
+                if sqliteParent.hasActiveChild == false {
+                    break
+                }
+                await Task.yield()
+            }
+            #expect(sqliteParent.hasActiveChild == false)
+            #expect(try await parent.getValue(for: [0x01]) == [0xA1])
+            #expect(try await parent.getValue(for: [0x02]) == nil)
+        }
+
+        let measured = await engine.leaseInstrumentation
+        #expect(measured.savepointBeginCount == leaseBaseline.savepointBeginCount + 1)
+        #expect(measured.savepointRollbackCount == leaseBaseline.savepointRollbackCount + 1)
+        #expect(measured.savepointReleaseCount == leaseBaseline.savepointReleaseCount + 1)
+    }
+
     @Test func multipleSequentialNestedTransactions() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
         try await engine.withTransaction { outerTx in
-            outerTx.setValue([10], for: [0x01])
+            try outerTx.setValue([10], for: [0x01])
 
             try await engine.withTransaction { inner1 in
-                inner1.setValue([20], for: [0x02])
+                try inner1.setValue([20], for: [0x02])
             }
 
             try await engine.withTransaction { inner2 in
-                inner2.setValue([30], for: [0x03])
+                try inner2.setValue([30], for: [0x03])
                 // Should see writes from both outer and inner1
                 let v1 = try await inner2.getValue(for: [0x01])
                 let v2 = try await inner2.getValue(for: [0x02])
@@ -361,7 +463,7 @@ struct SQLiteNestedTransactionTests {
     @Test func shutdown_closesConnection() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
         try await engine.withTransaction { tx in
-            tx.setValue([42], for: [0x01])
+            try tx.setValue([42], for: [0x01])
         }
 
         engine.shutdown()
@@ -390,7 +492,7 @@ struct SQLiteNestedTransactionTests {
 
         do {
             try await engine.withTransaction { tx in
-                tx.setValue([42], for: [0x01])
+                try tx.setValue([42], for: [0x01])
             }
             Issue.record("Expected error after close")
         } catch let error as StorageError {

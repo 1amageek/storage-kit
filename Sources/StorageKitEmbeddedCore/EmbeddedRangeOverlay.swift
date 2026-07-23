@@ -1,10 +1,10 @@
 /// Applies transaction-local writes to committed rows using StorageKit ordering.
 public enum EmbeddedRangeOverlay {
     public static func value(
-        for key: [UInt8],
-        committed: [UInt8]?,
+        for key: EmbeddedBytes,
+        committed: EmbeddedBytes?,
         applying writes: [EmbeddedWriteOperation]
-    ) throws(EmbeddedRangeOverlayError) -> [UInt8]? {
+    ) throws(EmbeddedRangeOverlayError) -> EmbeddedBytes? {
         var value = committed
         for write in writes {
             switch write {
@@ -41,8 +41,8 @@ public enum EmbeddedRangeOverlay {
     public static func overlay(
         committedRows: [EmbeddedKeyValue],
         writes: [EmbeddedWriteOperation],
-        begin: EmbeddedKeySelector,
-        end: EmbeddedKeySelector,
+        begin: EmbeddedRangeBoundary,
+        end: EmbeddedRangeBoundary,
         reverse: Bool,
         limit: Int
     ) throws(EmbeddedRangeOverlayError) -> [EmbeddedKeyValue] {
@@ -81,13 +81,25 @@ public enum EmbeddedRangeOverlay {
         }
 
         rows.sort { EmbeddedByteOrdering.lessThan($0.key, $1.key) }
-        var keys: [[UInt8]] = []
+        var keys: [EmbeddedBytes] = []
         keys.reserveCapacity(rows.count)
         for row in rows {
             keys.append(row.key)
         }
-        let start = max(0, begin.resolve(in: keys))
-        let finish = min(rows.count, end.resolve(in: keys))
+        let start: Int
+        switch begin {
+        case .unbounded:
+            start = 0
+        case .selector(let selector):
+            start = max(0, selector.resolve(in: keys))
+        }
+        let finish: Int
+        switch end {
+        case .unbounded:
+            finish = rows.count
+        case .selector(let selector):
+            finish = min(rows.count, selector.resolve(in: keys))
+        }
         guard start < finish else {
             return []
         }

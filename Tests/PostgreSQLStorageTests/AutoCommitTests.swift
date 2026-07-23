@@ -9,14 +9,14 @@ private struct PostgreSQLStorageDomainError: Error {}
 ///
 /// Verifies that auto-commit operations produce the same results as
 /// transactional operations for single-statement use cases.
-extension AllPostgreSQLTests {
-@Suite("AutoCommit Tests", .serialized, .enabled(if: PostgreSQLTestHelper.isAvailable))
+extension SerializedPostgreSQLStorageTests {
+@Suite("AutoCommit Tests", .serialized, .enabled(if: PostgreSQLTestEnvironment.isConfigured))
 struct AutoCommitTests {
 
     private func makeEngine() async throws -> PostgreSQLStorageEngine {
-        let engine = try await PostgreSQLTestHelper.makeEngine()
+        let engine = try await PostgreSQLTestEnvironment.makeEngine()
         try await engine.withTransaction { tx in
-            tx.clearRange(beginKey: [0x00], endKey: [0xFF, 0xFF])
+            try tx.clearRange(beginKey: [0x00], endKey: [0xFF, 0xFF])
         }
         return engine
     }
@@ -27,12 +27,12 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-read-1".utf8)
-        let value: Bytes = Array("hello".utf8)
+        let key: Bytes = Bytes("ac-read-1".utf8)
+        let value: Bytes = Bytes("hello".utf8)
 
         // Write via transaction
         try await engine.withTransaction { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         // Read via auto-commit
@@ -48,7 +48,7 @@ struct AutoCommitTests {
         defer { engine.shutdown() }
 
         let result = try await engine.withAutoCommit { tx in
-            try await tx.getValue(for: Array("ac-nonexistent".utf8), snapshot: false)
+            try await tx.getValue(for: Bytes("ac-nonexistent".utf8), snapshot: false)
         }
 
         #expect(result == nil)
@@ -60,12 +60,12 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-write-1".utf8)
-        let value: Bytes = Array("world".utf8)
+        let key: Bytes = Bytes("ac-write-1".utf8)
+        let value: Bytes = Bytes("world".utf8)
 
         // Write via auto-commit
         try await engine.withAutoCommit { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         // Verify via transaction
@@ -80,17 +80,17 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-delete-1".utf8)
-        let value: Bytes = Array("to-delete".utf8)
+        let key: Bytes = Bytes("ac-delete-1".utf8)
+        let value: Bytes = Bytes("to-delete".utf8)
 
         // Insert via transaction
         try await engine.withTransaction { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         // Delete via auto-commit
         try await engine.withAutoCommit { tx in
-            tx.clear(key: key)
+            try tx.clear(key: key)
         }
 
         // Verify deletion via transaction
@@ -107,12 +107,12 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-consistency".utf8)
-        let value: Bytes = Array("consistent-value".utf8)
+        let key: Bytes = Bytes("ac-consistency".utf8)
+        let value: Bytes = Bytes("consistent-value".utf8)
 
         // Write via auto-commit
         try await engine.withAutoCommit { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         // Read via both paths
@@ -131,11 +131,11 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-visibility".utf8)
-        let value: Bytes = Array("visible-value".utf8)
+        let key: Bytes = Bytes("ac-visibility".utf8)
+        let value: Bytes = Bytes("visible-value".utf8)
 
         try await engine.withAutoCommit { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         // Verify the write is durable and visible
@@ -152,12 +152,12 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-nested".utf8)
-        let value: Bytes = Array("nested-value".utf8)
+        let key: Bytes = Bytes("ac-nested".utf8)
+        let value: Bytes = Bytes("nested-value".utf8)
 
         // Auto-commit inside a transaction should reuse the transaction
         try await engine.withTransaction { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
 
             // Nested auto-commit should see the buffered write
             let result = try await engine.withAutoCommit { innerTx in
@@ -174,11 +174,11 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-reverse-nested".utf8)
-        let value: Bytes = Array("reverse-value".utf8)
+        let key: Bytes = Bytes("ac-reverse-nested".utf8)
+        let value: Bytes = Bytes("reverse-value".utf8)
 
         try await engine.withAutoCommit { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
 
             // Nested withTransaction should reuse the auto-commit transaction
             let result = try await engine.withTransaction { innerTx in
@@ -195,16 +195,16 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-overwrite".utf8)
-        let original: Bytes = Array("original".utf8)
-        let updated: Bytes = Array("updated".utf8)
+        let key: Bytes = Bytes("ac-overwrite".utf8)
+        let original: Bytes = Bytes("original".utf8)
+        let updated: Bytes = Bytes("updated".utf8)
 
         try await engine.withAutoCommit { tx in
-            tx.setValue(original, for: key)
+            try tx.setValue(original, for: key)
         }
 
         try await engine.withAutoCommit { tx in
-            tx.setValue(updated, for: key)
+            try tx.setValue(updated, for: key)
         }
 
         let result = try await engine.withAutoCommit { tx in
@@ -222,7 +222,7 @@ struct AutoCommitTests {
 
         await #expect(throws: PostgreSQLStorageDomainError.self) {
             try await engine.withTransaction { tx in
-                _ = try await tx.getValue(for: Array("domain-error-transaction".utf8), snapshot: false)
+                _ = try await tx.getValue(for: Bytes("domain-error-transaction".utf8), snapshot: false)
                 throw PostgreSQLStorageDomainError()
             }
         }
@@ -234,7 +234,7 @@ struct AutoCommitTests {
 
         await #expect(throws: PostgreSQLStorageDomainError.self) {
             try await engine.withAutoCommit { tx in
-                _ = try await tx.getValue(for: Array("domain-error-auto-commit".utf8), snapshot: false)
+                _ = try await tx.getValue(for: Bytes("domain-error-auto-commit".utf8), snapshot: false)
                 throw PostgreSQLStorageDomainError()
             }
         }
@@ -244,11 +244,11 @@ struct AutoCommitTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = Array("ac-return".utf8)
-        let value: Bytes = Array("return-value".utf8)
+        let key: Bytes = Bytes("ac-return".utf8)
+        let value: Bytes = Bytes("return-value".utf8)
 
         try await engine.withAutoCommit { tx in
-            tx.setValue(value, for: key)
+            try tx.setValue(value, for: key)
         }
 
         let result: Bool = try await engine.withAutoCommit { tx in
@@ -259,4 +259,4 @@ struct AutoCommitTests {
         #expect(result == true)
     }
 }
-} // extension AllPostgreSQLTests
+} // extension SerializedPostgreSQLStorageTests

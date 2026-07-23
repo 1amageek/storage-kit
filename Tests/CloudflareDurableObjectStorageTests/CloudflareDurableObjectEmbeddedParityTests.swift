@@ -4,7 +4,7 @@ import CloudflareDurableObjectStorageEmbedded
 
 @Suite("Cloudflare Durable Object Embedded Parity Tests")
 struct CloudflareDurableObjectEmbeddedParityTests {
-    @Test func embeddedScopeRejectsSameBlankValuesAsRegularScope() throws {
+    @Test func embeddedScopeRejectsSameBlankValuesAsStorageScope() throws {
         #expect(throws: CloudflareDurableObjectScopeValidationError.self) {
             _ = try CloudflareDurableObjectStorageScope(databaseID: " \t\n")
         }
@@ -13,8 +13,8 @@ struct CloudflareDurableObjectEmbeddedParityTests {
         }
     }
 
-    @Test func embeddedNameCodecMatchesRegularNameCodecForValidScope() throws {
-        let regularScope = try CloudflareDurableObjectStorageScope(
+    @Test func embeddedAndStorageScopesResolveSameName() throws {
+        let storageScope = try CloudflareDurableObjectStorageScope(
             databaseID: "database",
             tenantID: "tenant",
             workspaceID: "workspace"
@@ -25,9 +25,9 @@ struct CloudflareDurableObjectEmbeddedParityTests {
             workspaceID: "workspace"
         )
 
-        let regularName = try CloudflareDurableObjectV1NameCodec().name(for: regularScope)
+        let storageName = try storageScope.durableObjectName()
         let embeddedName = CloudflareDurableObjectEmbeddedNameCodec.name(for: embeddedScope)
 
-        #expect(embeddedName == regularName)
+        #expect(embeddedName == storageName)
     }
 }

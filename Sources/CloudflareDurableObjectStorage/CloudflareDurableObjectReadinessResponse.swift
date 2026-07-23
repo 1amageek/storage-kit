@@ -1,5 +1,5 @@
 /// Host readiness response.
-public struct CloudflareDurableObjectReadinessResponse: Sendable, Hashable, Codable {
+public struct CloudflareDurableObjectReadinessResponse: Sendable, Hashable {
     public let schemaVersion: Int
     public let commitVersion: Int64
     public let metadataInitialized: Bool

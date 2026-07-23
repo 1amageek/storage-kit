@@ -1,10 +1,18 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 // MARK: - Bool
 
 extension Bool: TupleElement {
-    public func encodeTuple() -> Bytes {
-        [self ? TupleTypeCode.boolTrue.rawValue : TupleTypeCode.boolFalse.rawValue]
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        sink.writeByte(
+            self
+                ? TupleTypeCode.boolTrue.rawValue
+                : TupleTypeCode.boolFalse.rawValue
+        )
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Bool {
@@ -25,11 +33,25 @@ extension Bool: TupleElement {
 
 extension UUID: TupleElement {
     /// Type code 0x30 + 16 bytes (canonical byte order).
-    public func encodeTuple() -> Bytes {
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
         let u = self.uuid
-        return [TupleTypeCode.uuid.rawValue,
-                u.0, u.1, u.2, u.3, u.4, u.5, u.6, u.7,
-                u.8, u.9, u.10, u.11, u.12, u.13, u.14, u.15]
+        sink.writeByte(TupleTypeCode.uuid.rawValue)
+        sink.writeByte(u.0)
+        sink.writeByte(u.1)
+        sink.writeByte(u.2)
+        sink.writeByte(u.3)
+        sink.writeByte(u.4)
+        sink.writeByte(u.5)
+        sink.writeByte(u.6)
+        sink.writeByte(u.7)
+        sink.writeByte(u.8)
+        sink.writeByte(u.9)
+        sink.writeByte(u.10)
+        sink.writeByte(u.11)
+        sink.writeByte(u.12)
+        sink.writeByte(u.13)
+        sink.writeByte(u.14)
+        sink.writeByte(u.15)
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> UUID {
@@ -49,8 +71,8 @@ extension UUID: TupleElement {
 
 extension Date: TupleElement {
     /// Encoded as a Double (timeIntervalSince1970).
-    public func encodeTuple() -> Bytes {
-        self.timeIntervalSince1970.encodeTuple()
+    public func encodeTuple(to sink: inout TupleEncodingSink) {
+        timeIntervalSince1970.encodeTuple(to: &sink)
     }
 
     public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Date {

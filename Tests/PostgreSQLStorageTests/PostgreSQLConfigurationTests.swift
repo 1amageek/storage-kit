@@ -2,7 +2,7 @@ import Testing
 @testable import PostgreSQLStorage
 @testable import StorageKit
 
-extension AllPostgreSQLTests {
+extension SerializedPostgreSQLStorageTests {
     @Suite("PostgreSQL Configuration Tests")
     struct PostgreSQLConfigurationTests {
         @Test func cloudSQLUnixSocketPathUsesCloudRunLayout() {
@@ -382,7 +382,8 @@ extension AllPostgreSQLTests {
 
             #expect(mapped.code == .commitUnknownResult)
             #expect(mapped.operation == .commit)
-            #expect(mapped.isRetryable)
+            #expect(mapped.retryDisposition == .requiresIdempotency)
+            #expect(!mapped.isRetryable)
         }
 
         @Test func mapSQLState_serverShutdownIsRetryableConnectionFailure() {
@@ -408,7 +409,8 @@ extension AllPostgreSQLTests {
 
             #expect(mapped.code == .commitUnknownResult)
             #expect(mapped.operation == .commit)
-            #expect(mapped.isRetryable)
+            #expect(mapped.retryDisposition == .requiresIdempotency)
+            #expect(!mapped.isRetryable)
         }
 
         @Test func mapSQLState_serializationFailureIsRetryableConflict() {

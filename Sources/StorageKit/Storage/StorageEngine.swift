@@ -36,6 +36,9 @@ public protocol StorageEngine: Sendable {
     /// - SQLite / InMemory: `StaticDirectoryService` — deterministic Tuple encoding.
     var directoryService: any DirectoryService { get }
 
+    /// Monotonic clock used for deadlines, retry backoff, and throttling.
+    var monotonicClock: any StorageMonotonicClock { get }
+
     /// Release resources held by this engine.
     ///
     /// Called when the engine is no longer needed.
@@ -69,7 +72,65 @@ extension StorageEngine {
     /// without backend-specific logic.
     public var directoryService: any DirectoryService { StaticDirectoryService() }
 
+    public var monotonicClock: any StorageMonotonicClock {
+        SystemStorageClock()
+    }
+
     public func shutdown() {}
+
+    /// Resolve a directory in a one-shot transaction.
+    ///
+    /// Application write paths that already own a transaction must call the
+    /// transaction-aware `DirectoryService` API directly so namespace metadata
+    /// shares their commit boundary.
+    public func createOrOpenDirectory(path: [String]) async throws -> Subspace {
+        try await withTransaction { transaction in
+            try await directoryService.createOrOpen(
+                path: path,
+                transaction: transaction
+            )
+        }
+    }
+
+    /// Open a directory in a one-shot transaction.
+    public func openDirectory(path: [String]) async throws -> Subspace {
+        try await withTransaction { transaction in
+            try await directoryService.open(
+                path: path,
+                transaction: transaction
+            )
+        }
+    }
+
+    /// List directories in a one-shot transaction.
+    public func listDirectories(path: [String]) async throws -> [String] {
+        try await withTransaction { transaction in
+            try await directoryService.list(
+                path: path,
+                transaction: transaction
+            )
+        }
+    }
+
+    /// Remove a directory in a one-shot transaction.
+    public func removeDirectory(path: [String]) async throws {
+        try await withTransaction { transaction in
+            try await directoryService.remove(
+                path: path,
+                transaction: transaction
+            )
+        }
+    }
+
+    /// Test directory existence in a one-shot transaction.
+    public func directoryExists(path: [String]) async throws -> Bool {
+        try await withTransaction { transaction in
+            try await directoryService.exists(
+                path: path,
+                transaction: transaction
+            )
+        }
+    }
 
     /// Execute a transaction once.
     ///
@@ -86,8 +147,16 @@ extension StorageEngine {
                 try await transaction.commit()
                 return result
             } catch {
-                transaction.cancel()
-                throw error
+                let operationError = error
+                do {
+                    try await transaction.cancel()
+                } catch {
+                    throw StorageTransactionCleanupError(
+                        operationError: operationError,
+                        cancellationError: error
+                    )
+                }
+                throw operationError
             }
         }
     }
