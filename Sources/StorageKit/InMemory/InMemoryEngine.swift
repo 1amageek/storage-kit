@@ -547,11 +547,19 @@ public final class InMemoryTransaction: Transaction, Sendable {
                     state.lifecycle = .failed(error)
                 }
             }
-            versionstampCompletion.resolveIfPending(
-                Self.versionstampResult(for: result)
-            )
+            switch Self.versionstampResult(for: result) {
+            case .success(let versionstamp):
+                versionstampCompletion.succeed(versionstamp)
+            case .failure(let error):
+                versionstampCompletion.fail(error)
+            }
             let completionResult = result.map { _ in () }
-            completion.resolve(completionResult)
+            switch completionResult {
+            case .success:
+                completion.succeed()
+            case .failure(let error):
+                completion.fail(error)
+            }
             try completionResult.get()
         case .wait(let completion):
             try await completion.wait()
@@ -600,13 +608,13 @@ public final class InMemoryTransaction: Transaction, Sendable {
         case .leader(let completion):
             engine.releaseTransaction(transactionIdentifier)
             _state.withLock { $0.lifecycle = .cancelled }
-            versionstampCompletion.resolveIfPending(
-                .failure(Self.stateError(
+            versionstampCompletion.fail(
+                Self.stateError(
                     "Transaction cancelled",
                     operation: .read
-                ))
+                )
             )
-            completion.resolve(.success(()))
+            completion.succeed()
         case .waitForCancellation(let completion):
             try await completion.wait()
         case .waitForCommit(let completion):

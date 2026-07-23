@@ -453,7 +453,12 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         case .leader(let completion):
             switch await performCommit() {
             case .resolve(let result):
-                completion.resolve(result)
+                switch result {
+                case .success:
+                    completion.succeed()
+                case .failure(let error):
+                    completion.fail(error)
+                }
                 try result.get()
             case .resolvedByCancellation:
                 try await completion.wait()
@@ -506,7 +511,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 }
                 state.lifecycle = .cancelled(error)
             }
-            preparation.cleanup.resolve(.success(()))
+            preparation.cleanup.succeed()
             return .resolvedByCancellation
         case .fail(let error):
             fdbTransaction.cancel()
@@ -697,10 +702,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             }
             let error = Self.cancellationError(operation: .cancel)
             state.withLock { $0.lifecycle = .cancelled(error) }
-            completion.resolve(.success(()))
+            completion.succeed()
         case .preparationLeader(let preparation, let error):
             fdbTransaction.cancel()
-            preparation.outcome.resolve(.failure(error))
+            preparation.outcome.fail(error)
             try await preparation.cleanup.wait()
         case .waitForPreparationCleanup(let preparation):
             try await preparation.cleanup.wait()

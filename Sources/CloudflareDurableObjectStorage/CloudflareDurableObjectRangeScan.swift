@@ -28,7 +28,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     private let maxSelectorResolutionSteps: Int
     private let userLimit: Int
     private let reverse: Bool
-    private var writeBuffer: [CloudflareDurableObjectWriteOp]
+    private var mutations: [CloudflareDurableObjectMutation]
     private var cursorKey: Bytes?
     private var stableReadVersion: Int64?
     private var finishedHostPages = false
@@ -61,7 +61,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         maxSelectorResolutionSteps: Int,
         userLimit: Int,
         reverse: Bool,
-        writeBuffer: [CloudflareDurableObjectWriteOp],
+        mutations: [CloudflareDurableObjectMutation],
         ensureOpen: @escaping @Sendable () throws -> Void,
         recordReadVersion: @escaping @Sendable (Int64) throws -> Void,
         recordReadConflictRange: @escaping @Sendable (
@@ -84,7 +84,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         self.maxSelectorResolutionSteps = maxSelectorResolutionSteps
         self.userLimit = userLimit
         self.reverse = reverse
-        self.writeBuffer = writeBuffer
+        self.mutations = mutations
     }
 
     mutating func next() async throws -> (Bytes, Bytes)? {
@@ -153,7 +153,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         localRows.removeAll(keepingCapacity: false)
         localIndex = 0
         allLocalRows.removeAll(keepingCapacity: false)
-        writeBuffer.removeAll(keepingCapacity: false)
+        mutations.removeAll(keepingCapacity: false)
         lastEmittedKey = nil
         finishedHostPages = true
         finished = true
@@ -229,7 +229,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     private mutating func prepareViewIfNeeded() async throws {
         guard !viewPrepared else { return }
         viewPrepared = true
-        guard !writeBuffer.isEmpty else {
+        guard !mutations.isEmpty else {
             hostBegin = .selector(CloudflareDurableObjectKeySelector(begin))
             hostEnd = .selector(CloudflareDurableObjectKeySelector(end))
             return
@@ -251,11 +251,11 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
 
     private mutating func prepareAllLocalRows() async throws {
         var keys: [Bytes] = []
-        keys.reserveCapacity(writeBuffer.count)
-        for operation in writeBuffer {
+        keys.reserveCapacity(mutations.count)
+        for operation in mutations {
             switch operation {
             case .set(let key, _), .clear(let key), .atomic(let key, _, _):
-                keys.append(key)
+                keys.append(key.rawValue)
             case .clearRange:
                 continue
             }
@@ -767,20 +767,30 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
 
     private func value(for key: Bytes, committed: Bytes?) throws -> Bytes? {
         var value = committed
-        for operation in writeBuffer {
+        for operation in mutations {
             switch operation {
             case .set(let operationKey, let operationValue)
-                where operationKey == key:
-                value = operationValue
-            case .clear(let operationKey) where operationKey == key:
+                where operationKey.rawValue == key:
+                value = operationValue.rawValue
+            case .clear(let operationKey)
+                where operationKey.rawValue == key:
                 value = nil
             case .clearRange(let begin, let end)
-                where CloudflareDurableObjectByteOrdering.compare(key, begin) >= 0
-                    && CloudflareDurableObjectByteOrdering.compare(key, end) < 0:
+                where CloudflareDurableObjectByteOrdering.compare(
+                    key,
+                    begin.rawValue
+                ) >= 0
+                    && CloudflareDurableObjectByteOrdering.compare(
+                        key,
+                        end.rawValue
+                    ) < 0:
                 value = nil
             case .atomic(let operationKey, let parameter, let mutationType)
-                where operationKey == key:
-                switch try mutationType.apply(to: value, param: parameter) {
+                where operationKey.rawValue == key:
+                switch try mutationType.storageKitMutationType.apply(
+                    to: value,
+                    param: parameter.rawValue
+                ) {
                 case .set(let bytes): value = bytes
                 case .clear: value = nil
                 case .unchanged: break

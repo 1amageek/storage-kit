@@ -11,7 +11,7 @@ enum CloudflareDurableObjectTransactionPhase: Sendable {
 }
 
 struct CloudflareDurableObjectTransactionState: Sendable {
-    var writeBuffer: [CloudflareDurableObjectWriteOp] = []
+    var mutations: [CloudflareDurableObjectMutation] = []
     var readConflictRanges: [CloudflareDurableObjectConflictRange] = []
     var writeConflictRanges: [CloudflareDurableObjectConflictRange] = []
     var phase: CloudflareDurableObjectTransactionPhase = .open

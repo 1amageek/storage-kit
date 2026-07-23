@@ -13,7 +13,7 @@ struct TransactionOperationCompletionTests {
         }
 
         await Task.yield()
-        completion.resolve(.success(()))
+        completion.succeed()
 
         for waiter in waiters {
             try await waiter.value
@@ -37,7 +37,7 @@ struct TransactionOperationCompletionTests {
         }
 
         await Task.yield()
-        completion.resolve(.failure(expected))
+        completion.fail(expected)
 
         for waiter in waiters {
             do {

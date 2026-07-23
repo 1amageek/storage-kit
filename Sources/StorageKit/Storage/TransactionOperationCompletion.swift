@@ -59,19 +59,22 @@ public final class TransactionOperationCompletion: Sendable {
         }
     }
 
-    public func resolve(_ result: Result<Void, StorageError>) {
+    public func succeed() {
+        resolve(.succeeded)
+    }
+
+    public func fail(_ error: StorageError) {
+        resolve(.failed(error))
+    }
+
+    private func resolve(_ resolution: Resolution) {
         let firstWaiter = state.withLock { state -> Waiter? in
             guard case .pending = state.resolution else {
                 preconditionFailure(
                     "Transaction completion resolved more than once"
                 )
             }
-            switch result {
-            case .success:
-                state.resolution = .succeeded
-            case .failure(let error):
-                state.resolution = .failed(error)
-            }
+            state.resolution = resolution
             let firstWaiter = state.firstWaiter
             state.firstWaiter = nil
             return firstWaiter

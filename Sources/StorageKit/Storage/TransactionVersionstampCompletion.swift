@@ -69,19 +69,20 @@ package final class TransactionVersionstampCompletion: Sendable {
         }
     }
 
-    package func resolveIfPending(
-        _ result: Result<TransactionVersionstamp, StorageError>
-    ) {
+    package func succeed(_ versionstamp: TransactionVersionstamp) {
+        resolveIfPending(.succeeded(versionstamp))
+    }
+
+    package func fail(_ error: StorageError) {
+        resolveIfPending(.failed(error))
+    }
+
+    private func resolveIfPending(_ resolution: Resolution) {
         let firstWaiter = state.withLock { state -> Waiter? in
             guard case .pending = state.resolution else {
                 return nil
             }
-            switch result {
-            case .success(let versionstamp):
-                state.resolution = .succeeded(versionstamp)
-            case .failure(let error):
-                state.resolution = .failed(error)
-            }
+            state.resolution = resolution
             let firstWaiter = state.firstWaiter
             state.firstWaiter = nil
             return firstWaiter

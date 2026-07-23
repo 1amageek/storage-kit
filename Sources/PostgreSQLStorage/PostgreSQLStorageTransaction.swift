@@ -431,9 +431,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 return true
             }
             if transitioned, !isNested {
-                versionstampCompletion.resolveIfPending(
-                    .failure(cancellationStateError)
-                )
+                versionstampCompletion.fail(cancellationStateError)
             }
             return error
         }
@@ -449,7 +447,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             return true
         }
         if transitioned, !isNested {
-            versionstampCompletion.resolveIfPending(.failure(mapped))
+            versionstampCompletion.fail(mapped)
         }
         return mapped
     }
@@ -778,7 +776,12 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         switch start {
         case .leader(let completion):
             let result = await performCommit()
-            completion.resolve(result)
+            switch result {
+            case .success:
+                completion.succeed()
+            case .failure(let error):
+                completion.fail(error)
+            }
             try result.get()
         case .waitForCommit(let completion):
             try await completion.wait()
@@ -842,7 +845,12 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         switch start {
         case .leader(let completion):
             let result = await performCancellation()
-            completion.resolve(result)
+            switch result {
+            case .success:
+                completion.succeed()
+            case .failure(let error):
+                completion.fail(error)
+            }
             try result.get()
         case .waitForCancellation(let completion):
             try await completion.wait()
@@ -1121,7 +1129,12 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             return versionstampResult
         }
         if !isNested {
-            versionstampCompletion.resolveIfPending(versionstampResult)
+            switch versionstampResult {
+            case .success(let versionstamp):
+                versionstampCompletion.succeed(versionstamp)
+            case .failure(let error):
+                versionstampCompletion.fail(error)
+            }
         }
         switch versionstampResult {
         case .success:
@@ -1229,9 +1242,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             }
         }
         if !isNested {
-            versionstampCompletion.resolveIfPending(
-                .failure(versionstampFailure)
-            )
+            versionstampCompletion.fail(versionstampFailure)
         }
     }
 

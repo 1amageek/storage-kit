@@ -16,7 +16,7 @@ struct TransactionVersionstampCompletionTests {
         }
 
         await Task.yield()
-        completion.resolveIfPending(.success(expected))
+        completion.succeed(expected)
 
         for waiter in waiters {
             #expect(try await waiter.value == expected)
@@ -53,8 +53,8 @@ struct TransactionVersionstampCompletionTests {
             message: "Late cancellation"
         )
 
-        completion.resolveIfPending(.success(expected))
-        completion.resolveIfPending(.failure(ignored))
+        completion.succeed(expected)
+        completion.fail(ignored)
 
         #expect(try await completion.wait() == expected)
     }

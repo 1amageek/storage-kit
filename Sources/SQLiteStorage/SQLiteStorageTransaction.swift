@@ -438,7 +438,12 @@ public final class SQLiteStorageTransaction:
         switch start {
         case .leader(let completion):
             let result = await performCommit()
-            completion.resolve(result)
+            switch result {
+            case .success:
+                completion.succeed()
+            case .failure(let error):
+                completion.fail(error)
+            }
             try result.get()
         case .waitForCommit(let completion):
             try await completion.wait()
@@ -504,7 +509,12 @@ public final class SQLiteStorageTransaction:
         switch start {
         case .leader(let completion):
             let result = await performCancellation()
-            completion.resolve(result)
+            switch result {
+            case .success:
+                completion.succeed()
+            case .failure(let error):
+                completion.fail(error)
+            }
             try result.get()
         case .waitForCancellation(let completion):
             try await completion.wait()

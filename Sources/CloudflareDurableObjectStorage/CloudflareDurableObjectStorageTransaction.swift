@@ -30,9 +30,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         try mutationByteMeter.configure(maximumBytes: maximumBytes)
     }
 
-    private struct CommitPayload: Sendable {
+    private struct CommitBatch: Sendable {
         let observedReadVersion: Int64?
-        let writeBuffer: [CloudflareDurableObjectWriteOp]
+        let mutations: [CloudflareDurableObjectMutation]
         let readConflictRanges: [CloudflareDurableObjectConflictRange]
         let writeConflictRanges: [CloudflareDurableObjectConflictRange]
     }
@@ -53,8 +53,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
 
     public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
         try validateKey(key)
-        let (phase, writeBuffer, observedReadVersion) = state.withLock {
-            ($0.phase, $0.writeBuffer, $0.observedReadVersion)
+        let (phase, mutations, observedReadVersion) = state.withLock {
+            ($0.phase, $0.mutations, $0.observedReadVersion)
         }
         try Self.ensureOpen(phase, operation: .read)
 
@@ -75,7 +75,11 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             )
         }
 
-        return try value(for: key, committed: response.value?.rawValue, applying: writeBuffer)
+        return try value(
+            for: key,
+            committed: response.value?.rawValue,
+            applying: mutations
+        )
     }
 
     public func getRange(
@@ -87,8 +91,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         streamingMode: StreamingMode
     ) -> CloudflareDurableObjectRangeResult {
         CloudflareDurableObjectRangeResult { [self] in
-            let (writeBuffer, observedReadVersion) = state.withLock {
-                ($0.writeBuffer, $0.observedReadVersion)
+            let (mutations, observedReadVersion) = state.withLock {
+                ($0.mutations, $0.observedReadVersion)
             }
 
             return CloudflareDurableObjectRangeScan(
@@ -111,7 +115,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 maxSelectorResolutionSteps: limits.maxSelectorResolutionSteps,
                 userLimit: limit,
                 reverse: reverse,
-                writeBuffer: writeBuffer,
+                mutations: mutations,
                 ensureOpen: { [self] in
                     let currentPhase = state.withLock { $0.phase }
                     try Self.ensureOpen(currentPhase, operation: .rangeRead)
@@ -135,7 +139,12 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 key: key,
                 value: value
             )
-            state.writeBuffer.append(.set(key: key, value: value))
+            state.mutations.append(
+                .set(
+                    key: CloudflareDurableObjectBytes(key),
+                    value: CloudflareDurableObjectBytes(value)
+                )
+            )
         }
     }
 
@@ -144,7 +153,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         try state.withLock { state in
             try prepareMutation(state: &state)
             try mutationByteMeter.recordClear(key: key)
-            state.writeBuffer.append(.clear(key: key))
+            state.mutations.append(
+                .clear(key: CloudflareDurableObjectBytes(key))
+            )
         }
     }
 
@@ -168,7 +179,12 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 beginKey: beginKey,
                 endKey: endKey
             )
-            state.writeBuffer.append(.clearRange(begin: beginKey, end: endKey))
+            state.mutations.append(
+                .clearRange(
+                    begin: CloudflareDurableObjectBytes(beginKey),
+                    end: CloudflareDurableObjectBytes(endKey)
+                )
+            )
         }
     }
 
@@ -202,13 +218,20 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 key: key,
                 parameter: param
             )
-            state.writeBuffer.append(.atomic(key: key, param: param, mutationType: mutationType))
+            state.mutations.append(
+                .atomic(
+                    key: CloudflareDurableObjectBytes(key),
+                    param: CloudflareDurableObjectBytes(param),
+                    mutationType:
+                        CloudflareDurableObjectMutationTypeCode(mutationType)
+                )
+            )
         }
     }
 
     public func commit() async throws {
         enum Start {
-            case leader(TransactionOperationCompletion, CommitPayload)
+            case leader(TransactionOperationCompletion, CommitBatch)
             case waitForCommit(TransactionOperationCompletion)
             case waitForCancellation(TransactionOperationCompletion)
             case committed
@@ -224,7 +247,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                         state.deadline,
                         operation: .commit
                     )
-                    try validate(state.writeBuffer)
+                    try validate(state.mutations)
                     guard state.readConflictRanges.count <=
                             limits.maxConflictRangesPerCommit,
                           state.writeConflictRanges.count <=
@@ -246,9 +269,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                     return .failed(storageError)
                 }
                 let completion = TransactionOperationCompletion()
-                let payload = CommitPayload(
+                let payload = CommitBatch(
                     observedReadVersion: state.observedReadVersion,
-                    writeBuffer: state.writeBuffer,
+                    mutations: state.mutations,
                     readConflictRanges: state.readConflictRanges,
                     writeConflictRanges: state.writeConflictRanges
                 )
@@ -272,9 +295,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         case .leader(let completion, let payload):
             do {
                 try await performCommit(payload)
-                completion.resolve(.success(()))
+                completion.succeed()
             } catch {
-                completion.resolve(.failure(error))
+                completion.fail(error)
                 throw error
             }
         case .waitForCommit(let completion):
@@ -287,13 +310,13 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         case .cancelled:
             throw Self.phaseError(.cancelled, operation: .commit)
         case .failed(let error):
-            versionstampCompletion.resolveIfPending(.failure(error))
+            versionstampCompletion.fail(error)
             throw error
         }
     }
 
     private func performCommit(
-        _ payload: CommitPayload
+        _ payload: CommitBatch
     ) async throws(StorageError) {
         do {
             let response = try await performHostCall(operation: .commit) { [self] in
@@ -301,7 +324,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                     CloudflareDurableObjectCommitRequest(
                         scope: self.scope,
                         observedReadVersion: payload.observedReadVersion,
-                        mutations: payload.writeBuffer.map(\.mutation),
+                        mutations: payload.mutations,
                         readConflictRanges: payload.readConflictRanges,
                         writeConflictRanges: payload.writeConflictRanges
                     )
@@ -334,7 +357,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 state.phase = .committed
                 state.committedVersion = response.committedVersion
             }
-            versionstampCompletion.resolveIfPending(.success(versionstamp))
+            versionstampCompletion.succeed(versionstamp)
         } catch is CancellationError {
             let error = commitUnknownError(
                 underlyingDescription: "Commit task was cancelled after dispatch"
@@ -343,7 +366,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 state.phase = .commitUnknown(error)
                 Self.clearPendingState(&state)
             }
-            versionstampCompletion.resolveIfPending(.failure(error))
+            versionstampCompletion.fail(error)
             throw error
         } catch let error as StorageError
             where error.code == .transactionTimedOut {
@@ -354,7 +377,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 state.phase = .commitUnknown(unknown)
                 Self.clearPendingState(&state)
             }
-            versionstampCompletion.resolveIfPending(.failure(unknown))
+            versionstampCompletion.fail(unknown)
             throw unknown
         } catch {
             let storageError = Self.storageError(error, operation: .commit)
@@ -366,7 +389,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 }
                 Self.clearPendingState(&state)
             }
-            versionstampCompletion.resolveIfPending(.failure(storageError))
+            versionstampCompletion.fail(storageError)
             throw storageError
         }
     }
@@ -407,10 +430,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         switch start {
         case .leader(let completion):
             state.withLock { $0.phase = .cancelled }
-            versionstampCompletion.resolveIfPending(
-                .failure(Self.phaseError(.cancelled, operation: .read))
+            versionstampCompletion.fail(
+                Self.phaseError(.cancelled, operation: .read)
             )
-            completion.resolve(.success(()))
+            completion.succeed()
         case .waitForCancellation(let completion):
             try await completion.wait()
         case .waitForCommit(let completion):
@@ -572,7 +595,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             try Self.ensureOpen(state.phase, operation: .rangeRead)
             return (
                 readVersion: state.observedReadVersion,
-                hasPendingMutations: !state.writeBuffer.isEmpty
+                hasPendingMutations: !state.mutations.isEmpty
             )
         }
         if transactionView.hasPendingMutations {
@@ -631,7 +654,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             try Self.ensureOpen(state.phase, operation: .rangeRead)
             return (
                 readVersion: state.observedReadVersion,
-                hasPendingMutations: !state.writeBuffer.isEmpty
+                hasPendingMutations: !state.mutations.isEmpty
             )
         }
         if transactionView.hasPendingMutations {
@@ -700,21 +723,32 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     private func value(
         for key: Bytes,
         committed: Bytes?,
-        applying writeBuffer: [CloudflareDurableObjectWriteOp]
+        applying mutations: [CloudflareDurableObjectMutation]
     ) throws -> Bytes? {
         var value = committed
-        for op in writeBuffer {
-            switch op {
-            case .set(let opKey, let opValue) where opKey == key:
-                value = opValue
-            case .clear(let opKey) where opKey == key:
+        for mutation in mutations {
+            switch mutation {
+            case .set(let opKey, let opValue)
+                where opKey.rawValue == key:
+                value = opValue.rawValue
+            case .clear(let opKey) where opKey.rawValue == key:
                 value = nil
             case .clearRange(let begin, let end)
-                where CloudflareDurableObjectByteOrdering.compare(key, begin) >= 0
-                    && CloudflareDurableObjectByteOrdering.compare(key, end) < 0:
+                where CloudflareDurableObjectByteOrdering.compare(
+                    key,
+                    begin.rawValue
+                ) >= 0
+                    && CloudflareDurableObjectByteOrdering.compare(
+                        key,
+                        end.rawValue
+                    ) < 0:
                 value = nil
-            case .atomic(let opKey, let param, let mutationType) where opKey == key:
-                switch try mutationType.apply(to: value, param: param) {
+            case .atomic(let opKey, let param, let mutationType)
+                where opKey.rawValue == key:
+                switch try mutationType.storageKitMutationType.apply(
+                    to: value,
+                    param: param.rawValue
+                ) {
                 case .set(let bytes):
                     value = bytes
                 case .clear:
@@ -729,8 +763,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         return value
     }
 
-    private func validate(_ writeBuffer: [CloudflareDurableObjectWriteOp]) throws {
-        guard writeBuffer.count <= limits.maxMutationsPerCommit else {
+    private func validate(
+        _ mutations: [CloudflareDurableObjectMutation]
+    ) throws {
+        guard mutations.count <= limits.maxMutationsPerCommit else {
             throw StorageError(
                 code: .invalidOperation,
                 operation: .commit,
@@ -738,35 +774,35 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 message: "Mutation batch exceeds configured limit"
             )
         }
-        for op in writeBuffer {
-            switch op {
+        for mutation in mutations {
+            switch mutation {
             case .set(let key, let value):
-                try validateKey(key)
-                try validateValue(value)
+                try validateKey(key.rawValue)
+                try validateValue(value.rawValue)
             case .clear(let key):
-                try validateKey(key)
+                try validateKey(key.rawValue)
             case .clearRange(let begin, let end):
-                try validateBoundary(begin)
-                try validateBoundary(end)
+                try validateBoundary(begin.rawValue)
+                try validateBoundary(end.rawValue)
             case .atomic(let key, let param, let mutationType):
                 switch mutationType {
                 case .setVersionstampedKey:
                     try validateBytes(
-                        key,
+                        key.rawValue,
                         maximum: limits.maxKeyBytes + 4,
                         message: "Versionstamped key operand exceeds configured byte limit"
                     )
-                    try validateValue(param)
+                    try validateValue(param.rawValue)
                 case .setVersionstampedValue:
-                    try validateKey(key)
+                    try validateKey(key.rawValue)
                     try validateBytes(
-                        param,
+                        param.rawValue,
                         maximum: limits.maxValueBytes + 4,
                         message: "Versionstamped value operand exceeds configured byte limit"
                     )
                 default:
-                    try validateKey(key)
-                    try validateValue(param)
+                    try validateKey(key.rawValue)
+                    try validateValue(param.rawValue)
                 }
             }
         }
@@ -1068,7 +1104,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     private static func clearPendingState(
         _ state: inout CloudflareDurableObjectTransactionState
     ) {
-        state.writeBuffer.removeAll(keepingCapacity: false)
+        state.mutations.removeAll(keepingCapacity: false)
         state.readConflictRanges.removeAll(keepingCapacity: false)
         state.writeConflictRanges.removeAll(keepingCapacity: false)
     }
@@ -1077,7 +1113,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         state: inout CloudflareDurableObjectTransactionState
     ) throws {
         try Self.ensureOpen(state.phase, operation: .write)
-        guard state.writeBuffer.count < limits.maxMutationsPerCommit else {
+        guard state.mutations.count < limits.maxMutationsPerCommit else {
             throw StorageError(
                 code: .invalidOperation,
                 operation: .write,
@@ -1156,7 +1192,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 return true
             }
             if transitioned {
-                versionstampCompletion.resolveIfPending(.failure(error))
+                versionstampCompletion.fail(error)
             }
             throw error
         }
