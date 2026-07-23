@@ -51,6 +51,28 @@ struct CloudflareDurableObjectStorageTransactionTests {
         try await tx.commit()
     }
 
+    @Test func rangeCoalescesRepeatedLocalMutationsForTheSameKey() async throws {
+        let engine = try await makeEngine()
+        let transaction = try engine.createTransaction()
+
+        try transaction.setValue([1], for: [0x01])
+        try transaction.setValue([2], for: [0x01])
+        try transaction.atomicOp(
+            key: [0x01],
+            param: [3],
+            mutationType: .add
+        )
+        try transaction.setValue([9], for: [0x02])
+
+        let rows = try await transaction.collectRange(
+            begin: [0x01],
+            end: [0x03]
+        )
+
+        #expect(rows.map(\.0) == [[0x01], [0x02]])
+        #expect(rows.map(\.1) == [[5], [9]])
+    }
+
     @Test func clearRangeParticipatesInReadYourWritesAndCommitPersistence() async throws {
         let engine = try await makeEngine()
         try await engine.withTransaction { tx in

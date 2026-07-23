@@ -36,7 +36,6 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     private var hostIndex = 0
     private var localRows: [(Bytes, Bytes)] = []
     private var localIndex = 0
-    private var localRowKeys = Set<Bytes>()
     private var allLocalRows: [(Bytes, Bytes)] = []
     private var viewPrepared = false
     private var hostBegin = CloudflareDurableObjectRangeBoundary.unbounded
@@ -153,7 +152,6 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         hostIndex = 0
         localRows.removeAll(keepingCapacity: false)
         localIndex = 0
-        localRowKeys.removeAll(keepingCapacity: false)
         allLocalRows.removeAll(keepingCapacity: false)
         writeBuffer.removeAll(keepingCapacity: false)
         lastEmittedKey = nil
@@ -249,16 +247,15 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
             contains($0.0, begin: resolvedBegin, end: resolvedEnd)
         }
         if reverse { localRows.reverse() }
-        localRowKeys = Set(localRows.map(\.0))
     }
 
     private mutating func prepareAllLocalRows() async throws {
         var keys: [Bytes] = []
-        var keySet = Set<Bytes>()
+        keys.reserveCapacity(writeBuffer.count)
         for operation in writeBuffer {
             switch operation {
             case .set(let key, _), .clear(let key), .atomic(let key, _, _):
-                if keySet.insert(key).inserted { keys.append(key) }
+                keys.append(key)
             case .clearRange:
                 continue
             }
@@ -266,6 +263,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         keys.sort {
             CloudflareDurableObjectByteOrdering.compare($0, $1) < 0
         }
+        removeDuplicateKeys(from: &keys)
         var rows: [(Bytes, Bytes)] = []
         rows.reserveCapacity(keys.count)
         for key in keys {
@@ -276,6 +274,24 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
             }
         }
         allLocalRows = rows
+    }
+
+    private func removeDuplicateKeys(from keys: inout [Bytes]) {
+        guard keys.count > 1 else { return }
+        var uniqueCount = 1
+        for index in 1..<keys.count {
+            guard CloudflareDurableObjectByteOrdering.compare(
+                keys[index],
+                keys[uniqueCount - 1]
+            ) != 0 else {
+                continue
+            }
+            if index != uniqueCount {
+                keys[uniqueCount] = keys[index]
+            }
+            uniqueCount += 1
+        }
+        keys.removeLast(keys.count - uniqueCount)
     }
 
     private mutating func resolve(
@@ -600,13 +616,33 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         rows.reserveCapacity(response.rows.count)
         for row in response.rows {
             let key = row.key.rawValue
-            guard !localRowKeys.contains(key) else { continue }
+            guard !containsLocalRow(for: key) else { continue }
             if let value = try value(for: key, committed: row.value.rawValue) {
                 rows.append((key, value))
             }
         }
         hostRows = rows
         hostIndex = 0
+    }
+
+    private func containsLocalRow(for key: Bytes) -> Bool {
+        var lowerBound = 0
+        var upperBound = allLocalRows.count
+        while lowerBound < upperBound {
+            let index = lowerBound + (upperBound - lowerBound) / 2
+            let comparison = CloudflareDurableObjectByteOrdering.compare(
+                allLocalRows[index].0,
+                key
+            )
+            if comparison < 0 {
+                lowerBound = index + 1
+            } else if comparison > 0 {
+                upperBound = index
+            } else {
+                return true
+            }
+        }
+        return false
     }
 
     private mutating func rangeResponse(
