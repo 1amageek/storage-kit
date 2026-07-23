@@ -86,15 +86,9 @@ struct EnumTests {
     @Test func conflictRangeType_cases() {
         let read = ConflictRangeType.read
         let write = ConflictRangeType.write
-        // Verify distinct pattern matching
-        switch read {
-        case .read: break
-        case .write: Issue.record("Expected read")
-        }
-        switch write {
-        case .write: break
-        case .read: Issue.record("Expected write")
-        }
+        #expect(read == .read)
+        #expect(write == .write)
+        #expect(read != write)
     }
 
     @Test func conflictRangeType_isSendable() {

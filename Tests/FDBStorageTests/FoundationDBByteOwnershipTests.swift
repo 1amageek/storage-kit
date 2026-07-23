@@ -57,12 +57,7 @@ struct FoundationDBByteOwnershipTests {
         )
         let inputKey = Bytes(retaining: inputOwner)[1..<3]
         let expectedInputAddress = try byteAddress(of: inputKey)
-        let backend: RecordingTransaction
-        do {
-            backend = RecordingTransaction(
-                pointValue: try #require(outputBytes)
-            )
-        }
+        let backend = RecordingTransaction(pointValue: outputBytes)
         outputOwner = nil
         outputBytes = nil
         #expect(!releaseRecorder.wasReleased)
