@@ -453,15 +453,15 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         case .leader(let completion):
             switch await performCommit() {
             case .resolve(let result):
-                await completion.resolve(result)
+                completion.resolve(result)
                 try result.get()
             case .resolvedByCancellation:
-                try await completion.wait().get()
+                try await completion.wait()
             }
         case .waitForCommit(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCancellation(let completion, let error):
-            try await completion.wait().get()
+            try await completion.wait()
             throw error
         case .committed:
             return
@@ -506,7 +506,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 }
                 state.lifecycle = .cancelled(error)
             }
-            await preparation.cleanup.resolve(.success(()))
+            preparation.cleanup.resolve(.success(()))
             return .resolvedByCancellation
         case .fail(let error):
             fdbTransaction.cancel()
@@ -697,28 +697,28 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             }
             let error = Self.cancellationError(operation: .cancel)
             state.withLock { $0.lifecycle = .cancelled(error) }
-            await completion.resolve(.success(()))
+            completion.resolve(.success(()))
         case .preparationLeader(let preparation, let error):
             fdbTransaction.cancel()
-            await preparation.outcome.resolve(.failure(error))
-            try await preparation.cleanup.wait().get()
+            preparation.outcome.resolve(.failure(error))
+            try await preparation.cleanup.wait()
         case .waitForPreparationCleanup(let preparation):
-            try await preparation.cleanup.wait().get()
+            try await preparation.cleanup.wait()
         case .waitForCancellation(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCommit(let completion):
-            let result = await completion.wait()
-            switch result {
-            case .success:
-                throw Self.lifecycleError(
-                    "FoundationDB transaction committed",
-                    operation: .cancel
-                )
-            case .failure(let error) where error.code == .commitUnknownResult:
-                throw error
-            case .failure:
+            do {
+                try await completion.wait()
+            } catch {
+                if error.code == .commitUnknownResult {
+                    throw error
+                }
                 return
             }
+            throw Self.lifecycleError(
+                "FoundationDB transaction committed",
+                operation: .cancel
+            )
         case .cancelled, .failed:
             return
         case .committed:

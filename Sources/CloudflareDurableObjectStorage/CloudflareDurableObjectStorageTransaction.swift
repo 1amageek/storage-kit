@@ -270,13 +270,17 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
 
         switch start {
         case .leader(let completion, let payload):
-            let result = await performCommit(payload)
-            await completion.resolve(result)
-            try result.get()
+            do {
+                try await performCommit(payload)
+                completion.resolve(.success(()))
+            } catch {
+                completion.resolve(.failure(error))
+                throw error
+            }
         case .waitForCommit(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCancellation(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
             throw Self.phaseError(.cancelled, operation: .commit)
         case .committed:
             return
@@ -290,7 +294,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
 
     private func performCommit(
         _ payload: CommitPayload
-    ) async -> Result<Void, StorageError> {
+    ) async throws(StorageError) {
         do {
             let response = try await performHostCall(operation: .commit) { [self] in
                 try await self.client.commit(
@@ -331,7 +335,6 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 state.committedVersion = response.committedVersion
             }
             versionstampCompletion.resolveIfPending(.success(versionstamp))
-            return .success(())
         } catch is CancellationError {
             let error = commitUnknownError(
                 underlyingDescription: "Commit task was cancelled after dispatch"
@@ -341,7 +344,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 Self.clearPendingState(&state)
             }
             versionstampCompletion.resolveIfPending(.failure(error))
-            return .failure(error)
+            throw error
         } catch let error as StorageError
             where error.code == .transactionTimedOut {
             let unknown = commitUnknownError(
@@ -352,7 +355,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 Self.clearPendingState(&state)
             }
             versionstampCompletion.resolveIfPending(.failure(unknown))
-            return .failure(unknown)
+            throw unknown
         } catch {
             let storageError = Self.storageError(error, operation: .commit)
             state.withLock { state in
@@ -364,7 +367,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 Self.clearPendingState(&state)
             }
             versionstampCompletion.resolveIfPending(.failure(storageError))
-            return .failure(storageError)
+            throw storageError
         }
     }
 
@@ -407,19 +410,19 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             versionstampCompletion.resolveIfPending(
                 .failure(Self.phaseError(.cancelled, operation: .read))
             )
-            await completion.resolve(.success(()))
+            completion.resolve(.success(()))
         case .waitForCancellation(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCommit(let completion):
-            let result = await completion.wait()
-            switch result {
-            case .success:
-                throw Self.phaseError(.committed, operation: .cancel)
-            case .failure(let error) where error.code == .commitUnknownResult:
-                throw error
-            case .failure:
+            do {
+                try await completion.wait()
+            } catch {
+                if error.code == .commitUnknownResult {
+                    throw error
+                }
                 return
             }
+            throw Self.phaseError(.committed, operation: .cancel)
         case .cancelled, .failed:
             return
         case .committed:

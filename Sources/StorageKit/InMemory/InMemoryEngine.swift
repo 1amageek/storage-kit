@@ -551,11 +551,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
                 Self.versionstampResult(for: result)
             )
             let completionResult = result.map { _ in () }
-            await completion.resolve(completionResult)
+            completion.resolve(completionResult)
             try completionResult.get()
         case .wait(let completion):
-            let result = await completion.wait()
-            try result.get()
+            try await completion.wait()
             let lifecycle = _state.withLock { $0.lifecycle }
             if case .cancelled = lifecycle {
                 throw Self.stateError("Transaction cancelled", operation: .commit)
@@ -607,17 +606,16 @@ public final class InMemoryTransaction: Transaction, Sendable {
                     operation: .read
                 ))
             )
-            await completion.resolve(.success(()))
+            completion.resolve(.success(()))
         case .waitForCancellation(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCommit(let completion):
-            let result = await completion.wait()
-            switch result {
-            case .success:
-                throw Self.stateError("Transaction committed", operation: .cancel)
-            case .failure:
+            do {
+                try await completion.wait()
+            } catch {
                 return
             }
+            throw Self.stateError("Transaction committed", operation: .cancel)
         case .cancelled, .failed:
             return
         case .committed:

@@ -778,12 +778,12 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         switch start {
         case .leader(let completion):
             let result = await performCommit()
-            await completion.resolve(result)
+            completion.resolve(result)
             try result.get()
         case .waitForCommit(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCancellation(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
             throw Self.invalidOperation(
                 "Transaction was cancelled",
                 operation: .commit
@@ -842,23 +842,23 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         switch start {
         case .leader(let completion):
             let result = await performCancellation()
-            await completion.resolve(result)
+            completion.resolve(result)
             try result.get()
         case .waitForCancellation(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCommit(let completion):
-            let result = await completion.wait()
-            switch result {
-            case .success:
-                throw Self.invalidOperation(
-                    "Transaction committed",
-                    operation: .cancel
-                )
-            case .failure(let error) where error.code == .commitUnknownResult:
-                throw error
-            case .failure:
+            do {
+                try await completion.wait()
+            } catch {
+                if error.code == .commitUnknownResult {
+                    throw error
+                }
                 return
             }
+            throw Self.invalidOperation(
+                "Transaction committed",
+                operation: .cancel
+            )
         case .cancelled, .cleanedFailure:
             return
         case .committed:

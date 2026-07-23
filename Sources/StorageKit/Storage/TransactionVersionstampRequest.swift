@@ -35,7 +35,7 @@ public struct TransactionVersionstampRequest:
         get async throws {
             switch source {
             case .completion(let completion):
-                return try await completion.wait().get()
+                return try await completion.wait()
             case .resolver(let resolveValue):
                 return try await resolveValue()
             }

@@ -438,12 +438,12 @@ public final class SQLiteStorageTransaction:
         switch start {
         case .leader(let completion):
             let result = await performCommit()
-            await completion.resolve(result)
+            completion.resolve(result)
             try result.get()
         case .waitForCommit(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCancellation(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
             throw Self.invalidState(
                 "SQLite transaction was cancelled",
                 operation: .commit
@@ -504,21 +504,20 @@ public final class SQLiteStorageTransaction:
         switch start {
         case .leader(let completion):
             let result = await performCancellation()
-            await completion.resolve(result)
+            completion.resolve(result)
             try result.get()
         case .waitForCancellation(let completion):
-            try await completion.wait().get()
+            try await completion.wait()
         case .waitForCommit(let completion):
-            let result = await completion.wait()
-            switch result {
-            case .success:
-                throw Self.invalidState(
-                    "SQLite transaction was committed",
-                    operation: .cancel
-                )
-            case .failure:
+            do {
+                try await completion.wait()
+            } catch {
                 return
             }
+            throw Self.invalidState(
+                "SQLite transaction was committed",
+                operation: .cancel
+            )
         case .cancelled, .cleanedFailure:
             return
         case .committed:
