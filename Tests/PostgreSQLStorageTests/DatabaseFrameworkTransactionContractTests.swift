@@ -304,7 +304,7 @@ struct DatabaseFrameworkTransactionContractTests {
     // MARK: - collectRange: index scan pattern
     // =========================================================================
 
-    /// Mirrors FDBDataStore.scanIndex() pattern:
+    /// Mirrors DatabaseDataStore.scanIndex() pattern:
     /// collectRange(from: .firstGreaterOrEqual(begin), to: .firstGreaterOrEqual(end))
     @Test func collectRange_indexScanPattern() async throws {
         let engine = try await makeEngine()
@@ -342,7 +342,7 @@ struct DatabaseFrameworkTransactionContractTests {
         #expect(results.count == 4)
     }
 
-    /// Mirrors FDBDataStore count operation with collectRange.
+    /// Mirrors DatabaseDataStore count operation with collectRange.
     @Test func collectRange_countPattern() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
@@ -372,7 +372,7 @@ struct DatabaseFrameworkTransactionContractTests {
         #expect(allItems.count == 25)
     }
 
-    /// Mirrors FDBDataStore reverse scan with limit.
+    /// Mirrors DatabaseDataStore reverse scan with limit.
     @Test func collectRange_reverseScanWithLimit() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
@@ -411,7 +411,7 @@ struct DatabaseFrameworkTransactionContractTests {
     // MARK: - Bulk deletion: clearRange pattern
     // =========================================================================
 
-    /// Mirrors FDBDataStore.clearAll() pattern:
+    /// Mirrors DatabaseDataStore.clearAll() pattern:
     /// Clear all items and indexes of a type using subspace range.
     @Test func bulkDeletion_clearAllTypeData() async throws {
         let engine = try await makeEngine()
@@ -512,7 +512,7 @@ struct DatabaseFrameworkTransactionContractTests {
     // MARK: - Nested Transaction (ActiveTransactionScope)
     // =========================================================================
 
-    /// Mirrors nested transaction detection in TransactionRunner + FDBDataStore.
+    /// Mirrors nested transaction detection in TransactionRunner + DatabaseDataStore.
     /// When ActiveTransactionScope.current is set, createTransaction() returns
     /// a nested transaction reusing the parent connection.
     @Test func nestedTransaction_reuseParentConnection() async throws {
@@ -527,7 +527,7 @@ struct DatabaseFrameworkTransactionContractTests {
         try await ActiveTransactionScope.$current.withValue(outerTx) {
             try outerTx.setValue(Bytes("outer-data".utf8), for: outerKey)
 
-            // Inner transaction (like FDBDataStore calling createTransaction inside operation)
+            // Inner transaction (like DatabaseDataStore calling createTransaction inside operation)
             let innerTx = try engine.createTransaction()
             // Should be nested — reuses the outer transaction lifecycle.
             try innerTx.setValue(Bytes("inner-data".utf8), for: innerKey)
@@ -704,7 +704,7 @@ struct DatabaseFrameworkTransactionContractTests {
     // MARK: - Read-your-writes within createTransaction
     // =========================================================================
 
-    /// Mirrors FDBDataStore pattern: write then read within the same transaction.
+    /// Mirrors DatabaseDataStore pattern: write then read within the same transaction.
     /// ItemStorage.write(data, for: key) then ItemStorage.read(for: key)
     @Test func readYourWrites_withinTransaction() async throws {
         let engine = try await makeEngine()
@@ -728,7 +728,7 @@ struct DatabaseFrameworkTransactionContractTests {
     }
 
     /// Mirrors overwrite-then-read pattern.
-    /// FDBDataStore reads old value, writes new value, then may read again.
+    /// DatabaseDataStore reads old value, writes new value, then may read again.
     @Test func readYourWrites_overwriteWithinTransaction() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
