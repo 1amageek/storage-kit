@@ -275,7 +275,7 @@ async function smokeQuerySelectorMatrix() {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterThan, [0x20]),
     snapshot: true,
-    expectedReadVersion: 0n,
+    expectedReadVersion: 1n,
   })));
   assertRangeKeys(snapshotResponse, [[0x10], [0x20]]);
 
