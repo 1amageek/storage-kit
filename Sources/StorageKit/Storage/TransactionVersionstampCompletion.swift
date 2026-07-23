@@ -15,18 +15,28 @@ package final class TransactionVersionstampCompletion: Sendable {
         }
     }
 
+    private enum Resolution: Sendable {
+        case pending
+        case succeeded(TransactionVersionstamp)
+        case failed(StorageError)
+    }
+
     private struct State: Sendable {
-        var result: Result<TransactionVersionstamp, StorageError>?
+        var resolution: Resolution
         var firstWaiter: Waiter?
     }
 
     private let state: Mutex<State>
 
-    package init(
-        resolved result: Result<TransactionVersionstamp, StorageError>? = nil
-    ) {
+    package init() {
         self.state = Mutex(
-            State(result: result, firstWaiter: nil)
+            State(resolution: .pending, firstWaiter: nil)
+        )
+    }
+
+    package init(failure: StorageError) {
+        self.state = Mutex(
+            State(resolution: .failed(failure), firstWaiter: nil)
         )
     }
 
@@ -34,23 +44,28 @@ package final class TransactionVersionstampCompletion: Sendable {
         -> TransactionVersionstamp {
         await withCheckedContinuation { continuation in
             state.withLock { state in
-                if state.result != nil {
-                    continuation.resume()
-                } else {
+                switch state.resolution {
+                case .pending:
                     state.firstWaiter = Waiter(
                         continuation: continuation,
                         next: state.firstWaiter
                     )
+                case .succeeded, .failed:
+                    continuation.resume()
                 }
             }
         }
         return try state.withLock { state throws(StorageError) in
-            guard let result = state.result else {
+            switch state.resolution {
+            case .succeeded(let versionstamp):
+                return versionstamp
+            case .failed(let error):
+                throw error
+            case .pending:
                 preconditionFailure(
                     "Versionstamp completion resumed before resolution"
                 )
             }
-            return try result.get()
         }
     }
 
@@ -58,10 +73,15 @@ package final class TransactionVersionstampCompletion: Sendable {
         _ result: Result<TransactionVersionstamp, StorageError>
     ) {
         let firstWaiter = state.withLock { state -> Waiter? in
-            guard state.result == nil else {
+            guard case .pending = state.resolution else {
                 return nil
             }
-            state.result = result
+            switch result {
+            case .success(let versionstamp):
+                state.resolution = .succeeded(versionstamp)
+            case .failure(let error):
+                state.resolution = .failed(error)
+            }
             let firstWaiter = state.firstWaiter
             state.firstWaiter = nil
             return firstWaiter

@@ -21,7 +21,7 @@ public struct TransactionVersionstampRequest:
         failure: StorageError
     ) {
         self.source = .completion(
-            TransactionVersionstampCompletion(resolved: .failure(failure))
+            TransactionVersionstampCompletion(failure: failure)
         )
     }
 
