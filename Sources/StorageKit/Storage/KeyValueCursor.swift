@@ -1,4 +1,6 @@
-/// Type-erased, zero-copy cursor used at a `Transaction` existential boundary.
+import Synchronization
+
+/// Type-erased, zero-copy cursor used at a transaction-access boundary.
 ///
 /// The actor owns the backend iterator so `next()` calls remain ordered across
 /// suspension points. Key and value buffers are returned unchanged; this type
@@ -8,8 +10,9 @@ public struct KeyValueCursor: Sendable {
 
     private let state: any KeyValueCursorState
 
-    fileprivate init<Sequence: TransactionRangeResult>(
-        sequence: sending Sequence
+    /// Erases a backend range result while retaining its native buffers.
+    public init<Sequence: TransactionRangeResult>(
+        consuming sequence: sending Sequence
     ) {
         self.state = TypedKeyValueCursorState(sequence: sequence)
     }
@@ -25,7 +28,7 @@ public struct KeyValueCursor: Sendable {
     }
 }
 
-extension Transaction {
+extension TransactionAccess {
     /// Opens a streaming cursor while preserving the backend's native buffers.
     public func rangeCursor(
         from begin: KeySelector,
@@ -43,7 +46,7 @@ extension Transaction {
             snapshot: snapshot,
             streamingMode: streamingMode
         )
-        return KeyValueCursor(sequence: sequence)
+        return KeyValueCursor(consuming: sequence)
     }
 }
 
@@ -54,53 +57,211 @@ private protocol KeyValueCursorState: Actor {
 
 private actor TypedKeyValueCursorState<Sequence: TransactionRangeResult>:
     KeyValueCursorState {
-    private var sequence: Sequence?
-    private var iterator: Sequence.AsyncIterator?
+    private enum State {
+        case unopened(Sequence)
+        case ready(Sequence.AsyncIterator)
+        case advancing(CursorAdvanceBoundary)
+        case finishing(CursorFinishBoundary)
+        case finished((any Error)?)
+    }
+
+    private var state: State
 
     init(sequence: sending Sequence) {
-        self.sequence = sequence
+        self.state = .unopened(sequence)
     }
 
     func next() async throws -> KeyValueCursor.Element? {
-        if iterator == nil, let sequence {
+        try Task.checkCancellation()
+
+        var iterator: Sequence.AsyncIterator
+        switch state {
+        case .unopened(let sequence):
             iterator = sequence.makeAsyncIterator()
-            self.sequence = nil
-        }
-        guard var activeIterator = iterator else {
+        case .ready(let storedIterator):
+            iterator = storedIterator
+        case .advancing:
+            throw concurrentOperationError("Concurrent cursor advance")
+        case .finishing:
+            throw concurrentOperationError("Cursor cleanup is in progress")
+        case .finished:
             return nil
         }
-        iterator = nil
+
+        let boundary = CursorAdvanceBoundary()
+        state = .advancing(boundary)
+
+        let element: KeyValueCursor.Element?
         do {
-            let element = try await activeIterator.next(isolation: self)
-            if let element {
-                iterator = activeIterator
-                return element
-            }
-            try await activeIterator.finish(isolation: self)
-            return nil
+            element = try await iterator.next(isolation: self)
         } catch {
             let iterationError = error
             do {
-                try await activeIterator.finish(isolation: self)
+                try await iterator.finish(isolation: self)
+                state = .finished(nil)
+                boundary.resolve(.success(()))
             } catch {
-                sequence = nil
+                state = .finished(error)
+                boundary.resolve(.failure(error))
                 throw StorageRangeCleanupError(
                     iterationError: iterationError,
                     cleanupError: error
                 )
             }
-            iterator = nil
-            sequence = nil
             throw iterationError
         }
+
+        if element == nil || boundary.isFinishRequested {
+            do {
+                try await iterator.finish(isolation: self)
+                state = .finished(nil)
+                boundary.resolve(.success(()))
+            } catch {
+                state = .finished(error)
+                boundary.resolve(.failure(error))
+                throw error
+            }
+            return element
+        }
+
+        state = .ready(iterator)
+        boundary.resolve(.success(()))
+        return element
     }
 
     func finish() async throws {
-        sequence = nil
-        guard var activeIterator = iterator else {
+        switch state {
+        case .unopened:
+            state = .finished(nil)
             return
+        case .ready(var iterator):
+            let boundary = CursorFinishBoundary()
+            state = .finishing(boundary)
+            do {
+                try await iterator.finish(isolation: self)
+                state = .finished(nil)
+                boundary.resolve(.success(()))
+            } catch {
+                state = .finished(error)
+                boundary.resolve(.failure(error))
+                throw error
+            }
+        case .advancing(let boundary):
+            try await boundary.requestFinish()
+        case .finishing(let boundary):
+            try await boundary.wait()
+        case .finished(let error):
+            if let error {
+                throw error
+            }
         }
-        iterator = nil
-        try await activeIterator.finish(isolation: self)
+    }
+
+    private func concurrentOperationError(_ message: String) -> StorageError {
+        StorageError(
+            code: .invalidOperation,
+            operation: .rangeRead,
+            message: message
+        )
+    }
+}
+
+private final class CursorAdvanceBoundary: Sendable {
+    private struct State: Sendable {
+        var finishRequested = false
+        var result: Result<Void, CursorBoundaryFailure>?
+        var waiters: [
+            CheckedContinuation<Result<Void, CursorBoundaryFailure>, Never>
+        ] = []
+    }
+
+    private let state = Mutex(State())
+
+    var isFinishRequested: Bool {
+        state.withLock { $0.finishRequested }
+    }
+
+    func requestFinish() async throws {
+        let result = await withCheckedContinuation { continuation in
+            state.withLock { state in
+                state.finishRequested = true
+                if let result = state.result {
+                    continuation.resume(returning: result)
+                } else {
+                    state.waiters.append(continuation)
+                }
+            }
+        }
+        switch result {
+        case .success:
+            return
+        case .failure(let failure):
+            throw failure.underlying
+        }
+    }
+
+    func resolve(_ result: Result<Void, any Error>) {
+        let normalized = result.mapError(CursorBoundaryFailure.init)
+        let waiters = state.withLock { state in
+            precondition(state.result == nil)
+            state.result = normalized
+            let waiters = state.waiters
+            state.waiters.removeAll(keepingCapacity: false)
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.resume(returning: normalized)
+        }
+    }
+}
+
+private final class CursorFinishBoundary: Sendable {
+    private struct State: Sendable {
+        var result: Result<Void, CursorBoundaryFailure>?
+        var waiters: [
+            CheckedContinuation<Result<Void, CursorBoundaryFailure>, Never>
+        ] = []
+    }
+
+    private let state = Mutex(State())
+
+    func wait() async throws {
+        let result = await withCheckedContinuation { continuation in
+            state.withLock { state in
+                if let result = state.result {
+                    continuation.resume(returning: result)
+                } else {
+                    state.waiters.append(continuation)
+                }
+            }
+        }
+        switch result {
+        case .success:
+            return
+        case .failure(let failure):
+            throw failure.underlying
+        }
+    }
+
+    func resolve(_ result: Result<Void, any Error>) {
+        let normalized = result.mapError(CursorBoundaryFailure.init)
+        let waiters = state.withLock { state in
+            precondition(state.result == nil)
+            state.result = normalized
+            let waiters = state.waiters
+            state.waiters.removeAll(keepingCapacity: false)
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.resume(returning: normalized)
+        }
+    }
+}
+
+private struct CursorBoundaryFailure: Error, Sendable {
+    let underlying: any Error
+
+    init(_ underlying: any Error) {
+        self.underlying = underlying
     }
 }

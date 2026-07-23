@@ -18,7 +18,7 @@ public struct DatabaseStorageCompactionLimits: Sendable, Hashable {
 /// failures use `DatabaseStorageCompactionError`; transactional backend failures
 /// retain `StorageError`, and task cancellation retains `CancellationError` so
 /// the transaction owner can apply the correct retry policy.
-public protocol DatabaseStorageCompactionTransaction: Transaction {
+public protocol DatabaseStorageCompactionTransaction: TransactionAccess {
     var compactionLimits: DatabaseStorageCompactionLimits { get }
 
     /// Stages physical work and returns a provisional result that is authoritative

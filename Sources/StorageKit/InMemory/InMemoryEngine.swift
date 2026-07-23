@@ -152,6 +152,7 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     /// Sorted KV store and its commit version. Both change under one lock so a
     /// transaction can never observe a version that belongs to another state.
     let _store: Mutex<StoreState>
+    let transactionDomain = StorageTransactionDomain()
 
     public init(configuration: Configuration = .init()) {
         self._store = Mutex(StoreState())
@@ -181,10 +182,12 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     }
 
     public func withTransaction<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
+        _ operation: (any TransactionAccess) async throws -> T
     ) async throws -> T {
         let tx = try createTransaction()
-        return try await ActiveTransactionScope.$current.withValue(tx) {
+        return try await ActiveTransactionScope.withActiveTransaction(
+            tx
+        ) { _ in
             do {
                 let result = try await operation(tx)
                 try await tx.commit()
@@ -227,12 +230,16 @@ public final class InMemoryTransaction: Transaction, Sendable {
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
 
     public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
+    public var transactionDomain: StorageTransactionDomain {
+        engine.transactionDomain
+    }
 
     private let engine: InMemoryEngine
     private let snapshot: SortedKeyValueStore
     private let snapshotVersion: Int64
     private let transactionIdentifier: UInt64
     private let mutationByteMeter = TransactionMutationByteMeter()
+    private let versionstampCompletion = TransactionVersionstampCompletion()
 
     private struct MutableState: Sendable {
         var writeBuffer: [WriteOp] = []
@@ -240,7 +247,6 @@ public final class InMemoryTransaction: Transaction, Sendable {
         var writeConflictRegions: [InMemoryConflictRegion] = []
         var lifecycle: Lifecycle = .open
         var committedVersion: Int64?
-        var versionstamp: Bytes?
     }
 
     private enum Lifecycle: Sendable {
@@ -537,11 +543,13 @@ public final class InMemoryTransaction: Transaction, Sendable {
                 case .success(let committedVersion):
                     state.lifecycle = .committed
                     state.committedVersion = committedVersion
-                    state.versionstamp = Self.versionstamp(for: committedVersion)
                 case .failure(let error):
                     state.lifecycle = .failed(error)
                 }
             }
+            versionstampCompletion.resolveIfPending(
+                Self.versionstampResult(for: result)
+            )
             let completionResult = result.map { _ in () }
             await completion.resolve(completionResult)
             try completionResult.get()
@@ -593,6 +601,12 @@ public final class InMemoryTransaction: Transaction, Sendable {
         case .leader(let completion):
             engine.releaseTransaction(transactionIdentifier)
             _state.withLock { $0.lifecycle = .cancelled }
+            versionstampCompletion.resolveIfPending(
+                .failure(Self.stateError(
+                    "Transaction cancelled",
+                    operation: .read
+                ))
+            )
             await completion.resolve(.success(()))
         case .waitForCancellation(let completion):
             try await completion.wait().get()
@@ -644,16 +658,22 @@ public final class InMemoryTransaction: Transaction, Sendable {
         }
     }
 
-    public func getVersionstamp() async throws -> Bytes? {
-        try _state.withLock { state in
-            guard case .committed = state.lifecycle else {
-                throw Self.stateError(
-                    "Versionstamp is unavailable before a successful commit",
+    public func requestVersionstamp() -> any PendingTransactionVersionstamp {
+        let failure = _state.withLock { state -> StorageError? in
+            guard case .open = state.lifecycle else {
+                return Self.stateError(
+                    "Versionstamp must be requested before commit begins",
                     operation: .read
                 )
             }
-            return state.versionstamp
+            return nil
         }
+        if let failure {
+            return TransactionVersionstampRequest(failure: failure)
+        }
+        return TransactionVersionstampRequest(
+            completion: versionstampCompletion
+        )
     }
 
     private func commitOperations(
@@ -806,15 +826,30 @@ public final class InMemoryTransaction: Transaction, Sendable {
         )
     }
 
-    private static func versionstamp(for version: Int64) -> Bytes {
-        let raw = UInt64(bitPattern: version).bigEndian
-        return Bytes.copying(count: 10) { destination in
-            withUnsafeBytes(of: raw) { source in
-                UnsafeMutableRawBufferPointer(rebasing: destination[0..<8])
-                    .copyMemory(from: source)
+    private static func versionstampResult(
+        for result: Result<Int64, StorageError>
+    ) -> Result<TransactionVersionstamp, StorageError> {
+        switch result {
+        case .success(let committedVersion):
+            do {
+                return .success(
+                    try TransactionVersionstamp(
+                        committedVersion: committedVersion
+                    )
+                )
+            } catch let error as StorageError {
+                return .failure(error)
+            } catch {
+                return .failure(StorageError(
+                    code: .backendContractViolation,
+                    operation: .read,
+                    backend: .inMemory,
+                    message: "Unable to encode the committed versionstamp",
+                    underlyingDescription: String(describing: error)
+                ))
             }
-            destination[8] = 0
-            destination[9] = 0
+        case .failure(let error):
+            return .failure(error)
         }
     }
 }

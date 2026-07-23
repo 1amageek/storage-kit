@@ -21,38 +21,38 @@ public protocol DirectoryService: Sendable {
     /// - Returns: The Subspace corresponding to the path.
     func createOrOpen(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> Subspace
 
     /// Open an existing Subspace without creating namespace metadata.
     func open(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> Subspace
 
     /// List subdirectory names under a path.
     func list(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> [String]
 
     /// Remove the directory corresponding to a path.
     func remove(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws
 
     /// Check whether a directory corresponding to a path exists.
     func exists(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> Bool
 }
 
 extension DirectoryService {
     public func list(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> [String] {
         _ = path
         _ = transaction
@@ -64,7 +64,7 @@ extension DirectoryService {
 
     public func remove(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws {
         _ = path
         _ = transaction
@@ -76,7 +76,7 @@ extension DirectoryService {
 
     public func exists(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> Bool {
         _ = path
         _ = transaction
@@ -102,7 +102,7 @@ public struct StaticDirectoryService: DirectoryService, Sendable {
 
     public func createOrOpen(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> Subspace {
         _ = transaction
         return Subspace(Tuple(path.map { $0 as any TupleElement }))
@@ -110,7 +110,7 @@ public struct StaticDirectoryService: DirectoryService, Sendable {
 
     public func open(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> Subspace {
         _ = transaction
         return Subspace(Tuple(path.map { $0 as any TupleElement }))
@@ -118,7 +118,7 @@ public struct StaticDirectoryService: DirectoryService, Sendable {
 
     public func list(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> [String] {
         _ = path
         _ = transaction
@@ -130,7 +130,7 @@ public struct StaticDirectoryService: DirectoryService, Sendable {
 
     public func remove(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws {
         _ = path
         _ = transaction
@@ -142,7 +142,7 @@ public struct StaticDirectoryService: DirectoryService, Sendable {
 
     public func exists(
         path: [String],
-        transaction: any Transaction
+        transaction: any TransactionAccess
     ) async throws -> Bool {
         _ = path
         _ = transaction

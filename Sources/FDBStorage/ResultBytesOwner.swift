@@ -2,18 +2,18 @@ import FoundationDB
 import StorageKit
 
 /// Keeps a FoundationDB result future alive while StorageKit borrows its bytes.
-struct FoundationDBResultBytesOwner: BytesOwner {
-    let buffer: FDB.ByteBuffer
+struct ResultBytesOwner: BytesOwner {
+    let bytes: FDB.ByteString
 
-    init(_ buffer: FDB.ByteBuffer) {
-        self.buffer = buffer
+    init(_ bytes: FDB.ByteString) {
+        self.bytes = bytes
     }
 
-    var count: Int { buffer.count }
+    var count: Int { bytes.count }
 
     func borrowBytes(
         _ body: (UnsafeRawBufferPointer) throws -> Void
     ) rethrows {
-        try buffer.withUnsafeBytes(body)
+        try bytes.withUnsafeBytes(body)
     }
 }

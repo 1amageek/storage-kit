@@ -59,7 +59,7 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
     public typealias TransactionType = FDBStorageTransaction
 
     public let database: any DatabaseProtocol
-    private let transactionDomain = FoundationDBTransactionDomain()
+    private let transactionDomain = StorageTransactionDomain()
     private let commitRequestLimit: CommitRequestLimit
 
     public init(configuration: Configuration) async throws {
@@ -86,10 +86,12 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
     }
 
     public func withTransaction<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
+        _ operation: (any TransactionAccess) async throws -> T
     ) async throws -> T {
         let tx = try createTransaction()
-        return try await ActiveTransactionScope.$current.withValue(tx) {
+        return try await ActiveTransactionScope.withActiveTransaction(
+            tx
+        ) { _ in
             let result: T
             do {
                 result = try await operation(tx)

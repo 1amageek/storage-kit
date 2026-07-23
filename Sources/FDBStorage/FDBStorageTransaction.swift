@@ -27,9 +27,9 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
     public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
+    public let transactionDomain: StorageTransactionDomain
 
     let fdbTransaction: any TransactionProtocol
-    private let transactionDomain: FoundationDBTransactionDomain
     private let commitRequestLimit: CommitRequestLimit
     private let state = Mutex(MutableState())
     private let mutationByteMeter = TransactionMutationByteMeter()
@@ -42,6 +42,9 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         var commitCancellationWaiterCount = 0
         var activeDirectoryOperation: UInt64?
         var nextDirectoryOperation: UInt64 = 1
+        var rangeLeaseActivity: [UInt64: Bool] = [:]
+        var nextRangeLease: UInt64 = 1
+        var cancellationDrain: TransactionActivityDrain?
     }
 
     private struct CommitPreparation: Sendable {
@@ -88,7 +91,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     init(
         _ fdbTransaction: any TransactionProtocol,
-        transactionDomain: FoundationDBTransactionDomain,
+        transactionDomain: StorageTransactionDomain,
         commitRequestLimit: CommitRequestLimit = .default
     ) throws {
         self.fdbTransaction = fdbTransaction
@@ -120,7 +123,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     }
 
     func withDirectoryOperation<T: Sendable>(
-        transactionDomain: FoundationDBTransactionDomain,
+        transactionDomain: StorageTransactionDomain,
         writes: Bool,
         operation: StorageOperation,
         _ body: (any TransactionProtocol) async throws -> T
@@ -144,11 +147,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             return token
         }
         defer {
-            state.withLock { state in
-                if state.activeDirectoryOperation == token {
-                    state.activeDirectoryOperation = nil
-                }
-            }
+            finishDirectoryOperation(token)
         }
         return try await body(fdbTransaction)
     }
@@ -156,8 +155,11 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     // MARK: - Type Conversion
 
     private func toFDB(_ ks: KeySelector) -> FDB.KeySelector {
-        FDB.KeySelector(
-            key: FoundationDBByteSource(ks.key),
+        let key = FDB.ByteString(
+            retaining: RetainedStorageBytes(ks.key)
+        )
+        return FDB.KeySelector(
+            key: key,
             orEqual: ks.orEqual,
             offset: ks.offset
         )
@@ -209,31 +211,11 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         defer { finishOperation() }
         do {
             let value = try await fdbTransaction.getValue(
-                for: FoundationDBByteSource(key),
+                for: RetainedStorageBytes(key),
                 snapshot: snapshot
             )
             return value.map {
-                Bytes(retaining: FoundationDBResultBytesOwner($0))
-            }
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as FDBError {
-            throw Self.convertFDBError(error, operation: .read)
-        } catch {
-            throw Self.convertBackendError(error, operation: .read)
-        }
-    }
-
-    public func getKey(selector: KeySelector, snapshot: Bool) async throws -> Bytes? {
-        try beginOperation(.read)
-        defer { finishOperation() }
-        do {
-            let key = try await fdbTransaction.getKey(
-                selector: toFDB(selector),
-                snapshot: snapshot
-            )
-            return key.map {
-                Bytes(retaining: FoundationDBResultBytesOwner($0))
+                Bytes(retaining: ResultBytesOwner($0))
             }
         } catch is CancellationError {
             throw CancellationError()
@@ -293,8 +275,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         try Self.validateFoundationDBLength(value, operation: .write)
         try key.withUnsafeBytes { keyBytes in
             try value.withUnsafeBytes { valueBytes in
-                let borrowedKey = BorrowedFoundationDBByteSource(keyBytes)
-                let borrowedValue = BorrowedFoundationDBByteSource(valueBytes)
+                let borrowedKey = ScopedByteInput(keyBytes)
+                let borrowedValue = ScopedByteInput(valueBytes)
                 try state.withLock { state in
                     try Self.validateExclusiveAccess(state, operation: .write)
                     try mutationByteMeter.recordSet(key: key, value: value)
@@ -320,7 +302,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     public func clear(key: Bytes) throws {
         try Self.validateFoundationDBLength(key, operation: .delete)
         try key.withUnsafeBytes { keyBytes in
-            let borrowedKey = BorrowedFoundationDBByteSource(keyBytes)
+            let borrowedKey = ScopedByteInput(keyBytes)
             try state.withLock { state in
                 try Self.validateExclusiveAccess(state, operation: .delete)
                 try mutationByteMeter.recordClear(key: key)
@@ -344,8 +326,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         try Self.validateFoundationDBLength(endKey, operation: .deleteRange)
         try beginKey.withUnsafeBytes { beginBytes in
             try endKey.withUnsafeBytes { endBytes in
-                let borrowedBegin = BorrowedFoundationDBByteSource(beginBytes)
-                let borrowedEnd = BorrowedFoundationDBByteSource(endBytes)
+                let borrowedBegin = ScopedByteInput(beginBytes)
+                let borrowedEnd = ScopedByteInput(endBytes)
                 try state.withLock { state in
                     try Self.validateExclusiveAccess(
                         state,
@@ -385,8 +367,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         try Self.validateFoundationDBLength(param, operation: .write)
         try key.withUnsafeBytes { keyBytes in
             try param.withUnsafeBytes { parameterBytes in
-                let borrowedKey = BorrowedFoundationDBByteSource(keyBytes)
-                let borrowedParameter = BorrowedFoundationDBByteSource(
+                let borrowedKey = ScopedByteInput(keyBytes)
+                let borrowedParameter = ScopedByteInput(
                     parameterBytes
                 )
                 try state.withLock { state in
@@ -433,7 +415,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             switch state.lifecycle {
             case .open:
                 guard state.activeDirectoryOperation == nil,
-                      state.activeOperationCount == 0 else {
+                      state.activeOperationCount == 0,
+                      state.rangeLeaseActivity.isEmpty else {
                     return .failed(Self.lifecycleError(
                         "FoundationDB transaction has active operations",
                         operation: .commit,
@@ -537,15 +520,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
 
         do {
-            let committed = try await fdbTransaction.commit()
-            if !committed {
-                throw StorageError(
-                    code: .transactionConflict,
-                    operation: .commit,
-                    backend: .foundationDB,
-                    message: "FoundationDB transaction commit reported a conflict"
-                )
-            }
+            try await fdbTransaction.commit()
             state.withLock { $0.lifecycle = .committed }
             return .resolve(.success(()))
         } catch let error as StorageError {
@@ -646,7 +621,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     public func cancel() async throws {
         enum Start {
-            case leader(TransactionOperationCompletion)
+            case leader(
+                TransactionOperationCompletion,
+                TransactionActivityDrain?
+            )
             case preparationLeader(CommitPreparation, StorageError)
             case waitForPreparationCleanup(CommitPreparation)
             case waitForCancellation(TransactionOperationCompletion)
@@ -655,22 +633,27 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             case committed
             case failed
             case commitUnknown(StorageError)
-            case busy(StorageError)
         }
 
         let start = state.withLock { state -> Start in
             switch state.lifecycle {
             case .open:
-                guard state.activeDirectoryOperation == nil else {
-                    return .busy(Self.lifecycleError(
-                        "FoundationDB transaction has an active directory operation",
-                        operation: .cancel
-                    ))
-                }
                 let completion = TransactionOperationCompletion()
                 let error = Self.cancellationError(operation: .cancel)
+                state.rangeLeaseActivity = state.rangeLeaseActivity.filter {
+                    $0.value
+                }
+                let drain: TransactionActivityDrain?
+                if state.activeOperationCount > 0
+                    || state.activeDirectoryOperation != nil {
+                    let pendingDrain = TransactionActivityDrain()
+                    state.cancellationDrain = pendingDrain
+                    drain = pendingDrain
+                } else {
+                    drain = nil
+                }
                 state.lifecycle = .cancelling(completion, error)
-                return .leader(completion)
+                return .leader(completion, drain)
             case .preparing(let preparation):
                 let error = Self.cancellationError(operation: .prepare)
                 state.lifecycle = .cancellingPreparation(preparation, error)
@@ -707,8 +690,11 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
 
         switch start {
-        case .leader(let completion):
+        case .leader(let completion, let drain):
             fdbTransaction.cancel()
+            if let drain {
+                await drain.wait()
+            }
             let error = Self.cancellationError(operation: .cancel)
             state.withLock { $0.lifecycle = .cancelled(error) }
             await completion.resolve(.success(()))
@@ -741,8 +727,6 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 operation: .cancel
             )
         case .commitUnknown(let error):
-            throw error
-        case .busy(let error):
             throw error
         }
     }
@@ -814,7 +798,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
         try Self.validateFoundationDBLength(value, operation: .execute)
         try value.withUnsafeBytes { valueBytes in
-            let borrowedValue = BorrowedFoundationDBByteSource(valueBytes)
+            let borrowedValue = ScopedByteInput(valueBytes)
             try state.withLock { state in
                 try Self.validateExclusiveAccess(state, operation: .execute)
                 do {
@@ -995,8 +979,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         try Self.validateFoundationDBLength(endKey, operation: .write)
         try beginKey.withUnsafeBytes { beginBytes in
             try endKey.withUnsafeBytes { endBytes in
-                let borrowedBegin = BorrowedFoundationDBByteSource(beginBytes)
-                let borrowedEnd = BorrowedFoundationDBByteSource(endBytes)
+                let borrowedBegin = ScopedByteInput(beginBytes)
+                let borrowedEnd = ScopedByteInput(endBytes)
                 try state.withLock { state in
                     try Self.validateExclusiveAccess(state, operation: .write)
                     do {
@@ -1042,10 +1026,19 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             )
         }
         do {
-            return try await fdbTransaction.getEstimatedRangeSizeBytes(
-                beginKey: FoundationDBByteSource(beginKey),
-                endKey: FoundationDBByteSource(endKey)
+            let estimate = try await fdbTransaction.getEstimatedRangeSizeBytes(
+                beginKey: RetainedStorageBytes(beginKey),
+                endKey: RetainedStorageBytes(endKey)
             )
+            guard let result = Int(exactly: estimate) else {
+                throw StorageError(
+                    code: .backendContractViolation,
+                    operation: .rangeRead,
+                    backend: .foundationDB,
+                    message: "FoundationDB range-size estimate cannot be represented by StorageKit"
+                )
+            }
+            return result
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as FDBError {
@@ -1079,26 +1072,38 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     // MARK: - Versionstamp
 
-    public func getVersionstamp() async throws -> Bytes? {
-        try state.withLock { state in
-            guard case .committed = state.lifecycle else {
-                throw Self.lifecycleError(
-                    "Versionstamp is unavailable before a successful commit",
+    public func requestVersionstamp() -> any PendingTransactionVersionstamp {
+        let pendingResult: Result<
+            any FDB.PendingTransactionVersionstamp,
+            StorageError
+        > = state.withLock { state in
+            do {
+                try Self.validateExclusiveAccess(state, operation: .read)
+                return .success(fdbTransaction.requestVersionstamp())
+            } catch {
+                return .failure(Self.convertBackendError(
+                    error,
                     operation: .read
-                )
+                ))
             }
         }
-        do {
-            let versionstamp = try await fdbTransaction.getVersionstamp()
-            return versionstamp.map {
-                Bytes(retaining: FoundationDBResultBytesOwner($0))
+
+        return TransactionVersionstampRequest {
+            let pendingVersionstamp = try pendingResult.get()
+            do {
+                let versionstamp = try await pendingVersionstamp.value
+                return try TransactionVersionstamp(
+                    bytes: Bytes(
+                        retaining: ResultBytesOwner(versionstamp.bytes)
+                    )
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as FDBError {
+                throw Self.convertFDBError(error, operation: .read)
+            } catch {
+                throw Self.convertBackendError(error, operation: .read)
             }
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as FDBError {
-            throw Self.convertFDBError(error, operation: .read)
-        } catch {
-            throw Self.convertBackendError(error, operation: .read)
         }
     }
 
@@ -1124,22 +1129,48 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     }
 
     private func finishOperation() {
-        state.withLock { state in
+        let drain = state.withLock { state -> TransactionActivityDrain? in
             precondition(
                 state.activeOperationCount > 0,
                 "FoundationDB transaction operation count underflow"
             )
             state.activeOperationCount -= 1
+            return Self.takeCancellationDrainIfReady(&state)
         }
+        drain?.resolveIfPending()
     }
 
     func makeOperationLease(
         for operation: StorageOperation
-    ) throws -> FDBStorageOperationLease {
-        try beginOperation(operation)
-        return FDBStorageOperationLease { [self] in
-            finishOperation()
+    ) throws -> TransactionActivityLease {
+        let identifier = try state.withLock { state -> UInt64 in
+            try Self.validateAvailable(state, operation: operation)
+            let nextCount = state.activeOperationCount
+                .addingReportingOverflow(1)
+            guard !nextCount.overflow else {
+                throw Self.lifecycleError(
+                    "FoundationDB transaction operation count overflowed",
+                    operation: operation,
+                    code: .backendContractViolation
+                )
+            }
+            let identifier = state.nextRangeLease
+            state.nextRangeLease &+= 1
+            state.rangeLeaseActivity[identifier] = true
+            state.activeOperationCount = nextCount.partialValue
+            return identifier
         }
+        return TransactionActivityLease(
+            resumeOperation: { [self] in
+                try resumeRangeLease(identifier, operation: operation)
+            },
+            pauseOperation: { [self] in
+                pauseRangeLease(identifier)
+            },
+            releaseOperation: { [self] in
+                releaseRangeLease(identifier)
+            }
+        )
     }
 
     func validateOperationLease(for operation: StorageOperation) throws {
@@ -1166,7 +1197,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         operation: StorageOperation
     ) throws {
         try validateAvailable(state, operation: operation)
-        guard state.activeOperationCount == 0 else {
+        guard state.activeOperationCount == 0,
+              state.rangeLeaseActivity.isEmpty else {
             throw lifecycleError(
                 "FoundationDB transaction has active operations",
                 operation: operation,
@@ -1216,5 +1248,81 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             backend: .foundationDB,
             message: "FoundationDB transaction was cancelled"
         )
+    }
+
+    private func resumeRangeLease(
+        _ identifier: UInt64,
+        operation: StorageOperation
+    ) throws {
+        try state.withLock { state in
+            try Self.validateAvailable(state, operation: operation)
+            guard let isActive = state.rangeLeaseActivity[identifier] else {
+                throw Self.cancellationError(operation: operation)
+            }
+            guard !isActive else { return }
+            let nextCount = state.activeOperationCount
+                .addingReportingOverflow(1)
+            guard !nextCount.overflow else {
+                throw Self.lifecycleError(
+                    "FoundationDB transaction operation count overflowed",
+                    operation: operation,
+                    code: .backendContractViolation
+                )
+            }
+            state.rangeLeaseActivity[identifier] = true
+            state.activeOperationCount = nextCount.partialValue
+        }
+    }
+
+    private func pauseRangeLease(_ identifier: UInt64) {
+        let drain = state.withLock { state -> TransactionActivityDrain? in
+            guard state.rangeLeaseActivity[identifier] == true else {
+                return nil
+            }
+            state.rangeLeaseActivity[identifier] = false
+            precondition(state.activeOperationCount > 0)
+            state.activeOperationCount -= 1
+            return Self.takeCancellationDrainIfReady(&state)
+        }
+        drain?.resolveIfPending()
+    }
+
+    private func releaseRangeLease(_ identifier: UInt64) {
+        let drain = state.withLock { state -> TransactionActivityDrain? in
+            guard let wasActive = state.rangeLeaseActivity.removeValue(
+                forKey: identifier
+            ) else {
+                return nil
+            }
+            if wasActive {
+                precondition(state.activeOperationCount > 0)
+                state.activeOperationCount -= 1
+            }
+            return Self.takeCancellationDrainIfReady(&state)
+        }
+        drain?.resolveIfPending()
+    }
+
+    private func finishDirectoryOperation(_ token: UInt64) {
+        let drain = state.withLock { state -> TransactionActivityDrain? in
+            guard state.activeDirectoryOperation == token else {
+                return nil
+            }
+            state.activeDirectoryOperation = nil
+            return Self.takeCancellationDrainIfReady(&state)
+        }
+        drain?.resolveIfPending()
+    }
+
+    private static func takeCancellationDrainIfReady(
+        _ state: inout MutableState
+    ) -> TransactionActivityDrain? {
+        guard state.activeOperationCount == 0,
+              state.activeDirectoryOperation == nil,
+              let drain = state.cancellationDrain else {
+            return nil
+        }
+        state.cancellationDrain = nil
+        return drain
     }
 }

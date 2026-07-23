@@ -46,22 +46,6 @@ public protocol StorageEngine: Sendable {
     /// Default implementation is a no-op.
     func shutdown()
 
-    /// Execute a low-level operation in auto-commit mode (no explicit BEGIN/COMMIT).
-    ///
-    /// Each SQL statement commits individually via PostgreSQL's default
-    /// auto-commit behavior. This eliminates 2 round-trips (BEGIN + COMMIT)
-    /// compared to `withTransaction()`.
-    ///
-    /// Suitable for:
-    /// - Single read operations that do not need a transaction runner
-    /// - Backend-specific low-level probes
-    ///
-    /// NOT suitable for:
-    /// - Multi-statement operations requiring atomicity
-    /// - Operations that need read-your-writes across multiple keys
-    func withAutoCommit<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
-    ) async throws -> T
 }
 
 extension StorageEngine {
@@ -138,10 +122,12 @@ extension StorageEngine {
     /// Higher-level frameworks own retry policy and should create a fresh
     /// transaction for each attempt.
     public func withTransaction<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
+        _ operation: (any TransactionAccess) async throws -> T
     ) async throws -> T {
         let transaction = try createTransaction()
-        return try await ActiveTransactionScope.$current.withValue(transaction) {
+        return try await ActiveTransactionScope.withActiveTransaction(
+            transaction
+        ) { _ in
             do {
                 let result = try await operation(transaction)
                 try await transaction.commit()
@@ -161,10 +147,4 @@ extension StorageEngine {
         }
     }
 
-    /// Default: runs the operation through a one-shot transaction.
-    public func withAutoCommit<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
-    ) async throws -> T {
-        try await withTransaction(operation)
-    }
 }

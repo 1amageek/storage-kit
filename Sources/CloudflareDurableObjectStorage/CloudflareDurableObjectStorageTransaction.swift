@@ -16,6 +16,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
 
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
     public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
+    public let transactionDomain: StorageTransactionDomain
 
     private let scope: CloudflareDurableObjectStorageScope
     private let client: any CloudflareDurableObjectStorageClient
@@ -23,6 +24,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     private let monotonicClock: any StorageMonotonicClock
     private let state = Mutex(CloudflareDurableObjectTransactionState())
     private let mutationByteMeter = TransactionMutationByteMeter()
+    private let versionstampCompletion = TransactionVersionstampCompletion()
 
     public func configureMutationByteLimit(maximumBytes: Int?) throws {
         try mutationByteMeter.configure(maximumBytes: maximumBytes)
@@ -39,12 +41,14 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         scope: CloudflareDurableObjectStorageScope,
         client: any CloudflareDurableObjectStorageClient,
         limits: CloudflareDurableObjectLimits,
-        monotonicClock: any StorageMonotonicClock
+        monotonicClock: any StorageMonotonicClock,
+        transactionDomain: StorageTransactionDomain = StorageTransactionDomain()
     ) {
         self.scope = scope
         self.client = client
         self.limits = limits
         self.monotonicClock = monotonicClock
+        self.transactionDomain = transactionDomain
     }
 
     public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
@@ -279,6 +283,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         case .cancelled:
             throw Self.phaseError(.cancelled, operation: .commit)
         case .failed(let error):
+            versionstampCompletion.resolveIfPending(.failure(error))
             throw error
         }
     }
@@ -305,13 +310,27 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 )
             }
 
+            let versionstamp: TransactionVersionstamp
+            do {
+                versionstamp = try TransactionVersionstamp(
+                    committedVersion: response.committedVersion
+                )
+            } catch let error as StorageError {
+                throw error
+            } catch {
+                throw StorageError(
+                    code: .backendContractViolation,
+                    operation: .read,
+                    backend: .cloudflareDurableObject,
+                    message: "Unable to encode the committed versionstamp",
+                    underlyingDescription: String(describing: error)
+                )
+            }
             state.withLock { state in
                 state.phase = .committed
                 state.committedVersion = response.committedVersion
-                state.versionstamp = Self.versionstamp(
-                    for: response.committedVersion
-                )
             }
+            versionstampCompletion.resolveIfPending(.success(versionstamp))
             return .success(())
         } catch is CancellationError {
             let error = commitUnknownError(
@@ -321,6 +340,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 state.phase = .commitUnknown(error)
                 Self.clearPendingState(&state)
             }
+            versionstampCompletion.resolveIfPending(.failure(error))
             return .failure(error)
         } catch let error as StorageError
             where error.code == .transactionTimedOut {
@@ -331,6 +351,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 state.phase = .commitUnknown(unknown)
                 Self.clearPendingState(&state)
             }
+            versionstampCompletion.resolveIfPending(.failure(unknown))
             return .failure(unknown)
         } catch {
             let storageError = Self.storageError(error, operation: .commit)
@@ -342,6 +363,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 }
                 Self.clearPendingState(&state)
             }
+            versionstampCompletion.resolveIfPending(.failure(storageError))
             return .failure(storageError)
         }
     }
@@ -382,6 +404,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         switch start {
         case .leader(let completion):
             state.withLock { $0.phase = .cancelled }
+            versionstampCompletion.resolveIfPending(
+                .failure(Self.phaseError(.cancelled, operation: .read))
+            )
             await completion.resolve(.success(()))
         case .waitForCancellation(let completion):
             try await completion.wait().get()
@@ -654,16 +679,19 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
     }
 
-    public func getVersionstamp() async throws -> Bytes? {
-        let snapshot = state.withLock {
-            ($0.phase, $0.versionstamp)
+    public func requestVersionstamp() -> any PendingTransactionVersionstamp {
+        let failure = state.withLock { state -> StorageError? in
+            guard case .open = state.phase else {
+                return Self.phaseError(state.phase, operation: .read)
+            }
+            return nil
         }
-        switch snapshot.0 {
-        case .committed:
-            return snapshot.1
-        default:
-            throw Self.phaseError(snapshot.0, operation: .read)
+        if let failure {
+            return TransactionVersionstampRequest(failure: failure)
         }
+        return TransactionVersionstampRequest(
+            completion: versionstampCompletion
+        )
     }
 
     private func value(
@@ -972,22 +1000,6 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         ) >= 0 ? left : right
     }
 
-    private static func versionstamp(for version: Int64) -> Bytes {
-        let value = UInt64(version)
-        return [
-            UInt8(truncatingIfNeeded: value >> 56),
-            UInt8(truncatingIfNeeded: value >> 48),
-            UInt8(truncatingIfNeeded: value >> 40),
-            UInt8(truncatingIfNeeded: value >> 32),
-            UInt8(truncatingIfNeeded: value >> 24),
-            UInt8(truncatingIfNeeded: value >> 16),
-            UInt8(truncatingIfNeeded: value >> 8),
-            UInt8(truncatingIfNeeded: value),
-            0,
-            0,
-        ]
-    }
-
     private static func ensureOpen(
         _ phase: CloudflareDurableObjectTransactionPhase,
         operation: StorageOperation
@@ -1134,10 +1146,14 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             }
         } catch let error as StorageError
             where error.code == .transactionTimedOut {
-            state.withLock { state in
-                guard case .open = state.phase else { return }
+            let transitioned = state.withLock { state -> Bool in
+                guard case .open = state.phase else { return false }
                 state.phase = .failed(error)
                 Self.clearPendingState(&state)
+                return true
+            }
+            if transitioned {
+                versionstampCompletion.resolveIfPending(.failure(error))
             }
             throw error
         }

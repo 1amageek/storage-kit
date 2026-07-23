@@ -12,7 +12,9 @@
 /// let vs = Versionstamp.incomplete(userVersion: 0)
 ///
 /// // After commit, create a complete versionstamp from the committed version
-/// let version = try await transaction.getVersionstamp()
+/// let pendingVersionstamp = transaction.requestVersionstamp()
+/// try await transaction.commit()
+/// let version = try await pendingVersionstamp.value
 /// let complete = try Versionstamp.fromBytes(version!)
 /// ```
 ///

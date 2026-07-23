@@ -8,11 +8,11 @@ import FoundationDB
 public final class FDBDirectoryService: DirectoryService, Sendable {
 
     private let database: any DatabaseProtocol
-    private let transactionDomain: FoundationDBTransactionDomain
+    private let transactionDomain: StorageTransactionDomain
 
     init(
         database: any DatabaseProtocol,
-        transactionDomain: FoundationDBTransactionDomain
+        transactionDomain: StorageTransactionDomain
     ) {
         self.database = database
         self.transactionDomain = transactionDomain
@@ -20,7 +20,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
 
     public func createOrOpen(
         path: [String],
-        transaction: any StorageKit.Transaction
+        transaction: any StorageKit.TransactionAccess
     ) async throws -> StorageKit.Subspace {
         try await withFDBTransaction(
             transaction,
@@ -40,7 +40,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
 
     public func open(
         path: [String],
-        transaction: any StorageKit.Transaction
+        transaction: any StorageKit.TransactionAccess
     ) async throws -> StorageKit.Subspace {
         try await withFDBTransaction(
             transaction,
@@ -60,7 +60,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
 
     public func list(
         path: [String],
-        transaction: any StorageKit.Transaction
+        transaction: any StorageKit.TransactionAccess
     ) async throws -> [String] {
         try await withFDBTransaction(
             transaction,
@@ -77,7 +77,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
 
     public func remove(
         path: [String],
-        transaction: any StorageKit.Transaction
+        transaction: any StorageKit.TransactionAccess
     ) async throws {
         try await withFDBTransaction(
             transaction,
@@ -94,7 +94,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
 
     public func exists(
         path: [String],
-        transaction: any StorageKit.Transaction
+        transaction: any StorageKit.TransactionAccess
     ) async throws -> Bool {
         try await withFDBTransaction(
             transaction,
@@ -110,7 +110,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
     }
 
     private func withFDBTransaction<T: Sendable>(
-        _ transaction: any StorageKit.Transaction,
+        _ transaction: any StorageKit.TransactionAccess,
         writes: Bool,
         operation: StorageOperation,
         _ body: (any TransactionProtocol) async throws -> T

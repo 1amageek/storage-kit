@@ -3,7 +3,9 @@ import StorageKit
 
 /// Retains a StorageKit byte value and lends its existing contiguous storage
 /// directly to FoundationDB.
-struct FoundationDBByteSource: FDB.ByteSource {
+struct RetainedStorageBytes:
+        FDB.ByteInput,
+        FDB.ByteStringOwner {
     let bytes: Bytes
 
     init(_ bytes: Bytes) {

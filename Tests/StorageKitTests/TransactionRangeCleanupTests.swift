@@ -63,6 +63,108 @@ struct TransactionRangeCleanupTests {
 
         #expect(iterationRecorder.finishCount == 1)
     }
+
+    @Test func cursorFinishesNaturalExhaustionExactlyOnce() async throws {
+        let iterationRecorder = RangeIterationRecorder()
+        var cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [([0x01], [0x11])],
+                iterationRecorder: iterationRecorder
+            )
+        )
+
+        let first = try await cursor.next()
+        let exhausted = try await cursor.next()
+        try await cursor.finish()
+
+        #expect(first?.0 == [0x01])
+        #expect(exhausted == nil)
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
+    @Test func concurrentCursorAdvancesAreRejected() async throws {
+        let iterationGate = RangeIterationGate()
+        let iterationRecorder = RangeIterationRecorder()
+        let cursor = KeyValueCursor(
+            consuming: SuspendedRows(
+                iterationGate: iterationGate,
+                iterationRecorder: iterationRecorder
+            )
+        )
+        var firstCursor = cursor
+        var secondCursor = cursor
+
+        let firstAdvance = Task {
+            try await firstCursor.next()
+        }
+        await iterationGate.waitUntilAdvanceStarts()
+
+        do {
+            _ = try await secondCursor.next()
+            Issue.record("Expected concurrent cursor advance failure")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+        } catch {
+            Issue.record("Expected StorageError, got \(error)")
+        }
+
+        iterationGate.resumeAdvance(with: ([0x01], [0x11]))
+        _ = try await firstAdvance.value
+        try await secondCursor.finish()
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
+    @Test func finishWaitsForAdvanceAndCleansUpExactlyOnce() async throws {
+        let iterationGate = RangeIterationGate()
+        let iterationRecorder = RangeIterationRecorder()
+        let cursor = KeyValueCursor(
+            consuming: SuspendedRows(
+                iterationGate: iterationGate,
+                iterationRecorder: iterationRecorder
+            )
+        )
+        let advance = Task {
+            var advancingCursor = cursor
+            return try await advancingCursor.next()
+        }
+        await iterationGate.waitUntilAdvanceStarts()
+
+        let finish = Task {
+            var finishingCursor = cursor
+            try await finishingCursor.finish()
+        }
+        await Task.yield()
+        #expect(iterationRecorder.finishCount == 0)
+
+        iterationGate.resumeAdvance(with: ([0x01], [0x11]))
+        let row = try await advance.value
+        try await finish.value
+        var repeatedFinishCursor = cursor
+        try await repeatedFinishCursor.finish()
+
+        #expect(row?.0 == [0x01])
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
+    @Test func cursorPreservesAdvanceAndCleanupFailures() async {
+        let iterationRecorder = RangeIterationRecorder(finishError: .finish)
+        var cursor = KeyValueCursor(
+            consuming: FailingRows(iterationRecorder: iterationRecorder)
+        )
+
+        do {
+            _ = try await cursor.next()
+            Issue.record("Expected combined failure")
+        } catch let error as StorageRangeCleanupError {
+            #expect(error.iterationError as? RangeCleanupFailure == .body)
+            #expect(error.cleanupError as? RangeCleanupFailure == .finish)
+        } catch {
+            Issue.record("Expected StorageRangeCleanupError, got \(error)")
+        }
+
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
 }
 
 private enum RangeCleanupFailure: Error, Equatable, Sendable {
@@ -122,6 +224,124 @@ private struct FinishRecordingRows: TransactionRangeResult {
             }
             defer { index += 1 }
             return rows[index]
+        }
+
+        mutating func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {
+            iterationRecorder.recordFinish()
+            if let finishError = iterationRecorder.finishError {
+                throw finishError
+            }
+        }
+    }
+}
+
+private final class RangeIterationGate: Sendable {
+    private struct State: Sendable {
+        var advanceStarted = false
+        var startWaiters: [CheckedContinuation<Void, Never>] = []
+        var advanceContinuation:
+            CheckedContinuation<(Bytes, Bytes)?, Never>?
+    }
+
+    private let state = Mutex(State())
+
+    func waitUntilAdvanceStarts() async {
+        await withCheckedContinuation { continuation in
+            state.withLock { state in
+                if state.advanceStarted {
+                    continuation.resume()
+                } else {
+                    state.startWaiters.append(continuation)
+                }
+            }
+        }
+    }
+
+    func suspendAdvance() async -> (Bytes, Bytes)? {
+        let waiters = state.withLock { state in
+            state.advanceStarted = true
+            let waiters = state.startWaiters
+            state.startWaiters.removeAll(keepingCapacity: false)
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.resume()
+        }
+
+        return await withCheckedContinuation { continuation in
+            state.withLock { state in
+                precondition(state.advanceContinuation == nil)
+                state.advanceContinuation = continuation
+            }
+        }
+    }
+
+    func resumeAdvance(with row: (Bytes, Bytes)?) {
+        let continuation = state.withLock { state in
+            let continuation = state.advanceContinuation
+            state.advanceContinuation = nil
+            return continuation
+        }
+        precondition(continuation != nil)
+        continuation?.resume(returning: row)
+    }
+}
+
+private struct SuspendedRows: TransactionRangeResult {
+    typealias Element = (Bytes, Bytes)
+
+    let iterationGate: RangeIterationGate
+    let iterationRecorder: RangeIterationRecorder
+
+    func makeAsyncIterator() -> Iterator {
+        Iterator(
+            iterationGate: iterationGate,
+            iterationRecorder: iterationRecorder
+        )
+    }
+
+    struct Iterator: TransactionRangeIterator {
+        let iterationGate: RangeIterationGate
+        let iterationRecorder: RangeIterationRecorder
+        var hasAdvanced = false
+
+        mutating func next() async throws -> Element? {
+            guard !hasAdvanced else {
+                return nil
+            }
+            hasAdvanced = true
+            iterationRecorder.recordNext()
+            return await iterationGate.suspendAdvance()
+        }
+
+        mutating func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {
+            iterationRecorder.recordFinish()
+            if let finishError = iterationRecorder.finishError {
+                throw finishError
+            }
+        }
+    }
+}
+
+private struct FailingRows: TransactionRangeResult {
+    typealias Element = (Bytes, Bytes)
+
+    let iterationRecorder: RangeIterationRecorder
+
+    func makeAsyncIterator() -> Iterator {
+        Iterator(iterationRecorder: iterationRecorder)
+    }
+
+    struct Iterator: TransactionRangeIterator {
+        let iterationRecorder: RangeIterationRecorder
+
+        mutating func next() async throws -> Element? {
+            iterationRecorder.recordNext()
+            throw RangeCleanupFailure.body
         }
 
         mutating func finish(

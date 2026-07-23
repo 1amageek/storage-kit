@@ -7,7 +7,7 @@ import Foundation
 struct SQLiteNestedTransactionTests {
 
     private func collectRange(
-        _ tx: some Transaction,
+        _ tx: some TransactionAccess,
         begin: Bytes, end: Bytes
     ) async throws -> [(key: Bytes, value: Bytes)] {
         let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
@@ -19,7 +19,7 @@ struct SQLiteNestedTransactionTests {
     }
 
     private func collectRange(
-        _ tx: some Transaction,
+        _ tx: some TransactionAccess,
         from begin: KeySelector,
         to end: KeySelector
     ) async throws -> [(key: Bytes, value: Bytes)] {
@@ -81,6 +81,34 @@ struct SQLiteNestedTransactionTests {
             leaseMeasured.savepointRollbackCount
                 == leaseBaseline.savepointRollbackCount
         )
+    }
+
+    @Test func activeTransactionFromAnotherEngineIsNotReused() async throws {
+        let firstEngine = try SQLiteStorageEngine(configuration: .inMemory)
+        let secondEngine = try SQLiteStorageEngine(configuration: .inMemory)
+        let key: Bytes = [0x01]
+
+        try await firstEngine.withTransaction { firstTransaction in
+            try firstTransaction.setValue([10], for: key)
+
+            try await secondEngine.withTransaction { secondTransaction in
+                try secondTransaction.setValue([20], for: key)
+                #expect(
+                    try await secondTransaction.getValue(for: key) == [20]
+                )
+            }
+
+            #expect(try await firstTransaction.getValue(for: key) == [10])
+        }
+
+        try await firstEngine.withTransaction { transaction in
+            let value = try await transaction.getValue(for: key)
+            #expect(value == [10])
+        }
+        try await secondEngine.withTransaction { transaction in
+            let value = try await transaction.getValue(for: key)
+            #expect(value == [20])
+        }
     }
 
     @Test func nestedWithTransaction_errorInInner_propagatesToOuter() async throws {
@@ -313,20 +341,29 @@ struct SQLiteNestedTransactionTests {
 
     @Test func rejectedParentMutationDoesNotConsumeAdmissionBudget() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
+        let parent = try engine.createTransaction()
+        try parent.configureMutationByteLimit(maximumBytes: 19)
 
-        try await engine.withTransaction { parent in
-            try parent.configureMutationByteLimit(maximumBytes: 19)
-            let child = try engine.createTransaction()
+        do {
+            try await ActiveTransactionScope.withActiveTransaction(
+                parent
+            ) { parentAccess in
+                let child = try engine.createTransaction()
 
-            do {
-                try parent.setValue([0xA1], for: [0x01])
-                Issue.record("Expected the parent write to be suspended")
-            } catch let error as StorageError {
-                #expect(error.code == .invalidOperation)
+                do {
+                    try parentAccess.setValue([0xA1], for: [0x01])
+                    Issue.record("Expected the parent write to be suspended")
+                } catch let error as StorageError {
+                    #expect(error.code == .invalidOperation)
+                }
+
+                try await child.cancel()
+                try parentAccess.setValue([0xA1], for: [0x01])
             }
-
-            try await child.cancel()
-            try parent.setValue([0xA1], for: [0x01])
+            try await parent.commit()
+        } catch {
+            try await parent.cancel()
+            throw error
         }
 
         try await engine.withTransaction { transaction in

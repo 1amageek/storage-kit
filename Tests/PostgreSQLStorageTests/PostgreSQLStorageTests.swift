@@ -35,7 +35,7 @@ struct PostgreSQLStorageTests {
     }
 
     private func collectRange(
-        _ tx: some Transaction,
+        _ tx: some TransactionAccess,
         begin: Bytes, end: Bytes,
         limit: Int = 0,
         reverse: Bool = false
@@ -604,18 +604,20 @@ struct PostgreSQLStorageTests {
     @Test func cancelledTransactionRejectsCommitAndDropsWrites() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
+        let transaction = try engine.createTransaction()
+        try transaction.setValue([42], for: [0x01])
+        try await transaction.cancel()
 
         do {
-            try await engine.withTransaction { tx in
-                try await tx.cancel()
-                try tx.setValue([42], for: [0x01])
-            }
-            Issue.record("Expected cancelled transaction commit to throw")
+            try transaction.setValue([43], for: [0x02])
+            Issue.record("Expected cancelled transaction write to throw")
         } catch let error as StorageError {
             #expect(error.code == .invalidOperation)
-            #expect(error.operation == .commit)
         } catch {
             Issue.record("Expected StorageError")
+        }
+        await #expect(throws: StorageError.self) {
+            try await transaction.commit()
         }
 
         let value = try await engine.withTransaction { tx in
@@ -627,12 +629,11 @@ struct PostgreSQLStorageTests {
     @Test func cancelledTransactionThrowsOnRead() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
+        let transaction = try engine.createTransaction()
+        try await transaction.cancel()
 
         do {
-            try await engine.withTransaction { tx in
-                try await tx.cancel()
-                _ = try await tx.getValue(for: [0x01])
-            }
+            _ = try await transaction.getValue(for: [0x01])
             Issue.record("Expected error")
         } catch let error as StorageError {
             guard error.code == .invalidOperation else {
@@ -645,14 +646,18 @@ struct PostgreSQLStorageTests {
     @Test func cancelledTransactionReturnsErrorOnGetRange() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
+        let transaction = try engine.createTransaction()
+        try await transaction.cancel()
 
         do {
-            try await engine.withTransaction { tx in
-                try await tx.cancel()
-                let seq = tx.getRange(begin: [0x00], end: [0xFF], limit: 0, reverse: false)
-                for try await _ in seq {
-                    Issue.record("Should not yield any elements")
-                }
+            let sequence = transaction.getRange(
+                begin: [0x00],
+                end: [0xFF],
+                limit: 0,
+                reverse: false
+            )
+            for try await _ in sequence {
+                Issue.record("Should not yield any elements")
             }
             Issue.record("Expected error")
         } catch let error as StorageError {

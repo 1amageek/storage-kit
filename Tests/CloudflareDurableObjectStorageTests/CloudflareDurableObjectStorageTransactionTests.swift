@@ -298,6 +298,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
     @Test func versionstampMutationsMaterializeAndExposeCommittedStamp() async throws {
         let engine = try await makeEngine()
         let tx = try engine.createTransaction()
+        let pendingVersionstamp = tx.requestVersionstamp()
         try tx.atomicOp(
             key: versionstampOperand(prefix: [0x10], suffix: [0x11]),
             param: [0x41],
@@ -312,7 +313,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
         try await tx.commit()
 
         let stamp: Bytes = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
-        #expect(try await tx.getVersionstamp() == stamp)
+        #expect(try await pendingVersionstamp.value.bytes == stamp)
 
         let read = try engine.createTransaction()
         #expect(

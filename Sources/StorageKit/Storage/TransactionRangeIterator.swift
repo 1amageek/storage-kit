@@ -3,7 +3,7 @@
 /// `finish()` is mandatory because a consumer can stop before `next()` returns
 /// `nil`. Persistent backends use it to close cursors and await in-flight I/O
 /// before the owning transaction commits or cancels.
-public protocol TransactionRangeIterator: AsyncIteratorProtocol
+public protocol TransactionRangeIterator: AsyncIteratorProtocol, Sendable
 where Element == (Bytes, Bytes) {
     mutating func finish(
         isolation actor: isolated (any Actor)?

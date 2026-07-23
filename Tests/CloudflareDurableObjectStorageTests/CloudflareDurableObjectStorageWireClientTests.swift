@@ -45,6 +45,7 @@ struct CloudflareDurableObjectStorageWireClientTests {
     @Test func storageWireClientMaterializesVersionstampMutations() async throws {
         let engine = try await makeEngine()
         let transaction = try engine.createTransaction()
+        let pendingVersionstamp = transaction.requestVersionstamp()
         try transaction.atomicOp(
             key: versionstampOperand(prefix: [0x10], suffix: [0x11]),
             param: [0x41],
@@ -59,7 +60,7 @@ struct CloudflareDurableObjectStorageWireClientTests {
         try await transaction.commit()
 
         let stamp: Bytes = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
-        #expect(try await transaction.getVersionstamp() == stamp)
+        #expect(try await pendingVersionstamp.value.bytes == stamp)
         let read = try engine.createTransaction()
         #expect(
             try await read.getValue(for: [0x10] + stamp + [0x11]) == [0x41]

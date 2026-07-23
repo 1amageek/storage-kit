@@ -6,7 +6,7 @@ struct DirectoryServiceTests {
     private func withStaticService<T: Sendable>(
         _ operation: (
             StaticDirectoryService,
-            any Transaction
+            any TransactionAccess
         ) async throws -> T
     ) async throws -> T {
         let engine = InMemoryEngine()

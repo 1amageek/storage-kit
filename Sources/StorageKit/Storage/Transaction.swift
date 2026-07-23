@@ -1,16 +1,18 @@
-/// Abstract protocol for KV transactions.
+/// Read and mutation access to one storage transaction.
 ///
 /// Has API-compatible signatures with FDB's TransactionProtocol.
-/// database-framework uses this protocol via `any Transaction`.
+/// Higher-level runtimes use this capability without acquiring authority to
+/// commit or cancel the owning transaction.
 ///
 /// ## Zero-copy design
 /// `getRange` returns an associated type `RangeResult`.
 /// When using concrete types, the backend-specific AsyncSequence is returned directly without wrapping.
-/// When accessed via `any Transaction`, only existential dispatch occurs (no data copying).
+/// When accessed via `any TransactionAccess`, only existential dispatch occurs
+/// and payload bytes are not copied.
 ///
 /// ## Backend implementation guide
-/// Required methods: `getValue`, `getRange`, `setValue`, `clear`, `clearRange`,
-/// `atomicOp`, `commit`, `cancel`.
+/// Required methods: `getValue`, `getRange`, `setValue`, `clear`,
+/// `clearRange`, and `atomicOp`.
 /// Others have default implementations provided via extension (non-FDB backends are automatically covered).
 /// Every production backend must own one `TransactionMutationByteMeter` per
 /// transaction attempt and record accepted writes before buffering or
@@ -18,7 +20,7 @@
 ///
 /// `atomicOp` must be implemented by every backend. Backends that support
 /// versionstamp mutations materialize them with the transaction's commit version.
-public protocol Transaction: Sendable {
+public protocol TransactionAccess: Sendable {
 
     // MARK: - Associated type (zero-copy getRange)
 
@@ -31,15 +33,6 @@ public protocol Transaction: Sendable {
 
     /// Optional semantics implemented by this concrete backend.
     var capabilities: TransactionCapabilities { get }
-
-    /// The configured portable logical mutation limit, if this transaction is
-    /// bounded. A non-nil value must remain attached to the transaction when it
-    /// crosses task boundaries.
-    var mutationByteLimit: Int? { get }
-
-    /// Configures mutation admission before the transaction accepts writes.
-    /// Production backends must implement this with transaction-owned state.
-    func configureMutationByteLimit(maximumBytes: Int?) throws
 
     // MARK: - Read
 
@@ -100,14 +93,6 @@ public protocol Transaction: Sendable {
     ///   - mutationType: The type of mutation operation.
     func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) throws
 
-    // MARK: - Transaction Control
-
-    /// Commit the transaction.
-    func commit() async throws
-
-    /// Cancel the transaction and wait until backend cleanup is authoritative.
-    func cancel() async throws
-
     // MARK: - Version Management
 
     /// Set the read version (e.g. restoring from cache).
@@ -115,9 +100,6 @@ public protocol Transaction: Sendable {
 
     /// Get the read version of this transaction.
     func getReadVersion() async throws -> Int64
-
-    /// Get the committed version (only valid after commit).
-    func getCommittedVersion() throws -> Int64
 
     // MARK: - Transaction Options
 
@@ -155,29 +137,46 @@ public protocol Transaction: Sendable {
 
     // MARK: - Versionstamp
 
-    /// Get the versionstamp (only valid after commit).
-    func getVersionstamp() async throws -> Bytes?
+    /// Requests the transaction versionstamp before commit.
+    ///
+    /// The returned value resolves after a successful commit.
+    func requestVersionstamp() -> any PendingTransactionVersionstamp
+}
+
+/// Owns the commit and cancellation lifecycle of one storage transaction.
+///
+/// Only the component coordinating retries and transaction completion should
+/// receive this capability. Database semantics and index implementations
+/// should depend on `TransactionAccess`.
+public protocol Transaction: TransactionAccess {
+    /// The storage engine instance that owns this transaction.
+    var transactionDomain: StorageTransactionDomain { get }
+
+    /// The configured portable logical mutation limit, if this transaction is
+    /// bounded. A non-nil value remains attached to the owned transaction when
+    /// it crosses task boundaries.
+    var mutationByteLimit: Int? { get }
+
+    /// Configures mutation admission before the transaction accepts writes.
+    /// The lifecycle owner calls this before exposing transaction access.
+    func configureMutationByteLimit(maximumBytes: Int?) throws
+
+    /// Commit the transaction.
+    func commit() async throws
+
+    /// Cancel the transaction and wait until backend cleanup is authoritative.
+    func cancel() async throws
+
+    /// Get the committed version after a successful commit.
+    func getCommittedVersion() throws -> Int64
 }
 
 // MARK: - Convenience (default parameters)
 
-extension Transaction {
+extension TransactionAccess {
 
     /// Backends expose no optional semantics unless they declare them.
     public var capabilities: TransactionCapabilities { .none }
-
-    /// Custom backends fail closed when a bounded transaction is requested but
-    /// they have not implemented transaction-owned mutation admission.
-    public var mutationByteLimit: Int? { nil }
-
-    public func configureMutationByteLimit(maximumBytes: Int?) throws {
-        guard maximumBytes == nil else {
-            throw StorageError.unsupportedOperation(
-                "Transaction backend does not implement mutation byte admission",
-                operation: .beginTransaction
-            )
-        }
-    }
 
     /// Convenience with snapshot defaulting to false.
     ///
@@ -219,9 +218,9 @@ extension Transaction {
         )
     }
 
-    // MARK: - Collecting (type-safe even via any Transaction)
+    // MARK: - Collecting
 
-    /// A collecting convenience that is type-safe even via `any Transaction`.
+    /// A collecting convenience that is type-safe via transaction access.
     ///
     /// The associated type RangeResult loses its Element type through protocol existential,
     /// but this method uses concrete self internally so the type is fully resolved.
@@ -255,9 +254,9 @@ extension Transaction {
         )
     }
 
-    // MARK: - ForEach (type-safe range iteration even via any Transaction)
+    // MARK: - ForEach
 
-    /// Performs type-safe range iteration even via `any Transaction`.
+    /// Performs type-safe range iteration via transaction access.
     ///
     /// Within a protocol extension, Self is a concrete type, so the associated type RangeResult's
     /// Element is resolved as (Bytes, Bytes).
@@ -287,9 +286,9 @@ extension Transaction {
 
 /// Default implementations for non-FDB backends.
 ///
-/// Basic methods (getValue, getRange, setValue, clear, clearRange, atomicOp,
-/// commit, cancel) must be implemented by each backend. The rest work with defaults.
-extension Transaction {
+/// Basic access methods must be implemented by each backend. The rest work
+/// with defaults.
+extension TransactionAccess {
 
     /// Default: implements getKey with adjacent selectors, without assuming a
     /// maximum sentinel key for the backend keyspace.
@@ -332,14 +331,6 @@ extension Transaction {
     public func getReadVersion() async throws -> Int64 {
         throw StorageError.unsupportedOperation(
             "This storage backend does not expose a read version",
-            operation: .read
-        )
-    }
-
-    /// Default: the backend does not expose a committed version.
-    public func getCommittedVersion() throws -> Int64 {
-        throw StorageError.unsupportedOperation(
-            "This storage backend does not expose a committed version",
             operation: .read
         )
     }
@@ -441,10 +432,35 @@ extension Transaction {
         )
     }
 
-    /// Default: versionstamps must be implemented explicitly by a backend.
-    public func getVersionstamp() async throws -> Bytes? {
+    /// Default: versionstamp resolution fails closed for unsupported backends.
+    public func requestVersionstamp() -> any PendingTransactionVersionstamp {
+        TransactionVersionstampRequest {
+            throw StorageError.unsupportedOperation(
+                "This storage backend does not expose a versionstamp",
+                operation: .read
+            )
+        }
+    }
+}
+
+extension Transaction {
+    /// Custom backends fail closed when a bounded transaction is requested but
+    /// they have not implemented transaction-owned mutation admission.
+    public var mutationByteLimit: Int? { nil }
+
+    public func configureMutationByteLimit(maximumBytes: Int?) throws {
+        guard maximumBytes == nil else {
+            throw StorageError.unsupportedOperation(
+                "Transaction backend does not implement mutation byte admission",
+                operation: .beginTransaction
+            )
+        }
+    }
+
+    /// Default: the backend does not expose a committed version.
+    public func getCommittedVersion() throws -> Int64 {
         throw StorageError.unsupportedOperation(
-            "This storage backend does not expose a versionstamp",
+            "This storage backend does not expose a committed version",
             operation: .read
         )
     }

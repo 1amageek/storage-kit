@@ -16,10 +16,10 @@ struct FDBStorageTransactionFootprintTests {
     @Test("A custom limit configures both FoundationDB and pre-dispatch gates")
     func appliesCustomLimitToBothGates() async throws {
         let limit = try CommitRequestLimit(maximumByteCount: 64)
-        let backend = SizeReportingFoundationDBTransaction(approximateSize: 65)
+        let backend = SizeReportingTransaction(approximateSize: 65)
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain(),
+            transactionDomain: StorageTransactionDomain(),
             commitRequestLimit: limit
         )
 
@@ -34,10 +34,10 @@ struct FDBStorageTransactionFootprintTests {
     @Test("The FoundationDB footprint boundary is admitted before commit")
     func admitsExactBoundary() async throws {
         let limit = CommitRequestLimit.default
-        let backend = SizeReportingFoundationDBTransaction(approximateSize: limit.maximumByteCount)
+        let backend = SizeReportingTransaction(approximateSize: limit.maximumByteCount)
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain(),
+            transactionDomain: StorageTransactionDomain(),
             commitRequestLimit: limit
         )
 
@@ -52,10 +52,10 @@ struct FDBStorageTransactionFootprintTests {
     @Test("An oversized footprint is rejected and cancelled before commit dispatch")
     func rejectsBeforeCommitDispatch() async throws {
         let maximum = CommitRequestLimit.default.maximumByteCount
-        let backend = SizeReportingFoundationDBTransaction(approximateSize: maximum + 1)
+        let backend = SizeReportingTransaction(approximateSize: maximum + 1)
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let failure = await commitFailure(from: transaction)
@@ -77,11 +77,11 @@ struct FDBStorageTransactionFootprintTests {
     @Test("Opaque directory mutations participate in commit-request admission")
     func rejectsOpaqueDirectoryMutationFootprint() async throws {
         let maximum = CommitRequestLimit.default.maximumByteCount
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 0,
             footprintAfterMutation: maximum + 1
         )
-        let transactionDomain = FoundationDBTransactionDomain()
+        let transactionDomain = StorageTransactionDomain()
         let transaction = try FDBStorageTransaction(
             backend,
             transactionDomain: transactionDomain
@@ -105,13 +105,13 @@ struct FDBStorageTransactionFootprintTests {
 
     @Test("Footprint lookup failures retain pre-dispatch retry certainty")
     func preservesPreDispatchFailureCertainty() async throws {
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 0,
             approximateSizeError: .transactionTooOld
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let failure = await commitFailure(from: transaction)
@@ -129,13 +129,13 @@ struct FDBStorageTransactionFootprintTests {
         arguments: [FDBErrorCode.commitUnknownResult, .idempotencyStatusUnknown]
     )
     func rejectsUnknownCommitStateBeforeDispatch(errorCode: FDBErrorCode) async throws {
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 0,
             approximateSizeError: errorCode
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let failure = await commitFailure(from: transaction)
@@ -149,10 +149,10 @@ struct FDBStorageTransactionFootprintTests {
 
     @Test("A negative footprint is an explicit backend contract violation")
     func rejectsNegativeFootprint() async throws {
-        let backend = SizeReportingFoundationDBTransaction(approximateSize: -1)
+        let backend = SizeReportingTransaction(approximateSize: -1)
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let failure = await commitFailure(from: transaction)
@@ -165,13 +165,13 @@ struct FDBStorageTransactionFootprintTests {
 
     @Test("A backend size rejection remains deterministic after commit dispatch")
     func preservesBackendSizeRejection() async throws {
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             commitError: .transactionTooLarge
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let failure = await commitFailure(from: transaction)
@@ -185,8 +185,8 @@ struct FDBStorageTransactionFootprintTests {
 
     @Test("Directory mutation prevents late logical admission configuration")
     func rejectsConfigurationAfterDirectoryMutation() async throws {
-        let backend = SizeReportingFoundationDBTransaction(approximateSize: 1)
-        let transactionDomain = FoundationDBTransactionDomain()
+        let backend = SizeReportingTransaction(approximateSize: 1)
+        let transactionDomain = StorageTransactionDomain()
         let transaction = try FDBStorageTransaction(
             backend,
             transactionDomain: transactionDomain
@@ -207,13 +207,13 @@ struct FDBStorageTransactionFootprintTests {
     @Test("A suspended point read prevents commit admission")
     func pointReadLeasePreventsCommit() async throws {
         let gate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             valueReadGate: gate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         async let readValue = transaction.getValue(
@@ -234,16 +234,54 @@ struct FDBStorageTransactionFootprintTests {
         #expect(backend.commitCount == 1)
     }
 
+    @Test("Cancellation waits for an admitted point read to drain")
+    func cancellationDrainsPointRead() async throws {
+        let gate = OperationGate()
+        let backend = SizeReportingTransaction(
+            approximateSize: 1,
+            valueReadGate: gate
+        )
+        let transaction = try FDBStorageTransaction(
+            backend,
+            transactionDomain: StorageTransactionDomain()
+        )
+
+        let readTask = Task {
+            try await transaction.getValue(
+                for: Bytes([0x01]),
+                snapshot: false
+            )
+        }
+        try await gate.waitUntilEntered()
+
+        let cancellationReturned = Mutex(false)
+        let cancelTask = Task {
+            try await transaction.cancel()
+            cancellationReturned.withLock { $0 = true }
+        }
+        try await waitUntil("raw cancellation dispatch") {
+            backend.cancelCount == 1
+        }
+        #expect(!cancellationReturned.withLock { $0 })
+
+        await gate.release()
+        _ = try await readTask.value
+        try await cancelTask.value
+
+        #expect(cancellationReturned.withLock { $0 })
+        #expect(backend.cancelCount == 1)
+    }
+
     @Test("A suspended lazy range prevents commit admission until iterator cleanup")
     func rangeLeasePreventsCommit() async throws {
         let gate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             rangeReadGate: gate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
         let rows = transaction.getRange(
             from: .firstGreaterOrEqual(Bytes([0x00])),
@@ -272,13 +310,13 @@ struct FDBStorageTransactionFootprintTests {
     @Test("Concurrent commit observers share one in-flight admission and commit")
     func sharesOneInFlightCommitOutcome() async throws {
         let footprintReadGate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             footprintReadGate: footprintReadGate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let first = Task {
@@ -309,13 +347,13 @@ struct FDBStorageTransactionFootprintTests {
     func sharesOneInFlightAdmissionFailure() async throws {
         let footprintReadGate = OperationGate()
         let maximum = CommitRequestLimit.default.maximumByteCount
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: maximum + 1,
             footprintReadGate: footprintReadGate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let first = Task {
@@ -348,13 +386,13 @@ struct FDBStorageTransactionFootprintTests {
     @Test("Cancellation preempts suspended commit admission before dispatch")
     func cancellationPreemptsCommitAdmission() async throws {
         let footprintReadGate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             footprintReadGate: footprintReadGate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let commitTask = Task {
@@ -404,13 +442,13 @@ struct FDBStorageTransactionFootprintTests {
     @Test("Cancellation waits once raw commit dispatch has started")
     func cancellationWaitsForDispatchedCommit() async throws {
         let commitGate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             commitGate: commitGate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let commitTask = Task {
@@ -440,14 +478,14 @@ struct FDBStorageTransactionFootprintTests {
     @Test("Cancellation preserves an unknown result after commit dispatch")
     func cancellationPreservesUnknownCommitResult() async throws {
         let commitGate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             commitError: .commitUnknownResult,
             commitGate: commitGate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let commitTask = Task {
@@ -475,14 +513,14 @@ struct FDBStorageTransactionFootprintTests {
     @Test("Cancellation accepts deterministic failure after commit dispatch")
     func cancellationAcceptsDeterministicCommitFailure() async throws {
         let commitGate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             commitError: .transactionTooLarge,
             commitGate: commitGate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         let commitTask = Task {
@@ -508,16 +546,19 @@ struct FDBStorageTransactionFootprintTests {
 
     @Test("Cached range rows are invalid after cancellation")
     func cachedRangeRowsRespectCancellation() async throws {
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             rangePages: [RangeBatch(
-                records: [([0x01], [0x11]), ([0x02], [0x22])],
+                records: [
+                    rangeRow(key: [0x01], value: [0x11]),
+                    rangeRow(key: [0x02], value: [0x22]),
+                ],
                 hasMore: false
             )]
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
         let rows = makeRange(from: transaction)
         var iterator = rows.makeAsyncIterator()
@@ -541,16 +582,19 @@ struct FDBStorageTransactionFootprintTests {
 
     @Test("Range iterator aliases share one terminal state and lease")
     func rangeIteratorAliasesShareTerminalState() async throws {
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             rangePages: [RangeBatch(
-                records: [([0x01], [0x11]), ([0x02], [0x22])],
+                records: [
+                    rangeRow(key: [0x01], value: [0x11]),
+                    rangeRow(key: [0x02], value: [0x22]),
+                ],
                 hasMore: false
             )]
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
         let iterator = makeRange(from: transaction).makeAsyncIterator()
 
@@ -567,13 +611,13 @@ struct FDBStorageTransactionFootprintTests {
     @Test("Range finish joins an in-flight read and prevents state revival")
     func rangeFinishJoinsInFlightRead() async throws {
         let rangeReadGate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             rangeReadGate: rangeReadGate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
         let iterator = makeRange(from: transaction).makeAsyncIterator()
 
@@ -609,13 +653,13 @@ struct FDBStorageTransactionFootprintTests {
     @Test("Concurrent range readers observe the same typed failure")
     func concurrentRangeReadersShareFailure() async throws {
         let rangeReadGate = OperationGate()
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             rangeReadGate: rangeReadGate
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
         let iterator = makeRange(from: transaction).makeAsyncIterator()
 
@@ -649,16 +693,16 @@ struct FDBStorageTransactionFootprintTests {
 
     @Test("Range lease ends on natural exhaustion")
     func naturalRangeExhaustionReleasesLease() async throws {
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             rangePages: [RangeBatch(
-                records: [([0x01], [0x11])],
+                records: [rangeRow(key: [0x01], value: [0x11])],
                 hasMore: false
             )]
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
         let iterator = makeRange(from: transaction).makeAsyncIterator()
 
@@ -674,16 +718,16 @@ struct FDBStorageTransactionFootprintTests {
 
     @Test("Dropping a range iterator releases its lease")
     func droppingRangeIteratorReleasesLease() async throws {
-        let backend = SizeReportingFoundationDBTransaction(
+        let backend = SizeReportingTransaction(
             approximateSize: 1,
             rangePages: [RangeBatch(
-                records: [([0x01], [0x11])],
+                records: [rangeRow(key: [0x01], value: [0x11])],
                 hasMore: false
             )]
         )
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         try await readOneAndDropIterator(makeRange(from: transaction))
@@ -844,7 +888,14 @@ private enum FoundationDBFootprintDeadlineError: Error {
     case deadlineExceeded(String)
 }
 
-private final class SizeReportingFoundationDBTransaction: TransactionProtocol, Sendable {
+private func rangeRow(
+    key: FDB.ByteString,
+    value: FDB.ByteString
+) -> FDB.KeyValue {
+    FDB.KeyValue(key: key, value: value)
+}
+
+private final class SizeReportingTransaction: TransactionProtocol, Sendable {
     private struct State: Sendable {
         var approximateSize: Int
         let footprintAfterMutation: Int?
@@ -914,17 +965,17 @@ private final class SizeReportingFoundationDBTransaction: TransactionProtocol, S
         state.withLock { $0.configuredSizeLimit }
     }
 
-    func getValue<Key: FDB.ByteSource>(
+    func getValue<Key: FDB.ByteInput>(
         for key: Key,
         snapshot: Bool
-    ) async throws -> FDB.ByteBuffer? {
+    ) async throws -> FDB.ByteString? {
         if let valueReadGate {
             await valueReadGate.suspendOperation()
         }
         return nil
     }
 
-    func setValue<Value: FDB.ByteSource, Key: FDB.ByteSource>(
+    func setValue<Value: FDB.ByteInput, Key: FDB.ByteInput>(
         _ value: Value,
         for key: Key
     ) throws {
@@ -936,9 +987,9 @@ private final class SizeReportingFoundationDBTransaction: TransactionProtocol, S
         }
     }
 
-    func clear<Key: FDB.ByteSource>(key: Key) throws {}
+    func clear<Key: FDB.ByteInput>(key: Key) throws {}
 
-    func clearRange<Begin: FDB.ByteSource, End: FDB.ByteSource>(
+    func clearRange<Begin: FDB.ByteInput, End: FDB.ByteInput>(
         beginKey: Begin,
         endKey: End
     ) throws {}
@@ -946,8 +997,8 @@ private final class SizeReportingFoundationDBTransaction: TransactionProtocol, S
     func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteBuffer? {
-        nil
+    ) async throws -> FDB.ByteString {
+        []
     }
 
     func readRangeBatch(
@@ -975,7 +1026,7 @@ private final class SizeReportingFoundationDBTransaction: TransactionProtocol, S
         }
     }
 
-    func commit() async throws -> Bool {
+    func commit() async throws {
         let commitError = state.withLock { state in
             state.commitCount += 1
             return state.commitError
@@ -986,15 +1037,14 @@ private final class SizeReportingFoundationDBTransaction: TransactionProtocol, S
         if let commitError {
             throw FDBError(commitError)
         }
-        return true
     }
 
     func cancel() {
         state.withLock { $0.cancelCount += 1 }
     }
 
-    func getVersionstamp() async throws -> FDB.ByteBuffer? {
-        nil
+    func requestVersionstamp() -> any FDB.PendingTransactionVersionstamp {
+        FixedTransactionVersionstamp()
     }
 
     func setReadVersion(_ version: FDB.Version) {}
@@ -1006,23 +1056,23 @@ private final class SizeReportingFoundationDBTransaction: TransactionProtocol, S
     func onError(_ error: FDBError) async throws {}
 
     func getEstimatedRangeSizeBytes<
-        Begin: FDB.ByteSource,
-        End: FDB.ByteSource
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
     >(
         beginKey: Begin,
         endKey: End
-    ) async throws -> Int {
+    ) async throws -> Int64 {
         0
     }
 
     func getRangeSplitPoints<
-        Begin: FDB.ByteSource,
-        End: FDB.ByteSource
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
     >(
         beginKey: Begin,
         endKey: End,
-        chunkSize: Int
-    ) async throws -> [FDB.ByteBuffer] {
+        chunkSize: Int64
+    ) async throws -> [FDB.ByteString] {
         []
     }
 
@@ -1044,22 +1094,22 @@ private final class SizeReportingFoundationDBTransaction: TransactionProtocol, S
         return Int64(result.0)
     }
 
-    func atomicOp<Key: FDB.ByteSource, Parameter: FDB.ByteSource>(
+    func atomicOp<Key: FDB.ByteInput, Parameter: FDB.ByteInput>(
         key: Key,
         param: Parameter,
         mutationType: FDB.MutationType
     ) throws {}
 
     func addConflictRange<
-        Begin: FDB.ByteSource,
-        End: FDB.ByteSource
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
     >(
         beginKey: Begin,
         endKey: End,
         type: FDB.ConflictRangeType
     ) throws {}
 
-    func setOption<Value: FDB.ByteSource>(
+    func setOption<Value: FDB.ByteInput>(
         to value: Value,
         forOption option: FDB.TransactionOption
     ) throws {}

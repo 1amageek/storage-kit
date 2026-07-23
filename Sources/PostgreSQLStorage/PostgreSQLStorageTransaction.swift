@@ -13,9 +13,9 @@ import Synchronization
 ///
 /// A transaction is created in one of three modes:
 ///
-/// 1. **Eager** (`init(connection:...)`, used by the engine's `withTransaction`/
-///    `withAutoCommit`): the connection is supplied up front and the engine owns
-///    BEGIN/COMMIT/ROLLBACK and connection release.
+/// 1. **Eager** (`init(connection:...)`, used by the engine's
+///    `withTransaction`): the connection is supplied up front and the engine
+///    owns BEGIN/COMMIT/ROLLBACK and connection release.
 /// 2. **Lazy** (`init(client:...)`, used by `createTransaction` at top level):
 ///    a connection is acquired from the pool on the first async operation, and
 ///    this transaction owns BEGIN/COMMIT/ROLLBACK. The caller MUST call `commit()`
@@ -47,9 +47,9 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
     public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
+    public let transactionDomain: StorageTransactionDomain
 
     private let isNested: Bool
-    private let isInTransactionBlock: Bool
     private let tableName: String
     private let logger: Logger
 
@@ -64,6 +64,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
     private let state: Mutex<MutableState>
     private let mutationByteMeter: TransactionMutationByteMeter
+    private let versionstampCompletion: TransactionVersionstampCompletion
 
     /// Maximum rows bound per chunked statement. Each upsert row uses two
     /// parameters, so 1000 rows stays well under PostgreSQL's 65535 limit.
@@ -119,51 +120,54 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     /// Eager-connection init (engine-managed lifecycle).
     init(
         connection: PostgresConnection,
-        isInTransactionBlock: Bool,
         tableName: String,
-        logger: Logger
+        logger: Logger,
+        transactionDomain: StorageTransactionDomain
     ) {
         self.isNested = false
-        self.isInTransactionBlock = isInTransactionBlock
         self.tableName = tableName
         self.logger = logger
         self.parent = nil
         self.client = nil
         self.beginStatement = nil
+        self.transactionDomain = transactionDomain
         self.state = Mutex(MutableState(connection: connection))
         self.mutationByteMeter = TransactionMutationByteMeter()
+        self.versionstampCompletion = TransactionVersionstampCompletion()
     }
 
     /// Nested-transaction init (parent owns the connection).
     init(parent: PostgreSQLStorageTransaction, logger: Logger) {
         self.isNested = true
-        self.isInTransactionBlock = parent.isInTransactionBlock
         self.tableName = parent.tableName
         self.logger = logger
         self.parent = parent
         self.client = nil
         self.beginStatement = nil
+        self.transactionDomain = parent.transactionDomain
         self.state = Mutex(MutableState())
         self.mutationByteMeter = parent.mutationByteMeter
+        self.versionstampCompletion = parent.versionstampCompletion
     }
 
     /// Lazy-connection init (this transaction owns the connection).
     init(
         client: PostgresClient,
         beginStatement: String,
-        isInTransactionBlock: Bool,
         tableName: String,
-        logger: Logger
+        logger: Logger,
+        transactionDomain: StorageTransactionDomain
     ) {
         self.isNested = false
-        self.isInTransactionBlock = isInTransactionBlock
         self.tableName = tableName
         self.logger = logger
         self.parent = nil
         self.client = client
         self.beginStatement = beginStatement
+        self.transactionDomain = transactionDomain
         self.state = Mutex(MutableState())
         self.mutationByteMeter = TransactionMutationByteMeter()
+        self.versionstampCompletion = TransactionVersionstampCompletion()
     }
 
     public func configureMutationByteLimit(maximumBytes: Int?) throws {
@@ -417,31 +421,41 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 "PostgreSQL transaction operation was cancelled",
                 operation: operation
             )
-            state.withLock { state in
-                guard case .open = state.lifecycle else { return }
+            let transitioned = state.withLock { state -> Bool in
+                guard case .open = state.lifecycle else { return false }
                 state.lifecycle = .failed(
                     cancellationStateError,
                     cleanupRequired: requiresCleanup(state)
                 )
                 state.writeBuffer.removeAll(keepingCapacity: false)
+                return true
+            }
+            if transitioned, !isNested {
+                versionstampCompletion.resolveIfPending(
+                    .failure(cancellationStateError)
+                )
             }
             return error
         }
 
         let mapped = storageError(from: error, operation: operation)
-        state.withLock { state in
-            guard case .open = state.lifecycle else { return }
+        let transitioned = state.withLock { state -> Bool in
+            guard case .open = state.lifecycle else { return false }
             state.lifecycle = .failed(
                 mapped,
                 cleanupRequired: requiresCleanup(state)
             )
             state.writeBuffer.removeAll(keepingCapacity: false)
+            return true
+        }
+        if transitioned, !isNested {
+            versionstampCompletion.resolveIfPending(.failure(mapped))
         }
         return mapped
     }
 
     private func requiresCleanup(_ state: MutableState) -> Bool {
-        guard !isNested, isInTransactionBlock else {
+        guard !isNested else {
             return false
         }
         return state.connection != nil || state.acquireTask != nil
@@ -890,21 +904,19 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    public func getVersionstamp() async throws -> Bytes? {
-        let version = try getCommittedVersion()
-        let value = UInt64(bitPattern: version)
-        return [
-            UInt8(truncatingIfNeeded: value >> 56),
-            UInt8(truncatingIfNeeded: value >> 48),
-            UInt8(truncatingIfNeeded: value >> 40),
-            UInt8(truncatingIfNeeded: value >> 32),
-            UInt8(truncatingIfNeeded: value >> 24),
-            UInt8(truncatingIfNeeded: value >> 16),
-            UInt8(truncatingIfNeeded: value >> 8),
-            UInt8(truncatingIfNeeded: value),
-            0,
-            0,
-        ]
+    public func requestVersionstamp() -> any PendingTransactionVersionstamp {
+        let failure = state.withLock { state -> StorageError? in
+            guard case .open = state.lifecycle else {
+                return Self.error(for: state.lifecycle, operation: .read)
+            }
+            return nil
+        }
+        if let failure {
+            return TransactionVersionstampRequest(failure: failure)
+        }
+        return TransactionVersionstampRequest(
+            completion: versionstampCompletion
+        )
     }
 
     private func transactionVersion(
@@ -976,22 +988,11 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 return .success(())
             } catch {
                 let mapped = storageError(from: error, operation: .commit)
-                finishCommit(.failure(mapped))
-                return .failure(mapped)
+                return finishCommit(.failure(mapped))
             }
         }
 
         let ownsConnection = client != nil
-        let requiresConnection = state.withLock { state in
-            state.connection != nil
-                || state.acquireTask != nil
-                || !state.writeBuffer.isEmpty
-        }
-        guard requiresConnection else {
-            finishCommit(.success(()))
-            return .success(())
-        }
-
         let connection: PostgresConnection
         do {
             connection = try await ensureConnection()
@@ -1000,8 +1001,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             if ownsConnection {
                 releaseConnection()
             }
-            finishCommit(.failure(mapped))
-            return .failure(mapped)
+            return finishCommit(.failure(mapped))
         }
 
         do {
@@ -1017,16 +1017,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             if ownsConnection {
                 releaseConnection()
             }
-            finishCommit(result)
-            return result
-        }
-
-        guard isInTransactionBlock else {
-            if ownsConnection {
-                releaseConnection()
-            }
-            finishCommit(.success(()))
-            return .success(())
+            return finishCommit(result)
         }
 
         do {
@@ -1037,8 +1028,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             if ownsConnection {
                 releaseConnection()
             }
-            finishCommit(.success(()))
-            return .success(())
+            return finishCommit(.success(()))
         } catch {
             let mapped: StorageError
             if error is CancellationError {
@@ -1065,23 +1055,79 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             if ownsConnection {
                 releaseConnection()
             }
-            finishCommit(result)
-            return result
+            return finishCommit(result)
         }
     }
 
-    private func finishCommit(_ result: Result<Void, StorageError>) {
-        state.withLock { state in
+    private func finishCommit(
+        _ result: Result<Void, StorageError>
+    ) -> Result<Void, StorageError> {
+        let versionstampResult = state.withLock {
+            state -> Result<TransactionVersionstamp, StorageError> in
+            let versionstampResult:
+                Result<TransactionVersionstamp, StorageError>
             switch result {
             case .success:
                 state.lifecycle = .committed
                 state.committedVersion = state.readVersion
+                guard let committedVersion = state.committedVersion else {
+                    let error = StorageError(
+                        code: .backendContractViolation,
+                        operation: .commit,
+                        backend: .postgreSQL,
+                        message: "Committed PostgreSQL transaction has no transaction ID"
+                    )
+                    state.lifecycle = .failed(
+                        error,
+                        cleanupRequired: false
+                    )
+                    state.writeBuffer.removeAll(keepingCapacity: false)
+                    return .failure(error)
+                }
+                do {
+                    versionstampResult = .success(
+                        try TransactionVersionstamp(
+                            committedVersion: committedVersion
+                        )
+                    )
+                } catch let error as StorageError {
+                    state.lifecycle = .failed(
+                        error,
+                        cleanupRequired: false
+                    )
+                    versionstampResult = .failure(error)
+                } catch {
+                    let storageError = StorageError(
+                        code: .backendContractViolation,
+                        operation: .read,
+                        backend: .postgreSQL,
+                        message: "Unable to encode the committed versionstamp",
+                        underlyingDescription: String(describing: error)
+                    )
+                    state.lifecycle = .failed(
+                        storageError,
+                        cleanupRequired: false
+                    )
+                    versionstampResult = .failure(storageError)
+                }
             case .failure(let error) where error.code == .commitUnknownResult:
                 state.lifecycle = .commitUnknown(error)
+                versionstampResult = .failure(error)
             case .failure(let error):
                 state.lifecycle = .failed(error, cleanupRequired: false)
+                versionstampResult = .failure(error)
             }
             state.writeBuffer.removeAll(keepingCapacity: false)
+            return versionstampResult
+        }
+        if !isNested {
+            versionstampCompletion.resolveIfPending(versionstampResult)
+        }
+        switch versionstampResult {
+        case .success:
+            return result
+        case .failure(let error):
+            return .failure(error)
         }
     }
 
@@ -1090,9 +1136,6 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         connection: PostgresConnection,
         reason: String
     ) async -> Result<Void, StorageError> {
-        guard isInTransactionBlock else {
-            return .failure(originalError)
-        }
         switch await rollback(connection: connection, reason: reason) {
         case .success:
             return .failure(originalError)
@@ -1152,7 +1195,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
         let connection = state.withLock { $0.connection }
         let result: Result<Void, StorageError>
-        if let connection, isInTransactionBlock {
+        if let connection {
             result = await rollback(
                 connection: connection,
                 reason: "transaction cancellation"
@@ -1168,30 +1211,34 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     private func finishCancellation(_ result: Result<Void, StorageError>) {
-        state.withLock { state in
+        let versionstampFailure = state.withLock {
+            state -> StorageError in
             switch result {
             case .success:
                 state.lifecycle = .cancelled
+                let error = Self.invalidOperation(
+                    "Transaction was cancelled",
+                    operation: .read
+                )
+                state.writeBuffer.removeAll(keepingCapacity: false)
+                return error
             case .failure(let error):
                 state.lifecycle = .failed(error, cleanupRequired: false)
+                state.writeBuffer.removeAll(keepingCapacity: false)
+                return error
             }
-            state.writeBuffer.removeAll(keepingCapacity: false)
+        }
+        if !isNested {
+            versionstampCompletion.resolveIfPending(
+                .failure(versionstampFailure)
+            )
         }
     }
 
     // MARK: - Internal (engine-managed eager path)
 
-    func commitInternal(
-        connection: PostgresConnection,
-        skipCommitStatement: Bool = false
-    ) async throws {
+    func commitInternal(connection: PostgresConnection) async throws {
         _ = connection
-        guard skipCommitStatement == !isInTransactionBlock else {
-            throw Self.invalidOperation(
-                "Internal commit mode does not match the transaction configuration",
-                operation: .commit
-            )
-        }
         try await commit()
     }
 
@@ -1323,24 +1370,11 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     /// row-locked read-modify-write.
     ///
     /// `pg_advisory_xact_lock` covers missing rows that `FOR UPDATE` cannot
-    /// lock; `FOR UPDATE` still protects existing rows. Atomics require an
-    /// explicit transaction block; in auto-commit mode the read and the write
-    /// would not be atomic, so the operation fails loudly instead of silently
-    /// losing atomicity.
+    /// lock; `FOR UPDATE` still protects existing rows.
     private func executeAtomicOp(
         connection: PostgresConnection,
         key: Bytes, param: Bytes, mutationType: MutationType
     ) async throws {
-        guard isInTransactionBlock else {
-            throw StorageError(
-                code: .invalidOperation,
-                operation: .write,
-                backend: .postgreSQL,
-                message: "Atomic operation '\(mutationType)' requires an explicit transaction block; "
-                    + "it is not supported in auto-commit mode"
-            )
-        }
-
         try await lockAtomicKey(connection: connection, key: key)
 
         var selectBindings = PostgresBindings()

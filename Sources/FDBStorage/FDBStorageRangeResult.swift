@@ -39,20 +39,20 @@ public struct FDBStorageRangeResult: TransactionRangeResult {
     /// Only that state may enter the FoundationDB iterator, so `next()`
     /// and `finish()` cannot overlap even when aliases are used concurrently.
     public final class AsyncIterator: TransactionRangeIterator, Sendable {
-        private let iterationState: FoundationDBRangeIterationState
+        private let iterationState: RangeIterationState
 
         init(
             _ base: FDB.AsyncKVSequence.AsyncIterator,
             transaction: FDBStorageTransaction
         ) {
-            self.iterationState = FoundationDBRangeIterationState(
+            self.iterationState = RangeIterationState(
                 base,
                 transaction: transaction
             )
         }
 
         init(error: StorageError) {
-            self.iterationState = FoundationDBRangeIterationState(error: error)
+            self.iterationState = RangeIterationState(error: error)
         }
 
         public func next() async throws -> Element? {
@@ -79,12 +79,12 @@ public struct FDBStorageRangeResult: TransactionRangeResult {
     }
 }
 
-private actor FoundationDBRangeIterationState {
+private actor RangeIterationState {
     private enum Source {
         case sequence(
             FDB.AsyncKVSequence.AsyncIterator,
             FDBStorageTransaction,
-            FDBStorageOperationLease?
+            TransactionActivityLease?
         )
         case reading(
             RangeIterationBoundary,
@@ -123,6 +123,7 @@ private actor FoundationDBRangeIterationState {
                 nextWaiterCount += 1
                 defer { nextWaiterCount -= 1 }
                 try await completion.waitForBoundary()
+                try Task.checkCancellation()
             case .sequence(
                 let iterator,
                 let transaction,
@@ -149,17 +150,28 @@ private actor FoundationDBRangeIterationState {
             case .reading(let completion, true),
                  .finishing(let completion):
                 try await waitForFinishOperation(completion)
-            case .sequence(let iterator, _, let lease):
+            case .sequence(let iterator, let transaction, let lease):
                 let completion = RangeIterationBoundary()
                 source = .finishing(completion)
+                var activeLease = lease
                 do {
+                    if let lease {
+                        try lease.resume()
+                    } else {
+                        activeLease = try transaction.makeOperationLease(
+                            for: .rangeRead
+                        )
+                    }
+                    guard let activeLease else {
+                        preconditionFailure("Range operation lease was not created")
+                    }
                     try await iterator.finish()
-                    lease?.release()
+                    activeLease.release()
                     source = .finished
                     completion.resolve(.success(()))
                     return
                 } catch is CancellationError {
-                    lease?.release()
+                    activeLease?.release()
                     source = .finished
                     completion.resolve(.failure(.cancelled))
                     throw CancellationError()
@@ -168,12 +180,12 @@ private actor FoundationDBRangeIterationState {
                         error,
                         operation: .rangeRead
                     )
-                    lease?.release()
+                    activeLease?.release()
                     source = .finished
                     completion.resolve(.failure(.storage(converted)))
                     throw converted
                 } catch let error as StorageError {
-                    lease?.release()
+                    activeLease?.release()
                     source = .finished
                     completion.resolve(.failure(.storage(error)))
                     throw error
@@ -182,7 +194,7 @@ private actor FoundationDBRangeIterationState {
                         error,
                         operation: .rangeRead
                     )
-                    lease?.release()
+                    activeLease?.release()
                     source = .finished
                     completion.resolve(.failure(.storage(converted)))
                     throw converted
@@ -202,12 +214,12 @@ private actor FoundationDBRangeIterationState {
     private func readNext(
         iterator: FDB.AsyncKVSequence.AsyncIterator,
         transaction: FDBStorageTransaction,
-        currentLease: FDBStorageOperationLease?
+        currentLease: TransactionActivityLease?
     ) async throws -> (Bytes, Bytes)? {
-        let lease: FDBStorageOperationLease
+        let lease: TransactionActivityLease
         do {
             if let currentLease {
-                try transaction.validateOperationLease(for: .rangeRead)
+                try currentLease.resume()
                 lease = currentLease
             } else {
                 lease = try transaction.makeOperationLease(for: .rangeRead)
@@ -228,6 +240,7 @@ private actor FoundationDBRangeIterationState {
 
         do {
             let element = try await iterator.next()
+            try Task.checkCancellation()
             try transaction.validateOperationLease(for: .rangeRead)
 
             if finishWasRequested(for: completion) {
@@ -238,18 +251,19 @@ private actor FoundationDBRangeIterationState {
                 )
             }
 
-            guard let (key, value) = element else {
+            guard let element else {
                 lease.release()
                 source = .finished
                 completion.resolve(.success(()))
                 return nil
             }
 
+            lease.pause()
             source = .sequence(iterator, transaction, lease)
             completion.resolve(.success(()))
             return (
-                Bytes(retaining: FoundationDBResultBytesOwner(key)),
-                Bytes(retaining: FoundationDBResultBytesOwner(value))
+                Bytes(retaining: ResultBytesOwner(element.key)),
+                Bytes(retaining: ResultBytesOwner(element.value))
             )
         } catch is CancellationError {
             lease.release()
@@ -294,7 +308,7 @@ private actor FoundationDBRangeIterationState {
 
     private func completeRequestedFinish(
         iterator: FDB.AsyncKVSequence.AsyncIterator,
-        lease: FDBStorageOperationLease,
+        lease: TransactionActivityLease,
         completion: RangeIterationBoundary
     ) async throws -> (Bytes, Bytes)? {
         source = .finishing(completion)

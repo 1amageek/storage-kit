@@ -61,6 +61,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     private let configuration: PostgreSQLConfiguration
     private let logger: Logger
     private let runTask: Mutex<Task<Void, Never>?>
+    private let transactionDomain = StorageTransactionDomain()
 
     public init(configuration: PostgreSQLConfiguration) async throws {
         // Validate the table name before constructing any SQL. The name is
@@ -164,24 +165,28 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     /// If called within an existing `ActiveTransactionScope`, returns a nested
     /// transaction that reuses the parent's connection.
     public func createTransaction() throws -> PostgreSQLStorageTransaction {
-        if let existing = ActiveTransactionScope.current as? PostgreSQLStorageTransaction {
+        if let existing = ActiveTransactionScope.current
+            as? PostgreSQLStorageTransaction,
+           existing.transactionDomain === transactionDomain {
             return PostgreSQLStorageTransaction(parent: existing, logger: logger)
         }
 
         return PostgreSQLStorageTransaction(
             client: client,
             beginStatement: configuration.beginStatement,
-            isInTransactionBlock: true,
             tableName: configuration.tableName,
-            logger: logger
+            logger: logger,
+            transactionDomain: transactionDomain
         )
     }
 
     public func withTransaction<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
+        _ operation: (any TransactionAccess) async throws -> T
     ) async throws -> T {
         // Nested call — reuse the existing transaction.
-        if let existing = ActiveTransactionScope.current {
+        if let existing = ActiveTransactionScope.current
+            as? PostgreSQLStorageTransaction,
+           existing.transactionDomain === transactionDomain {
             return try await operation(existing)
         }
 
@@ -194,12 +199,13 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
 
                 let tx = PostgreSQLStorageTransaction(
                     connection: conn,
-                    isInTransactionBlock: true,
                     tableName: configuration.tableName,
-                    logger: logger
+                    logger: logger,
+                    transactionDomain: transactionDomain
                 )
 
-                return try await ActiveTransactionScope.$current.withValue(tx) {
+                return try await ActiveTransactionScope.$current
+                    .withValue(tx) {
                     do {
                         let result: T
                         do {
@@ -221,46 +227,6 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                     } catch {
                         throw error
                     }
-                }
-            }
-        } catch {
-            throw Self.recoverTransactionBodyFailure(from: error)
-        }
-    }
-
-    /// Execute an operation in auto-commit mode (no BEGIN/COMMIT).
-    ///
-    /// Each SQL statement issued by the transaction commits individually, saving
-    /// two round-trips compared to `withTransaction()`. Because there is no
-    /// surrounding transaction block, multi-statement flushes are NOT atomic and
-    /// `atomicOp` is rejected (see `PostgreSQLStorageTransaction`).
-    public func withAutoCommit<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
-    ) async throws -> T {
-        // Nested: reuse the existing transaction (already inside BEGIN/COMMIT).
-        if let existing = ActiveTransactionScope.current {
-            return try await operation(existing)
-        }
-
-        do {
-            return try await client.withConnection { [configuration, logger] conn in
-                let tx = PostgreSQLStorageTransaction(
-                    connection: conn,
-                    isInTransactionBlock: false,
-                    tableName: configuration.tableName,
-                    logger: logger
-                )
-
-                return try await ActiveTransactionScope.$current.withValue(tx) {
-                    let result: T
-                    do {
-                        result = try await operation(tx)
-                    } catch {
-                        throw Self.preserveTransactionBodyFailure(from: error)
-                    }
-                    // Flush buffered writes; each executes as its own auto-commit.
-                    try await tx.commitInternal(connection: conn, skipCommitStatement: true)
-                    return result
                 }
             }
         } catch {

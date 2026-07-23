@@ -25,12 +25,6 @@ let package = Package(
             targets: ["CloudflareDurableObjectStorageHostTransport"]
         ),
     ],
-    traits: [
-        .default(enabledTraits: ["FoundationDB", "SQLite"]),
-        .trait(name: "FoundationDB"),
-        .trait(name: "SQLite"),
-        .trait(name: "PostgreSQL"),
-    ],
     dependencies: [
         .package(path: "../fdb-swift-bindings"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
@@ -50,29 +44,26 @@ let package = Package(
             name: "FDBStorage",
             dependencies: [
                 "StorageKit",
-                .product(name: "FoundationDB", package: "fdb-swift-bindings"),
-            ],
-            swiftSettings: [
-                .define("STORAGE_FOUNDATIONDB", .when(traits: ["FoundationDB"])),
+                .product(
+                    name: "FoundationDB",
+                    package: "fdb-swift-bindings"
+                ),
             ]
         ),
         .target(
             name: "SQLiteStorage",
             dependencies: [
                 "StorageKit",
-            ],
-            swiftSettings: [
-                .define("STORAGE_SQLITE", .when(traits: ["SQLite"])),
             ]
         ),
         .target(
             name: "PostgreSQLStorage",
             dependencies: [
                 "StorageKit",
-                .product(name: "PostgresNIO", package: "postgres-nio"),
-            ],
-            swiftSettings: [
-                .define("STORAGE_POSTGRESQL", .when(traits: ["PostgreSQL"])),
+                .product(
+                    name: "PostgresNIO",
+                    package: "postgres-nio"
+                ),
             ]
         ),
         .target(

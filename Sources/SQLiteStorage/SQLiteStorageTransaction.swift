@@ -7,6 +7,7 @@ import Synchronization
 /// into the current native SQLite transaction/savepoint before reading. Nested
 /// children suspend their parent until strict-LIFO `commit()` or `cancel()`.
 public final class SQLiteStorageTransaction:
+    Transaction,
     DatabaseStorageCompactionTransaction,
     Sendable {
     public static let maximumCompactionWorkUnitsPerSlice: UInt64 = 4_096
@@ -42,12 +43,14 @@ public final class SQLiteStorageTransaction:
     private let lifetime: SQLiteStorageLifetime
     private let mutationByteMeter: TransactionMutationByteMeter
     private let state = Mutex(MutableState())
+    public let transactionDomain: StorageTransactionDomain
 
     init(
         identifier: UInt64,
         coordinator: SQLiteTransactionCoordinator,
         connection: SQLiteConnectionHandle,
-        lifetime: SQLiteStorageLifetime
+        lifetime: SQLiteStorageLifetime,
+        transactionDomain: StorageTransactionDomain
     ) {
         self.identifier = identifier
         self.rootIdentifier = identifier
@@ -56,6 +59,7 @@ public final class SQLiteStorageTransaction:
         self.connection = connection
         self.lifetime = lifetime
         self.mutationByteMeter = TransactionMutationByteMeter()
+        self.transactionDomain = transactionDomain
     }
 
     private init(
@@ -69,6 +73,7 @@ public final class SQLiteStorageTransaction:
         self.connection = parent.connection
         self.lifetime = parent.lifetime
         self.mutationByteMeter = parent.mutationByteMeter
+        self.transactionDomain = parent.transactionDomain
     }
 
     public func configureMutationByteLimit(maximumBytes: Int?) throws {
@@ -107,10 +112,6 @@ public final class SQLiteStorageTransaction:
             }
             await coordinator.retireTerminalIdentifier(identifier)
         }
-    }
-
-    func belongs(to lifetime: SQLiteStorageLifetime) -> Bool {
-        self.lifetime === lifetime
     }
 
     var hasActiveChild: Bool {

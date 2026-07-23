@@ -33,6 +33,7 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     private let connection: SQLiteConnectionHandle
     private let lifetime: SQLiteStorageLifetime
     private let coordinator: SQLiteTransactionCoordinator
+    private let transactionDomain = StorageTransactionDomain()
     private let state = Mutex(EngineState())
 
     public init(configuration: Configuration) throws {
@@ -54,7 +55,7 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
 
         if let existing = ActiveTransactionScope.current
             as? SQLiteStorageTransaction,
-           existing.belongs(to: lifetime) {
+           existing.transactionDomain === transactionDomain {
             return try existing.makeChild(identifier: identifier)
         }
 
@@ -62,15 +63,18 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
             identifier: identifier,
             coordinator: coordinator,
             connection: connection,
-            lifetime: lifetime
+            lifetime: lifetime,
+            transactionDomain: transactionDomain
         )
     }
 
     public func withTransaction<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
+        _ operation: (any TransactionAccess) async throws -> T
     ) async throws -> T {
         let transaction = try createTransaction()
-        return try await ActiveTransactionScope.$current.withValue(transaction) {
+        return try await ActiveTransactionScope.withActiveTransaction(
+            transaction
+        ) { _ in
             do {
                 let result = try await operation(transaction)
                 try await transaction.commit()

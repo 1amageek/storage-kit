@@ -18,10 +18,10 @@ struct FoundationDBByteOwnershipTests {
         let value = Bytes(retaining: valueOwner)[1..<5]
         let expectedKeyAddress = try byteAddress(of: key)
         let expectedValueAddress = try byteAddress(of: value)
-        let backend = RecordingFoundationDBTransaction()
+        let backend = RecordingTransaction()
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         #expect(keyOwner.borrowCount == 1)
@@ -40,25 +40,35 @@ struct FoundationDBByteOwnershipTests {
 
     @Test("Point reads retain FoundationDB output without copying")
     func pointReadsRetainFoundationDBOutputWithoutCopying() async throws {
-        let releaseRecorder = ObjectReleaseRecorder()
-        var outputSource: ReleaseTrackedFoundationDBByteSource? = ReleaseTrackedFoundationDBByteSource(
-            bytes: [0x11, 0x22, 0x33, 0x44],
-            releaseRecorder: releaseRecorder
+        let releaseRecorder = ByteReleaseRecorder()
+        var outputOwner: ReleaseTrackedByteStringOwner? =
+            ReleaseTrackedByteStringOwner(
+                bytes: [0x11, 0x22, 0x33, 0x44],
+                releaseRecorder: releaseRecorder
+            )
+        let expectedOutputAddress = try #require(outputOwner).withUnsafeBytes {
+            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
+        }
+        var outputBytes: FDB.ByteString? = FDB.ByteString(
+            retaining: try #require(outputOwner)
         )
         let inputOwner = BorrowCountingStorageBytesOwner(
             bytes: [0xA0, 0x01, 0x02, 0xA1]
         )
         let inputKey = Bytes(retaining: inputOwner)[1..<3]
         let expectedInputAddress = try byteAddress(of: inputKey)
-        let backend: RecordingFoundationDBTransaction
+        let backend: RecordingTransaction
         do {
-            backend = RecordingFoundationDBTransaction(
-                pointValue: FDB.ByteBuffer(try #require(outputSource))
+            backend = RecordingTransaction(
+                pointValue: try #require(outputBytes)
             )
         }
+        outputOwner = nil
+        outputBytes = nil
+        #expect(!releaseRecorder.wasReleased)
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         var result = try await transaction.getValue(
@@ -66,10 +76,6 @@ struct FoundationDBByteOwnershipTests {
             snapshot: true
         )
 
-        #expect(outputSource?.borrowCount == 0)
-        let expectedOutputAddress = try #require(outputSource).withUnsafeBytes {
-            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
-        }
         let actualOutputAddress = try #require(result).withUnsafeBytes {
             try #require($0.baseAddress.map(UInt.init(bitPattern:)))
         }
@@ -78,10 +84,8 @@ struct FoundationDBByteOwnershipTests {
         #expect(readInvocation.count == inputKey.count)
         #expect(inputOwner.borrowCount == 2)
         #expect(actualOutputAddress == expectedOutputAddress)
-        #expect(outputSource?.borrowCount == 2)
-
-        outputSource = nil
         #expect(!releaseRecorder.wasReleased)
+
         result = nil
         #expect(releaseRecorder.wasReleased)
     }
@@ -99,30 +103,25 @@ struct FoundationDBByteOwnershipTests {
         let expectedBeginAddress = try byteAddress(of: begin)
         let expectedEndAddress = try byteAddress(of: end)
 
-        let keyReleaseRecorder = ObjectReleaseRecorder()
-        let valueReleaseRecorder = ObjectReleaseRecorder()
-        var keySource: ReleaseTrackedFoundationDBByteSource? = ReleaseTrackedFoundationDBByteSource(
-            bytes: [0x31, 0x32],
-            releaseRecorder: keyReleaseRecorder
-        )
-        var valueSource: ReleaseTrackedFoundationDBByteSource? = ReleaseTrackedFoundationDBByteSource(
-            bytes: [0x41, 0x42, 0x43],
-            releaseRecorder: valueReleaseRecorder
-        )
-        let backend: RecordingFoundationDBTransaction
+        let keyBytes = FDB.ByteString([0x31, 0x32])
+        let valueBytes = FDB.ByteString([0x41, 0x42, 0x43])
+        let expectedKeyAddress = try keyBytes.withUnsafeBytes {
+            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
+        }
+        let expectedValueAddress = try valueBytes.withUnsafeBytes {
+            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
+        }
+        let backend: RecordingTransaction
         do {
             let page = RangeBatch(
-                records: [(
-                    FDB.ByteBuffer(try #require(keySource)),
-                    FDB.ByteBuffer(try #require(valueSource))
-                )],
+                records: [FDB.KeyValue(key: keyBytes, value: valueBytes)],
                 hasMore: false
             )
-            backend = RecordingFoundationDBTransaction(rangePages: [page])
+            backend = RecordingTransaction(rangePages: [page])
         }
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
         let range = transaction.getRange(
             from: .firstGreaterOrEqual(begin),
@@ -135,8 +134,6 @@ struct FoundationDBByteOwnershipTests {
 
         #expect(beginOwner.borrowCount == 1)
         #expect(endOwner.borrowCount == 1)
-        #expect(keySource?.borrowCount == 0)
-        #expect(valueSource?.borrowCount == 0)
 
         var iterator: FDBStorageRangeResult.AsyncIterator? = range.makeAsyncIterator()
         var row = try await iterator?.next()
@@ -148,15 +145,6 @@ struct FoundationDBByteOwnershipTests {
         #expect(rangeInvocation.endCount == end.count)
         #expect(beginOwner.borrowCount == 2)
         #expect(endOwner.borrowCount == 2)
-        #expect(keySource?.borrowCount == 0)
-        #expect(valueSource?.borrowCount == 0)
-
-        let expectedKeyAddress = try #require(keySource).withUnsafeBytes {
-            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
-        }
-        let expectedValueAddress = try #require(valueSource).withUnsafeBytes {
-            try #require($0.baseAddress.map(UInt.init(bitPattern:)))
-        }
         var returnedRow = try #require(row)
         let actualKeyAddress = returnedRow.0.withUnsafeBytes {
             $0.baseAddress.map(UInt.init(bitPattern:))
@@ -166,19 +154,11 @@ struct FoundationDBByteOwnershipTests {
         }
         #expect(actualKeyAddress == expectedKeyAddress)
         #expect(actualValueAddress == expectedValueAddress)
-        #expect(keySource?.borrowCount == 2)
-        #expect(valueSource?.borrowCount == 2)
 
         try await iterator?.finish()
         iterator = nil
-        keySource = nil
-        valueSource = nil
-        #expect(!keyReleaseRecorder.wasReleased)
-        #expect(!valueReleaseRecorder.wasReleased)
         row = nil
         returnedRow = (Bytes(), Bytes())
-        #expect(keyReleaseRecorder.wasReleased)
-        #expect(valueReleaseRecorder.wasReleased)
     }
 
     @Test("Oversized StorageKit inputs fail before borrowing or dispatch")
@@ -186,10 +166,10 @@ struct FoundationDBByteOwnershipTests {
         let owner = OversizedBorrowCountingStorageBytesOwner(
             count: Int(Int32.max) + 1
         )
-        let backend = RecordingFoundationDBTransaction()
+        let backend = RecordingTransaction()
         let transaction = try FDBStorageTransaction(
             backend,
-            transactionDomain: FoundationDBTransactionDomain()
+            transactionDomain: StorageTransactionDomain()
         )
 
         do {
@@ -225,9 +205,9 @@ private struct RangeInvocationRecord: Sendable {
     let endCount: Int
 }
 
-private final class RecordingFoundationDBTransaction: TransactionProtocol, Sendable {
+private final class RecordingTransaction: TransactionProtocol, Sendable {
     private struct State: Sendable {
-        var pointValue: FDB.ByteBuffer?
+        var pointValue: FDB.ByteString?
         var rangePages: [RangeBatch]
         var nextRangePageIndex = 0
         var setInvocation: SetInvocationRecord?
@@ -239,7 +219,7 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
     private let state: Mutex<State>
 
     init(
-        pointValue: FDB.ByteBuffer? = nil,
+        pointValue: FDB.ByteString? = nil,
         rangePages: [RangeBatch] = []
     ) {
         self.state = Mutex(State(
@@ -253,10 +233,10 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
     var rangeInvocation: RangeInvocationRecord? { state.withLock { $0.rangeInvocation } }
     var clearCount: Int { state.withLock { $0.clearCount } }
 
-    func getValue<Key: FDB.ByteSource>(
+    func getValue<Key: FDB.ByteInput>(
         for key: Key,
         snapshot: Bool
-    ) async throws -> FDB.ByteBuffer? {
+    ) async throws -> FDB.ByteString? {
         _ = snapshot
         let keyRegion = borrowedRegion(of: key)
         return state.withLock { state in
@@ -270,7 +250,7 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
         }
     }
 
-    func setValue<Value: FDB.ByteSource, Key: FDB.ByteSource>(
+    func setValue<Value: FDB.ByteInput, Key: FDB.ByteInput>(
         _ value: Value,
         for key: Key
     ) throws {
@@ -286,12 +266,12 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
         }
     }
 
-    func clear<Key: FDB.ByteSource>(key: Key) throws {
+    func clear<Key: FDB.ByteInput>(key: Key) throws {
         _ = key
         state.withLock { $0.clearCount += 1 }
     }
 
-    func clearRange<Begin: FDB.ByteSource, End: FDB.ByteSource>(
+    func clearRange<Begin: FDB.ByteInput, End: FDB.ByteInput>(
         beginKey: Begin,
         endKey: End
     ) throws {
@@ -302,10 +282,10 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
     func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteBuffer? {
+    ) async throws -> FDB.ByteString {
         _ = selector
         _ = snapshot
-        return nil
+        return []
     }
 
     func readRangeBatch(
@@ -346,30 +326,32 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
         }
     }
 
-    func commit() async throws -> Bool { true }
+    func commit() async throws {}
     func cancel() {}
-    func getVersionstamp() async throws -> FDB.ByteBuffer? { nil }
+    func requestVersionstamp() -> any FDB.PendingTransactionVersionstamp {
+        FixedTransactionVersionstamp()
+    }
     func setReadVersion(_ version: FDB.Version) { _ = version }
     func getReadVersion() async throws -> FDB.Version { 0 }
     func onError(_ error: FDBError) async throws { _ = error }
 
     func getEstimatedRangeSizeBytes<
-        Begin: FDB.ByteSource,
-        End: FDB.ByteSource
-    >(beginKey: Begin, endKey: End) async throws -> Int {
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
+    >(beginKey: Begin, endKey: End) async throws -> Int64 {
         _ = beginKey
         _ = endKey
         return 0
     }
 
     func getRangeSplitPoints<
-        Begin: FDB.ByteSource,
-        End: FDB.ByteSource
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
     >(
         beginKey: Begin,
         endKey: End,
-        chunkSize: Int
-    ) async throws -> [FDB.ByteBuffer] {
+        chunkSize: Int64
+    ) async throws -> [FDB.ByteString] {
         _ = beginKey
         _ = endKey
         _ = chunkSize
@@ -379,7 +361,7 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
     func getCommittedVersion() throws -> FDB.Version { 0 }
     func approximateSize() async throws -> Int64 { 0 }
 
-    func atomicOp<Key: FDB.ByteSource, Parameter: FDB.ByteSource>(
+    func atomicOp<Key: FDB.ByteInput, Parameter: FDB.ByteInput>(
         key: Key,
         param: Parameter,
         mutationType: FDB.MutationType
@@ -390,8 +372,8 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
     }
 
     func addConflictRange<
-        Begin: FDB.ByteSource,
-        End: FDB.ByteSource
+        Begin: FDB.ByteInput,
+        End: FDB.ByteInput
     >(
         beginKey: Begin,
         endKey: End,
@@ -402,7 +384,7 @@ private final class RecordingFoundationDBTransaction: TransactionProtocol, Senda
         _ = type
     }
 
-    func setOption<Value: FDB.ByteSource>(
+    func setOption<Value: FDB.ByteInput>(
         to value: Value,
         forOption option: FDB.TransactionOption
     ) throws {
@@ -450,13 +432,17 @@ private final class BorrowCountingStorageBytesOwner: BytesOwner, Sendable {
     }
 }
 
-private final class ReleaseTrackedFoundationDBByteSource: FDB.ByteSource, Sendable {
-    private let bytes: [UInt8]
-    private let state = Mutex(0)
-    private let releaseRecorder: ObjectReleaseRecorder
+private final class ReleaseTrackedByteStringOwner:
+        FDB.ByteStringOwner,
+        Sendable {
+    let count: Int
 
-    init(bytes: [UInt8], releaseRecorder: ObjectReleaseRecorder) {
+    private let bytes: [UInt8]
+    private let releaseRecorder: ByteReleaseRecorder
+
+    init(bytes: [UInt8], releaseRecorder: ByteReleaseRecorder) {
         self.bytes = bytes
+        self.count = bytes.count
         self.releaseRecorder = releaseRecorder
     }
 
@@ -464,14 +450,20 @@ private final class ReleaseTrackedFoundationDBByteSource: FDB.ByteSource, Sendab
         releaseRecorder.recordRelease()
     }
 
-    var count: Int { bytes.count }
-    var borrowCount: Int { state.withLock { $0 } }
-
     func withUnsafeBytes<Result>(
         _ body: (UnsafeRawBufferPointer) throws -> Result
     ) rethrows -> Result {
-        state.withLock { $0 += 1 }
-        return try bytes.withUnsafeBytes(body)
+        try bytes.withUnsafeBytes(body)
+    }
+}
+
+private final class ByteReleaseRecorder: Sendable {
+    private let state = Mutex(false)
+
+    var wasReleased: Bool { state.withLock { $0 } }
+
+    func recordRelease() {
+        state.withLock { $0 = true }
     }
 }
 
@@ -493,27 +485,16 @@ private final class OversizedBorrowCountingStorageBytesOwner: BytesOwner, Sendab
     }
 }
 
-private final class ObjectReleaseRecorder: Sendable {
-    private let state = Mutex(false)
-
-    var wasReleased: Bool { state.withLock { $0 } }
-
-    func recordRelease() {
-        state.withLock { $0 = true }
-    }
-}
-
 private func byteAddress(of bytes: Bytes) throws -> UInt {
     try bytes.withUnsafeBytes {
         try #require($0.baseAddress.map(UInt.init(bitPattern:)))
     }
 }
 
-private func borrowedRegion<Source: FDB.ByteSource>(
+private func borrowedRegion<Source: FDB.ByteInput>(
     of source: Source
 ) -> (address: UInt, count: Int) {
     source.withUnsafeBytes { bytes in
-        precondition(bytes.count == source.count)
         guard let baseAddress = bytes.baseAddress else {
             preconditionFailure("Byte ownership test requires nonempty bytes")
         }

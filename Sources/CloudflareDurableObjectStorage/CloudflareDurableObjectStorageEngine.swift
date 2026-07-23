@@ -6,6 +6,7 @@ public struct CloudflareDurableObjectStorageEngine: StorageEngine {
     public typealias TransactionType = CloudflareDurableObjectStorageTransaction
 
     public let configuration: CloudflareDurableObjectStorageConfiguration
+    private let transactionDomain: StorageTransactionDomain
 
     public var monotonicClock: any StorageMonotonicClock {
         configuration.monotonicClock
@@ -13,6 +14,7 @@ public struct CloudflareDurableObjectStorageEngine: StorageEngine {
 
     public init(configuration: CloudflareDurableObjectStorageConfiguration) async throws {
         self.configuration = configuration
+        self.transactionDomain = StorageTransactionDomain()
         _ = try configuration.scope.durableObjectName(
             maximumBytes: configuration.limits.maxNameBytes
         )
@@ -35,13 +37,9 @@ public struct CloudflareDurableObjectStorageEngine: StorageEngine {
             scope: configuration.scope,
             client: configuration.client,
             limits: configuration.limits,
-            monotonicClock: configuration.monotonicClock
+            monotonicClock: configuration.monotonicClock,
+            transactionDomain: transactionDomain
         )
     }
 
-    public func withAutoCommit<T: Sendable>(
-        _ operation: (any Transaction) async throws -> T
-    ) async throws -> T {
-        try await withTransaction(operation)
-    }
 }

@@ -262,12 +262,54 @@ struct InMemoryTransactionContractTests {
     // MARK: - Versionstamp
     // =========================================================================
 
-    @Test func getVersionstamp_returnsCommittedVersionstamp() async throws {
+    @Test func versionstampRequestResolvesAfterCommit() async throws {
+        let engine = InMemoryEngine()
+        let tx = try engine.createTransaction()
+        let pendingVersionstamp = tx.requestVersionstamp()
+        let awaitingVersionstamp = Task {
+            try await pendingVersionstamp.value
+        }
+        await Task.yield()
+        try await tx.commit()
+        let versionstamp = try await awaitingVersionstamp.value
+        #expect(versionstamp.bytes == Bytes(repeating: 0, count: 10))
+    }
+
+    @Test func versionstampRequestFailsWhenTransactionIsCancelled() async throws {
+        let engine = InMemoryEngine()
+        let tx = try engine.createTransaction()
+        let pendingVersionstamp = tx.requestVersionstamp()
+        let awaitingVersionstamp = Task {
+            try await pendingVersionstamp.value
+        }
+        await Task.yield()
+
+        try await tx.cancel()
+
+        do {
+            _ = try await awaitingVersionstamp.value
+            Issue.record("Expected cancelled versionstamp request to fail")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+        } catch {
+            Issue.record("Expected StorageError, got \(error)")
+        }
+    }
+
+    @Test func versionstampMustBeRequestedBeforeCommit() async throws {
         let engine = InMemoryEngine()
         let tx = try engine.createTransaction()
         try await tx.commit()
-        let stamp = try await tx.getVersionstamp()
-        #expect(stamp == Bytes(repeating: 0, count: 10))
+
+        let lateRequest = tx.requestVersionstamp()
+        do {
+            _ = try await lateRequest.value
+            Issue.record("Expected late versionstamp request to fail")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+        } catch {
+            Issue.record("Expected StorageError, got \(error)")
+        }
     }
 
     // =========================================================================

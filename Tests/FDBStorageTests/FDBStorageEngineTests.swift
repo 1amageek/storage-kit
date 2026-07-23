@@ -31,7 +31,7 @@ struct FDBStorageEngineTests {
     }
 
     private func collectRange(
-        _ tx: some Transaction,
+        _ tx: some TransactionAccess,
         begin: Bytes, end: Bytes
     ) async throws -> [(key: Bytes, value: Bytes)] {
         let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
