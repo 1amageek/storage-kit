@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Embedded representation of StorageKit key selectors.
 public struct EmbeddedKeySelector: Sendable, Hashable {
     public enum Kind: UInt8, Sendable, Hashable {
@@ -7,11 +8,11 @@ public struct EmbeddedKeySelector: Sendable, Hashable {
         case lastLessThan = 4
     }
 
-    public let key: EmbeddedBytes
+    public let key: ByteString
     public let orEqual: Bool
     public let offset: Int
 
-    public init(key: EmbeddedBytes, kind: Kind) {
+    public init(key: ByteString, kind: Kind) {
         self.key = key
         switch kind {
         case .firstGreaterOrEqual:
@@ -29,7 +30,7 @@ public struct EmbeddedKeySelector: Sendable, Hashable {
         }
     }
 
-    public init(key: EmbeddedBytes, orEqual: Bool, offset: Int) {
+    public init(key: ByteString, orEqual: Bool, offset: Int) {
         self.key = key
         self.orEqual = orEqual
         self.offset = offset
@@ -54,7 +55,7 @@ public struct EmbeddedKeySelector: Sendable, Hashable {
         self.offset = offset
     }
 
-    public func resolve(in sortedKeys: [EmbeddedBytes]) -> Int {
+    public func resolve(in sortedKeys: [ByteString]) -> Int {
         let base = orEqual
             ? upperBound(key, in: sortedKeys) - 1
             : lowerBound(key, in: sortedKeys) - 1
@@ -64,8 +65,8 @@ public struct EmbeddedKeySelector: Sendable, Hashable {
     }
 
     private func lowerBound(
-        _ key: EmbeddedBytes,
-        in sortedKeys: [EmbeddedBytes]
+        _ key: ByteString,
+        in sortedKeys: [ByteString]
     ) -> Int {
         var low = 0
         var high = sortedKeys.count
@@ -81,8 +82,8 @@ public struct EmbeddedKeySelector: Sendable, Hashable {
     }
 
     private func upperBound(
-        _ key: EmbeddedBytes,
-        in sortedKeys: [EmbeddedBytes]
+        _ key: ByteString,
+        in sortedKeys: [ByteString]
     ) -> Int {
         var low = 0
         var high = sortedKeys.count

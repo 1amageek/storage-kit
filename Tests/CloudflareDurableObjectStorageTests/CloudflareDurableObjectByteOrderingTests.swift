@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Testing
 @testable import CloudflareDurableObjectStorage
@@ -14,8 +15,8 @@ struct CloudflareDurableObjectByteOrderingTests {
         let rightOwner = BorrowCountingBytesOwner(right)
 
         let comparison = CloudflareDurableObjectByteOrdering.compare(
-            Bytes(retaining: leftOwner),
-            Bytes(retaining: rightOwner)
+            ByteString(retaining: leftOwner),
+            ByteString(retaining: rightOwner)
         )
 
         #expect(comparison == -1)

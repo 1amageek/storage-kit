@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorageEmbedded
 import StorageKitEmbeddedCore
 import Testing
@@ -58,7 +59,7 @@ struct StorageWireValidationContractTests {
         let read = CloudflareDurableObjectEmbeddedRequest.read(
             CloudflareDurableObjectEmbeddedReadRequest(
                 scope: scope,
-                key: EmbeddedBytes(
+                key: ByteString(
                     Array(repeating: 0, count: limits.maxKeyBytes + 1)
                 ),
                 snapshot: false
@@ -70,7 +71,7 @@ struct StorageWireValidationContractTests {
 
         let response = CloudflareDurableObjectEmbeddedResponse.read(
             CloudflareDurableObjectEmbeddedReadResponse(
-                value: EmbeddedBytes(
+                value: ByteString(
                     Array(repeating: 0, count: limits.maxValueBytes + 1)
                 ),
                 currentCommitVersion: 0
@@ -132,7 +133,7 @@ struct StorageWireValidationContractTests {
                         limit: 1,
                         reverse: false,
                         snapshot: false,
-                        cursorKey: EmbeddedBytes(
+                        cursorKey: ByteString(
                             [UInt8](
                                 repeating: 0x01,
                                 count: EmbeddedLimits.cloudflareDurableObject.maxKeyBytes + 1
@@ -197,7 +198,7 @@ struct StorageWireValidationContractTests {
                 )
             )
         }
-        let invalidPointSets: [[EmbeddedBytes]] = [
+        let invalidPointSets: [[ByteString]] = [
             [],
             [[0x01], [0x01]],
             [[0x02], [0x01]],

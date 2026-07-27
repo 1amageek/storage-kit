@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import StorageKitEmbeddedCore
 import CloudflareDurableObjectStorageEmbedded
@@ -22,7 +23,7 @@ struct EmbeddedWireCodecTests {
             [0x04, 0x03, 0x02, 0x01]
         )
         var uint32Reader = EmbeddedWireReader(
-            EmbeddedBytes(retaining: uint32Owner)
+            ByteString(retaining: uint32Owner)
         )
         #expect(try uint32Reader.readUInt32() == 0x01020304)
         #expect(uint32Owner.borrowCount == 1)
@@ -31,7 +32,7 @@ struct EmbeddedWireCodecTests {
             [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
         )
         var uint64Reader = EmbeddedWireReader(
-            EmbeddedBytes(retaining: uint64Owner)
+            ByteString(retaining: uint64Owner)
         )
         #expect(try uint64Reader.readUInt64() == 0x0102030405060708)
         #expect(uint64Owner.borrowCount == 1)
@@ -46,8 +47,8 @@ struct EmbeddedWireCodecTests {
         let rightOwner = EmbeddedBorrowCountingOwner(right)
 
         let result = EmbeddedByteOrdering.compare(
-            EmbeddedBytes(retaining: leftOwner),
-            EmbeddedBytes(retaining: rightOwner)
+            ByteString(retaining: leftOwner),
+            ByteString(retaining: rightOwner)
         )
 
         #expect(result == -1)
@@ -56,12 +57,12 @@ struct EmbeddedWireCodecTests {
     }
 
     @Test func embeddedBytesRoundTripWithLengthPrefix() throws {
-        let bytes = EmbeddedBytes([0x00, 0xFF, 0x7F])
+        let bytes = ByteString([0x00, 0xFF, 0x7F])
         var writer = EmbeddedWireWriter()
-        try bytes.encode(into: &writer)
+        try writer.writeBytes(bytes)
 
         var reader = EmbeddedWireReader(writer.bytes)
-        let decoded = try EmbeddedBytes(from: &reader)
+        let decoded = try reader.readByteRegion()
 
         #expect(decoded == bytes)
         #expect(reader.remainingCount == 0)
@@ -92,7 +93,7 @@ struct EmbeddedWireCodecTests {
         )
         var encoded = try CloudflareDurableObjectStorageWireCodec
             .encode(request)
-            .contiguousArray()
+            .copyBytes()
         encoded.append(0xFF)
 
         #expect(throws: CloudflareDurableObjectEmbeddedError.self) {
@@ -149,8 +150,8 @@ struct EmbeddedWireCodecTests {
         )
 
         let result = try EmbeddedMutationType.bitOr.apply(
-            to: EmbeddedBytes(retaining: existingOwner),
-            param: EmbeddedBytes(retaining: parameterOwner)
+            to: ByteString(retaining: existingOwner),
+            param: ByteString(retaining: parameterOwner)
         )
 
         #expect(existingOwner.borrowCount == 1)
@@ -197,7 +198,7 @@ struct EmbeddedWireCodecTests {
             EmbeddedKeyValue(key: [0x07], value: [7])
         ]
         let cases: [
-            (EmbeddedKeySelector, EmbeddedKeySelector, [EmbeddedBytes])
+            (EmbeddedKeySelector, EmbeddedKeySelector, [ByteString])
         ] = [
             (
                 EmbeddedKeySelector(key: [0x03], kind: .firstGreaterOrEqual),

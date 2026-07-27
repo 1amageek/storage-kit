@@ -1,9 +1,10 @@
+import DatabaseTypes
 /// Embedded key-value row.
 public struct EmbeddedKeyValue: Sendable, Hashable {
-    public let key: EmbeddedBytes
-    public let value: EmbeddedBytes
+    public let key: ByteString
+    public let value: ByteString
 
-    public init(key: EmbeddedBytes, value: EmbeddedBytes) {
+    public init(key: ByteString, value: ByteString) {
         self.key = key
         self.value = value
     }

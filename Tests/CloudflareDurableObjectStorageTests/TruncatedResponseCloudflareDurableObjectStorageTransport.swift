@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorage
 import StorageKitEmbeddedCore
 
@@ -6,7 +7,7 @@ final class TruncatedResponseCloudflareDurableObjectStorageTransport: Cloudflare
         .synchronous
     }
 
-    func send(_ requestBytes: EmbeddedBytes) async throws -> EmbeddedBytes {
+    func send(_ requestBytes: ByteString) async throws -> ByteString {
         _ = requestBytes
         return [0x01]
     }

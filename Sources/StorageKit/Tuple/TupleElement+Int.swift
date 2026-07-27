@@ -1,3 +1,4 @@
+import DatabaseTypes
 // MARK: - Int64
 
 extension Int64: TupleElement {
@@ -13,8 +14,10 @@ extension Int64: TupleElement {
         }
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Int64 {
-        guard offset > 0 else { throw TupleError.unexpectedEndOfData }
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Int64 {
+        guard offset > bytes.startIndex else {
+            throw TupleError.unexpectedEndOfData
+        }
         let typeCode = bytes[offset - 1]
         let intZero = TupleTypeCode.intZero.rawValue
 
@@ -25,7 +28,7 @@ extension Int64: TupleElement {
         // Positive integer: type code 0x15-0x1D
         if typeCode > intZero && typeCode <= 0x1D {
             let n = Int(typeCode - intZero)
-            guard offset + n <= bytes.count else { throw TupleError.unexpectedEndOfData }
+            guard offset + n <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
             var value: UInt64 = 0
             for i in 0..<n {
                 value = (value << 8) | UInt64(bytes[offset + i])
@@ -38,7 +41,7 @@ extension Int64: TupleElement {
         // Negative integer: type code 0x0B-0x13
         if typeCode >= 0x0B && typeCode < intZero {
             let n = Int(intZero - typeCode)
-            guard offset + n <= bytes.count else { throw TupleError.unexpectedEndOfData }
+            guard offset + n <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
 
             // n=9 (type code 0x0B): extended range negative integer, exceeds Int64
             if n > 8 {
@@ -135,7 +138,7 @@ extension Int: TupleElement {
         Int64(self).encodeTuple(to: &sink)
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Int {
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Int {
         let value = try Int64.decodeTuple(from: bytes, at: &offset)
         guard let result = Int(exactly: value) else { throw TupleError.integerOverflow }
         return result
@@ -149,7 +152,7 @@ extension Int32: TupleElement {
         Int64(self).encodeTuple(to: &sink)
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Int32 {
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Int32 {
         let value = try Int64.decodeTuple(from: bytes, at: &offset)
         guard let result = Int32(exactly: value) else { throw TupleError.integerOverflow }
         return result
@@ -172,8 +175,10 @@ extension UInt64: TupleElement {
         }
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> UInt64 {
-        guard offset > 0 else { throw TupleError.unexpectedEndOfData }
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> UInt64 {
+        guard offset > bytes.startIndex else {
+            throw TupleError.unexpectedEndOfData
+        }
         let typeCode = bytes[offset - 1]
         let intZero = TupleTypeCode.intZero.rawValue
 
@@ -186,7 +191,7 @@ extension UInt64: TupleElement {
         }
 
         let n = Int(typeCode - intZero)
-        guard offset + n <= bytes.count else { throw TupleError.unexpectedEndOfData }
+        guard offset + n <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
         var value: UInt64 = 0
         for i in 0..<n {
             value = (value << 8) | UInt64(bytes[offset + i])

@@ -1,8 +1,9 @@
+import DatabaseTypes
 import FoundationDB
 import StorageKit
 
 /// Keeps a FoundationDB result future alive while StorageKit borrows its bytes.
-struct ResultBytesOwner: BytesOwner {
+struct ResultBytesOwner: ByteStringOwner {
     let bytes: FDB.ByteString
 
     init(_ bytes: FDB.ByteString) {

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 #if arch(wasm32)
@@ -19,9 +20,9 @@ public struct StorageHostDispatcher:
     public init() {}
 
     public func dispatch(
-        _ requestBytes: EmbeddedBytes,
+        _ requestBytes: ByteString,
         maximumResponseBytes: Int
-    ) throws -> EmbeddedBytes {
+    ) throws -> ByteString {
         guard maximumResponseBytes > 0 else {
             throw StorageHostTransportError.invalidLimit
         }

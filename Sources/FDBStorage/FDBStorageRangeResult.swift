@@ -1,9 +1,10 @@
+import DatabaseTypes
 import FoundationDB
 import StorageKit
 import Synchronization
 
 public struct FDBStorageRangeResult: TransactionRangeResult {
-    public typealias Element = (Bytes, Bytes)
+    public typealias Element = (ByteString, ByteString)
 
     private enum Source: Sendable {
         case sequence(FDB.AsyncKVSequence, FDBStorageTransaction)
@@ -110,7 +111,7 @@ private actor RangeIterationState {
         self.source = .failure(error)
     }
 
-    func next() async throws -> (Bytes, Bytes)? {
+    func next() async throws -> (ByteString, ByteString)? {
         while true {
             switch source {
             case .failure(let error):
@@ -215,7 +216,7 @@ private actor RangeIterationState {
         iterator: FDB.AsyncKVSequence.AsyncIterator,
         transaction: FDBStorageTransaction,
         currentLease: TransactionActivityLease?
-    ) async throws -> (Bytes, Bytes)? {
+    ) async throws -> (ByteString, ByteString)? {
         let lease: TransactionActivityLease
         do {
             if let currentLease {
@@ -262,8 +263,8 @@ private actor RangeIterationState {
             source = .sequence(iterator, transaction, lease)
             completion.resolve(.success(()))
             return (
-                Bytes(retaining: ResultBytesOwner(element.key)),
-                Bytes(retaining: ResultBytesOwner(element.value))
+                ByteString(retaining: ResultBytesOwner(element.key)),
+                ByteString(retaining: ResultBytesOwner(element.value))
             )
         } catch is CancellationError {
             lease.release()
@@ -310,7 +311,7 @@ private actor RangeIterationState {
         iterator: FDB.AsyncKVSequence.AsyncIterator,
         lease: TransactionActivityLease,
         completion: RangeIterationBoundary
-    ) async throws -> (Bytes, Bytes)? {
+    ) async throws -> (ByteString, ByteString)? {
         source = .finishing(completion)
         do {
             try await iterator.finish()

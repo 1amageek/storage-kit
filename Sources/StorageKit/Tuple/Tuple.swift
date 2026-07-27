@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if canImport(FoundationEssentials)
 import FoundationEssentials
 #else
@@ -51,7 +52,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
 
     /// Decode packed tuple bytes directly into owned tuple storage.
     /// Byte-backed element payloads remain views over the input byte owner.
-    public init(packed bytes: Bytes) throws {
+    public init(packed bytes: ByteString) throws {
         self = try Self.unpackTuple(from: bytes)
     }
 
@@ -113,11 +114,11 @@ public struct Tuple: Sendable, Hashable, Equatable {
     // MARK: - Pack
 
     /// Encode all elements into a byte array.
-    public func pack() -> Bytes {
+    public func pack() -> ByteString {
         var measuringSink = TupleEncodingSink(measuringFrom: 0)
         encodePacked(to: &measuringSink)
         let byteCount = measuringSink.byteCount
-        return Bytes.copying(count: byteCount) { buffer in
+        return ByteString.copying(count: byteCount) { buffer in
             var sink = TupleEncodingSink(buffer: buffer)
             encodePacked(to: &sink)
             sink.validateFinalByteCount(byteCount)
@@ -171,11 +172,11 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// Decode an array of elements from a byte array.
     ///
     /// Same single-pass approach as the FDB implementation: each decoder directly updates the inout offset.
-    public static func unpack(from bytes: Bytes) throws -> [any TupleElement] {
+    public static func unpack(from bytes: ByteString) throws -> [any TupleElement] {
         var elements: [any TupleElement] = []
-        var offset = 0
+        var offset = bytes.startIndex
 
-        while offset < bytes.count {
+        while offset < bytes.endIndex {
             let typeCode = bytes[offset]
             offset += 1
 
@@ -188,11 +189,11 @@ public struct Tuple: Sendable, Hashable, Equatable {
 
     /// Decode directly into owned tuple storage without first materializing a
     /// separate existential array. Used by subspace scans on the hot key path.
-    static func unpackTuple(from bytes: Bytes) throws -> Tuple {
+    static func unpackTuple(from bytes: ByteString) throws -> Tuple {
         var canonicalElements: [CanonicalElement] = []
-        var offset = 0
+        var offset = bytes.startIndex
 
-        while offset < bytes.count {
+        while offset < bytes.endIndex {
             let typeCode = bytes[offset]
             offset += 1
             canonicalElements.append(
@@ -215,7 +216,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
     ///   - typeCode: The already-read type code byte.
     ///   - bytes: The full byte array.
     ///   - offset: The byte position after the type code (updated after decoding).
-    package static func decodeElement(typeCode: UInt8, bytes: Bytes, at offset: inout Int) throws -> any TupleElement {
+    package static func decodeElement(typeCode: UInt8, bytes: ByteString, at offset: inout Int) throws -> any TupleElement {
         let intZero = TupleTypeCode.intZero.rawValue
 
         switch typeCode {
@@ -223,7 +224,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
             return TupleNil()
 
         case TupleTypeCode.bytes.rawValue:
-            return try Bytes.decodeTuple(from: bytes, at: &offset)
+            return try ByteString.decodeTuple(from: bytes, at: &offset)
 
         case TupleTypeCode.string.rawValue:
             return try String.decodeTuple(from: bytes, at: &offset)
@@ -261,7 +262,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
             return true
 
         case TupleTypeCode.uuid.rawValue:
-            return try UUID.decodeTuple(from: bytes, at: &offset)
+            return try FoundationUUID.decodeTuple(from: bytes, at: &offset)
 
         case TupleTypeCode.versionstamp.rawValue:
             return try Versionstamp.decodeTuple(from: bytes, at: &offset)
@@ -277,7 +278,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
     ///
     /// Encodes internal elements, escapes 0x00 bytes in the result as 0x00 0xFF,
     /// and appends a 0x00 terminator at the end.
-    public func encodeNested() -> Bytes {
+    public func encodeNested() -> ByteString {
         encodeTuple()
     }
 
@@ -285,25 +286,25 @@ public struct Tuple: Sendable, Hashable, Equatable {
     ///
     /// Collects internal bytes while restoring the null-escape pattern (0x00 + 0xFF),
     /// and detects termination at a non-escaped 0x00. No depth tracking is needed.
-    private static func decodeNestedTuple(from bytes: Bytes, at offset: inout Int) throws -> Tuple {
+    private static func decodeNestedTuple(from bytes: ByteString, at offset: inout Int) throws -> Tuple {
         let start = offset
         var cursor = offset
         var decodedCount = 0
         var containsEscape = false
-        while cursor < bytes.count {
+        while cursor < bytes.endIndex {
             let byte = bytes[cursor]
             cursor += 1
             if byte == 0x00 {
-                if cursor < bytes.count && bytes[cursor] == 0xFF {
+                if cursor < bytes.endIndex && bytes[cursor] == 0xFF {
                     containsEscape = true
                     decodedCount += 1
                     cursor += 1
                 } else {
                     let end = cursor - 1
                     offset = cursor
-                    let innerBytes: Bytes
+                    let innerBytes: ByteString
                     if containsEscape {
-                        innerBytes = Bytes.copying(count: decodedCount) { output in
+                        innerBytes = ByteString.copying(count: decodedCount) { output in
                             var source = start
                             var destination = 0
                             while source < end {
@@ -337,7 +338,7 @@ extension Tuple: TupleElement {
         sink.writeByte(0x00)
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Tuple {
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Tuple {
         try decodeNestedTuple(from: bytes, at: &offset)
     }
 }

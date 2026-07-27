@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Synchronization
 
 /// A typed failure raised before a transaction accepts more logical mutation
@@ -116,8 +117,8 @@ public final class TransactionMutationByteMeter: Sendable {
     private static let mutationTypeByteCount = 4
 
     public func recordSet(
-        key: Bytes,
-        value: Bytes
+        key: ByteString,
+        value: ByteString
     ) throws(TransactionMutationByteLimitError) {
         try consume(
             Self.operationTagByteCount,
@@ -129,7 +130,7 @@ public final class TransactionMutationByteMeter: Sendable {
     }
 
     public func recordClear(
-        key: Bytes
+        key: ByteString
     ) throws(TransactionMutationByteLimitError) {
         try consume(
             Self.operationTagByteCount,
@@ -139,8 +140,8 @@ public final class TransactionMutationByteMeter: Sendable {
     }
 
     public func recordClearRange(
-        beginKey: Bytes,
-        endKey: Bytes
+        beginKey: ByteString,
+        endKey: ByteString
     ) throws(TransactionMutationByteLimitError) {
         try consume(
             Self.operationTagByteCount,
@@ -152,8 +153,8 @@ public final class TransactionMutationByteMeter: Sendable {
     }
 
     public func recordAtomic(
-        key: Bytes,
-        parameter: Bytes
+        key: ByteString,
+        parameter: ByteString
     ) throws(TransactionMutationByteLimitError) {
         try consume(
             Self.operationTagByteCount,

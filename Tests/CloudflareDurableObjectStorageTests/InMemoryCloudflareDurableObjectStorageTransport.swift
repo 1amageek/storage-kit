@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorage
 import CloudflareDurableObjectStorageEmbedded
 import StorageKit
@@ -11,7 +12,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private struct State: Sendable {
         var rowsByScope: [
-            CloudflareDurableObjectEmbeddedScope: [EmbeddedBytes: EmbeddedBytes]
+            CloudflareDurableObjectEmbeddedScope: [ByteString: ByteString]
         ] = [:]
         var versionsByScope: [CloudflareDurableObjectEmbeddedScope: Int64] = [:]
         var conflictsByScope: [CloudflareDurableObjectEmbeddedScope: [ConflictEntry]] = [:]
@@ -19,13 +20,13 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private struct ConflictEntry: Sendable {
         let version: Int64
-        let begin: EmbeddedBytes
-        let end: EmbeddedBytes
+        let begin: ByteString
+        let end: ByteString
     }
 
     private let state = Mutex(State())
 
-    func send(_ requestBytes: EmbeddedBytes) async throws -> EmbeddedBytes {
+    func send(_ requestBytes: ByteString) async throws -> ByteString {
         do {
             let request = try CloudflareDurableObjectStorageWireCodec.decodeRequest(requestBytes)
             return try state.withLock { state in
@@ -211,7 +212,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private func apply(
         _ mutation: EmbeddedWriteOperation,
-        to rows: inout [EmbeddedBytes: EmbeddedBytes]
+        to rows: inout [ByteString: ByteString]
     ) throws {
         switch mutation {
         case .set(let key, let value):
@@ -268,10 +269,10 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func materializedVersionstampOperand(
-        _ operand: EmbeddedBytes,
+        _ operand: ByteString,
         committedVersion: Int64,
         maximumResultBytes: Int
-    ) throws -> EmbeddedBytes {
+    ) throws -> ByteString {
         guard operand.count >= 14 else {
             throw StorageError.invalidOperation(
                 "Versionstamp operand is shorter than fourteen bytes"
@@ -283,26 +284,30 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
                 "Materialized versionstamp exceeds the byte limit"
             )
         }
-        let offset = Int(operand[payloadCount])
-            | (Int(operand[payloadCount + 1]) << 8)
-            | (Int(operand[payloadCount + 2]) << 16)
-            | (Int(operand[payloadCount + 3]) << 24)
+        let offset = operand.withUnsafeBytes { bytes in
+            Int(bytes[payloadCount])
+                | (Int(bytes[payloadCount + 1]) << 8)
+                | (Int(bytes[payloadCount + 2]) << 16)
+                | (Int(bytes[payloadCount + 3]) << 24)
+        }
         guard offset <= payloadCount - 10 else {
             throw StorageError.invalidOperation(
                 "Versionstamp offset does not identify ten payload bytes"
             )
         }
-        var result = operand.slice(0..<payloadCount).contiguousArray()
+        var result = operand.withUnsafeBytes { source in
+            Array(source[0..<payloadCount])
+        }
         result.replaceSubrange(
             offset..<(offset + 10),
             with: versionstamp(for: committedVersion)
         )
-        return EmbeddedBytes(result)
+        return ByteString(result)
     }
 
     private func versionstamp(
         for committedVersion: Int64
-    ) -> EmbeddedBytes {
+    ) -> ByteString {
         let version = UInt64(committedVersion)
         return [
             UInt8(truncatingIfNeeded: version >> 56),
@@ -387,7 +392,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private func writeConflictRange(
         for mutation: EmbeddedWriteOperation
-    ) -> (begin: EmbeddedBytes, end: EmbeddedBytes)? {
+    ) -> (begin: ByteString, end: ByteString)? {
         switch mutation {
         case .set(let key, _), .clear(let key), .atomic(let key, _, _):
             return singleKeyRange(key)
@@ -400,9 +405,9 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func singleKeyRange(
-        _ key: EmbeddedBytes
-    ) -> (begin: EmbeddedBytes, end: EmbeddedBytes) {
-        (key, key.appending(0x00))
+        _ key: ByteString
+    ) -> (begin: ByteString, end: ByteString) {
+        (key, keySuccessor(key))
     }
 
     private func overlaps(_ conflict: ConflictEntry, _ readRange: EmbeddedKeyRange) -> Bool {
@@ -443,7 +448,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private func boundaryKey(
         _ boundary: EmbeddedRangeBoundary
-    ) -> EmbeddedBytes? {
+    ) -> ByteString? {
         switch boundary {
         case .unbounded:
             return nil
@@ -453,25 +458,32 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func minimumKey(
-        _ left: EmbeddedBytes?,
-        _ right: EmbeddedBytes?
-    ) -> EmbeddedBytes? {
+        _ left: ByteString?,
+        _ right: ByteString?
+    ) -> ByteString? {
         guard let left else { return right }
         guard let right else { return left }
         return EmbeddedByteOrdering.compare(left, right) <= 0 ? left : right
     }
 
     private func maximumKey(
-        _ left: EmbeddedBytes?,
-        _ right: EmbeddedBytes?
-    ) -> EmbeddedBytes? {
+        _ left: ByteString?,
+        _ right: ByteString?
+    ) -> ByteString? {
         guard let left else { return right }
         guard let right else { return left }
         return EmbeddedByteOrdering.compare(left, right) >= 0 ? left : right
     }
 
-    private func keySuccessor(_ key: EmbeddedBytes) -> EmbeddedBytes {
-        key.appending(0x00)
+    private func keySuccessor(_ key: ByteString) -> ByteString {
+        ByteString.copying(count: key.count + 1) { destination in
+            key.withUnsafeBytes { source in
+                UnsafeMutableRawBufferPointer(
+                    rebasing: destination[0..<source.count]
+                ).copyMemory(from: source)
+            }
+            destination[key.count] = 0
+        }
     }
 
     private func statusCode(

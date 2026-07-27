@@ -1,67 +1,12 @@
+import DatabaseTypes
 import StorageKit
-import StorageKitEmbeddedCore
 import Synchronization
 import Testing
 
-@Suite("Storage Bytes Ownership Tests")
+@Suite("Storage Byte View Tests")
 struct BytesOwnershipTests {
-    @Test func exactCopySharesArrayStorageAtArrayOnlyBoundaries() throws {
-        let bytes = Bytes.copying(count: 4) { output in
-            output[0] = 0x10
-            output[1] = 0x20
-            output[2] = 0x30
-            output[3] = 0x40
-        }
-        let array = bytes.contiguousArray()
-
-        let bytesAddress = try #require(bytes.withUnsafeBytes { buffer in
-            buffer.baseAddress.map { UInt(bitPattern: $0) }
-        })
-        let arrayAddress = try #require(array.withUnsafeBytes { buffer in
-            buffer.baseAddress.map { UInt(bitPattern: $0) }
-        })
-
-        #expect(bytesAddress == arrayAddress)
-        #expect(array == [0x10, 0x20, 0x30, 0x40])
-    }
-
-    @Test func externalOwnerIsBorrowedWithoutMaterializing() throws {
-        let owner = ArrayBackedBytesOwner(
-            bytes: [0x10, 0x20, 0x30, 0x40]
-        )
-        let bytes = Bytes(retaining: owner)
-        let slice = bytes[1..<3]
-        let ownerAddress = try #require(
-            Bytes(retaining: owner).withUnsafeBytes { buffer in
-                buffer.baseAddress.map { UInt(bitPattern: $0) }
-            }
-        )
-        let bytesAddress = try #require(bytes.withUnsafeBytes { buffer in
-            buffer.baseAddress.map { UInt(bitPattern: $0) }
-        })
-        let sliceAddress = try #require(slice.withUnsafeBytes { buffer in
-            buffer.baseAddress.map { UInt(bitPattern: $0) }
-        })
-        let contiguousAddress = try #require(
-            bytes.withContiguousStorageIfAvailable { buffer in
-                buffer.baseAddress.map { UInt(bitPattern: $0) }
-            } ?? nil
-        )
-        let contiguousSliceAddress = try #require(
-            slice.withContiguousStorageIfAvailable { buffer in
-                buffer.baseAddress.map { UInt(bitPattern: $0) }
-            } ?? nil
-        )
-
-        #expect(bytesAddress == ownerAddress)
-        #expect(sliceAddress == ownerAddress + 1)
-        #expect(contiguousAddress == ownerAddress)
-        #expect(contiguousSliceAddress == ownerAddress + 1)
-        #expect(slice == [0x20, 0x30])
-    }
-
-    @Test func tupleCursorReturnsCanonicalBytesInsideTheSourceKey() throws {
-        let key = Tuple(Bytes([0x11, 0x22, 0x33, 0x44])).pack()
+    @Test func tupleCursorReturnsPayloadViewInsideSourceKey() throws {
+        let key = Tuple(ByteString([0x11, 0x22, 0x33, 0x44])).pack()
         var cursor = TupleCursor(bytes: key)
         let payload = try cursor.requireBytes()
         let keyRange = try #require(key.withUnsafeBytes { buffer in
@@ -83,11 +28,25 @@ struct BytesOwnershipTests {
         #expect(cursor.isAtEnd)
     }
 
-    @Test func packedTupleRetainsByteViewsIntoTheSourceOwner() throws {
-        let packed = Tuple(Bytes([0x11, 0x22, 0x33, 0x44]), Int64(7)).pack()
+    @Test func tupleCursorDecodesANonzeroIndexSourceView() throws {
+        let packed = Tuple(ByteString([0x11, 0x22, 0x33])).pack()
+        let owner = ByteString([0xFF] + packed.copyBytes() + [0xEE])
+        let view = owner[1..<(owner.endIndex - 1)]
+        var cursor = TupleCursor(bytes: view)
+
+        #expect(try cursor.requireBytes() == [0x11, 0x22, 0x33])
+        #expect(cursor.isAtEnd)
+        #expect(cursor.consumedByteCount == packed.count)
+    }
+
+    @Test func packedTupleRetainsPayloadViewsIntoSourceOwner() throws {
+        let packed = Tuple(
+            ByteString([0x11, 0x22, 0x33, 0x44]),
+            Int64(7)
+        ).pack()
         let tuple = try Tuple(packed: packed)
         let payload = try #require(
-            try tuple.element(at: 0) as? Bytes
+            try tuple.element(at: 0) as? ByteString
         )
         let packedRange = try #require(packed.withUnsafeBytes { buffer in
             buffer.baseAddress.map { address in
@@ -108,25 +67,11 @@ struct BytesOwnershipTests {
         #expect(try tuple.element(at: 1) as? Int64 == 7)
     }
 
-    @Test func viewsFromTheSameOwnerPermitNestedComparisonBorrows() {
-        let owner = NestedBorrowBytesOwner(
-            bytes: [0x10, 0x20, 0x30, 0x40]
-        )
-        let bytes = Bytes(retaining: owner)
-        let lhs = bytes[1..<3]
-        let rhs = bytes[1..<3]
-
-        #expect(lhs == rhs)
-        #expect(owner.maximumActiveBorrowCount == 2)
-    }
-
-    @Test func slicesRetainAllocationWithoutMaterializing() {
-        let releaseRecorder = BytesReleaseRecorder()
-        var bytes: Bytes? = Bytes(
-            makeOwnedEmbeddedBytes(
-                [0x10, 0x20, 0x30, 0x40],
-                releaseRecorder: releaseRecorder
-            )
+    @Test func sourceAllocationLivesUntilItsLastStorageViewReleases() {
+        let releaseRecorder = ByteReleaseRecorder()
+        var bytes: ByteString? = makeOwnedBytes(
+            [0x10, 0x20, 0x30, 0x40],
+            releaseRecorder: releaseRecorder
         )
         var slice = bytes?[1..<3]
 
@@ -138,33 +83,11 @@ struct BytesOwnershipTests {
         #expect(releaseRecorder.releaseCount == 1)
     }
 
-    @Test func mutatingSliceDetachesWithoutChangingSharedStorage() {
-        let releaseRecorder = BytesReleaseRecorder()
-        var parent: Bytes? = Bytes(
-            makeOwnedEmbeddedBytes(
-                [0x10, 0x20, 0x30, 0x40],
-                releaseRecorder: releaseRecorder
-            )
-        )
-        var slice = parent?[1..<3]
-
-        slice?[0] = 0xFF
-        #expect(parent == [0x10, 0x20, 0x30, 0x40])
-        #expect(slice == [0xFF, 0x30])
-        #expect(releaseRecorder.releaseCount == 0)
-
-        parent = nil
-        #expect(releaseRecorder.releaseCount == 1)
-        #expect(slice == [0xFF, 0x30])
-    }
-
-    @Test func detachedFullRangeReleasesItsOriginalAllocation() throws {
-        let releaseRecorder = BytesReleaseRecorder()
-        var frame: Bytes? = Bytes(
-            makeOwnedEmbeddedBytes(
-                [0x10, 0x20, 0x30, 0x40],
-                releaseRecorder: releaseRecorder
-            )
+    @Test func detachedViewReleasesItsOriginalAllocation() throws {
+        let releaseRecorder = ByteReleaseRecorder()
+        var frame: ByteString? = makeOwnedBytes(
+            [0x10, 0x20, 0x30, 0x40],
+            releaseRecorder: releaseRecorder
         )
         var detached = frame?.detached()
         let frameAddress = try #require(
@@ -187,13 +110,11 @@ struct BytesOwnershipTests {
         #expect(releaseRecorder.releaseCount == 1)
     }
 
-    @Test func detachedEmptySliceReleasesItsOriginalAllocation() {
-        let releaseRecorder = BytesReleaseRecorder()
-        var frame: Bytes? = Bytes(
-            makeOwnedEmbeddedBytes(
-                [0x10, 0x20, 0x30, 0x40],
-                releaseRecorder: releaseRecorder
-            )
+    @Test func detachedEmptyViewReleasesItsOriginalAllocation() {
+        let releaseRecorder = ByteReleaseRecorder()
+        var frame: ByteString? = makeOwnedBytes(
+            [0x10, 0x20, 0x30, 0x40],
+            releaseRecorder: releaseRecorder
         )
         var emptySlice = frame?[2..<2]
         let detached = emptySlice?.detached()
@@ -206,12 +127,10 @@ struct BytesOwnershipTests {
     }
 
     @Test func splitPointsDoNotRetainSourcePageStorage() async throws {
-        let releaseRecorder = BytesReleaseRecorder()
-        var frame: Bytes? = Bytes(
-            makeOwnedEmbeddedBytes(
-                [0x10, 0xA1, 0xA2, 0xA3, 0x20, 0xB1, 0xB2, 0xB3],
-                releaseRecorder: releaseRecorder
-            )
+        let releaseRecorder = ByteReleaseRecorder()
+        var frame: ByteString? = makeOwnedBytes(
+            [0x10, 0xA1, 0xA2, 0xA3, 0x20, 0xB1, 0xB2, 0xB3],
+            releaseRecorder: releaseRecorder
         )
         var rows: OwnershipRows? = OwnershipRows(
             rows: [
@@ -232,44 +151,6 @@ struct BytesOwnershipTests {
         rows = nil
         #expect(releaseRecorder.releaseCount == 1)
         #expect(splitPoints == [[0x00], [0x20], [0x30]])
-    }
-
-    @Test func detachingExactOwnedStorageIsIdempotent() throws {
-        let exact = Bytes.copying(count: 4) { output in
-            output.copyBytes(from: [0x10, 0x20, 0x30, 0x40])
-        }
-        let first = exact.detached()
-        let second = first.detached()
-        let exactAddress = try #require(exact.withUnsafeBytes {
-            $0.baseAddress.map { UInt(bitPattern: $0) }
-        })
-        let firstAddress = try #require(first.withUnsafeBytes {
-            $0.baseAddress.map { UInt(bitPattern: $0) }
-        })
-        let secondAddress = try #require(second.withUnsafeBytes {
-            $0.baseAddress.map { UInt(bitPattern: $0) }
-        })
-
-        #expect(exactAddress == firstAddress)
-        #expect(firstAddress == secondAddress)
-    }
-
-    @Test func takingExactArrayOwnershipDoesNotCopyOrRedetach() throws {
-        let array: [UInt8] = [0x10, 0x20, 0x30, 0x40]
-        let arrayAddress = try #require(array.withUnsafeBytes {
-            $0.baseAddress.map { UInt(bitPattern: $0) }
-        })
-        let bytes = Bytes(owningExact: array)
-        let detached = bytes.detached()
-        let bytesAddress = try #require(bytes.withUnsafeBytes {
-            $0.baseAddress.map { UInt(bitPattern: $0) }
-        })
-        let detachedAddress = try #require(detached.withUnsafeBytes {
-            $0.baseAddress.map { UInt(bitPattern: $0) }
-        })
-
-        #expect(arrayAddress == bytesAddress)
-        #expect(bytesAddress == detachedAddress)
     }
 
     @Test func splitPointLimitFailsBeforeReadingRemainingRows() async {
@@ -295,10 +176,29 @@ struct BytesOwnershipTests {
         #expect(nextInvocationCounter.value == 2)
     }
 
-    private func makeOwnedEmbeddedBytes(
+    private func makeOwnedBytes(
         _ bytes: [UInt8],
-        releaseRecorder: BytesReleaseRecorder
-    ) -> EmbeddedBytes {
+        releaseRecorder: ByteReleaseRecorder
+    ) -> ByteString {
+        ByteString(
+            retaining: TestByteAllocation(
+                bytes: bytes,
+                releaseRecorder: releaseRecorder
+            )
+        )
+    }
+}
+
+private final class TestByteAllocation: ByteStringOwner {
+    let count: Int
+
+    private let address: UInt
+    private let releaseRecorder: ByteReleaseRecorder
+
+    init(
+        bytes: [UInt8],
+        releaseRecorder: ByteReleaseRecorder
+    ) {
         let pointer = UnsafeMutableRawPointer.allocate(
             byteCount: bytes.count,
             alignment: MemoryLayout<UInt8>.alignment
@@ -311,34 +211,42 @@ struct BytesOwnershipTests {
                 )
             }
         }
-        let allocation = EmbeddedByteAllocation(
-            unsafeAddress: UInt(bitPattern: pointer),
-            count: bytes.count,
-            deallocator: { address, _ in
-                if let pointer = UnsafeMutableRawPointer(bitPattern: address) {
-                    pointer.deallocate()
-                }
-                releaseRecorder.recordRelease()
-            }
-        )
-        return EmbeddedBytes(allocation: allocation)
+        self.address = UInt(bitPattern: pointer)
+        self.count = bytes.count
+        self.releaseRecorder = releaseRecorder
     }
 
-    private final class BytesReleaseRecorder: Sendable {
-        private let state = Mutex(0)
+    deinit {
+        UnsafeMutableRawPointer(bitPattern: address)?.deallocate()
+        releaseRecorder.recordRelease()
+    }
 
-        var releaseCount: Int {
-            state.withLock { $0 }
-        }
+    func borrowBytes(
+        _ body: (UnsafeRawBufferPointer) throws -> Void
+    ) rethrows {
+        try body(
+            UnsafeRawBufferPointer(
+                start: UnsafeRawPointer(bitPattern: address),
+                count: count
+            )
+        )
+    }
+}
 
-        func recordRelease() {
-            state.withLock { $0 += 1 }
-        }
+private final class ByteReleaseRecorder: Sendable {
+    private let state = Mutex(0)
+
+    var releaseCount: Int {
+        state.withLock { $0 }
+    }
+
+    func recordRelease() {
+        state.withLock { $0 += 1 }
     }
 }
 
 private struct OwnershipRows: TransactionRangeResult {
-    typealias Element = (Bytes, Bytes)
+    typealias Element = (ByteString, ByteString)
 
     let rows: [Element]
 
@@ -365,13 +273,16 @@ private struct OwnershipRows: TransactionRangeResult {
 }
 
 private struct NextCountingRows: TransactionRangeResult {
-    typealias Element = (Bytes, Bytes)
+    typealias Element = (ByteString, ByteString)
 
     let rows: [Element]
     let nextInvocationCounter: IteratorNextCounter
 
     func makeAsyncIterator() -> Iterator {
-        Iterator(rows: rows, nextInvocationCounter: nextInvocationCounter)
+        Iterator(
+            rows: rows,
+            nextInvocationCounter: nextInvocationCounter
+        )
     }
 
     struct Iterator: TransactionRangeIterator {
@@ -403,49 +314,5 @@ private final class IteratorNextCounter: Sendable {
 
     func increment() {
         state.withLock { $0 += 1 }
-    }
-}
-
-private struct ArrayBackedBytesOwner: BytesOwner {
-    let bytes: [UInt8]
-
-    var count: Int {
-        bytes.count
-    }
-
-    func borrowBytes(
-        _ body: (UnsafeRawBufferPointer) throws -> Void
-    ) rethrows {
-        try bytes.withUnsafeBytes(body)
-    }
-}
-
-private final class NestedBorrowBytesOwner: BytesOwner {
-    let bytes: [UInt8]
-    private let state = Mutex((active: 0, maximum: 0))
-
-    init(bytes: [UInt8]) {
-        self.bytes = bytes
-    }
-
-    var count: Int {
-        bytes.count
-    }
-
-    var maximumActiveBorrowCount: Int {
-        state.withLock { $0.maximum }
-    }
-
-    func borrowBytes(
-        _ body: (UnsafeRawBufferPointer) throws -> Void
-    ) rethrows {
-        state.withLock { state in
-            state.active += 1
-            state.maximum = Swift.max(state.maximum, state.active)
-        }
-        defer {
-            state.withLock { $0.active -= 1 }
-        }
-        try bytes.withUnsafeBytes(body)
     }
 }

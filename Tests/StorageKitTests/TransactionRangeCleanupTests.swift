@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Synchronization
 import Testing
@@ -10,7 +11,7 @@ struct TransactionRangeCleanupTests {
             rows: [([0x01], [0x11]), ([0x02], [0x12])],
             iterationRecorder: iterationRecorder
         )
-        var observedKeys: [Bytes] = []
+        var observedKeys: [ByteString] = []
 
         try await rows.consumeRows { key, _ in
             observedKeys.append(key)
@@ -203,7 +204,7 @@ private final class RangeIterationRecorder: Sendable {
 }
 
 private struct FinishRecordingRows: TransactionRangeResult {
-    typealias Element = (Bytes, Bytes)
+    typealias Element = (ByteString, ByteString)
 
     let rows: [Element]
     let iterationRecorder: RangeIterationRecorder
@@ -242,7 +243,7 @@ private final class RangeIterationGate: Sendable {
         var advanceStarted = false
         var startWaiters: [CheckedContinuation<Void, Never>] = []
         var advanceContinuation:
-            CheckedContinuation<(Bytes, Bytes)?, Never>?
+            CheckedContinuation<(ByteString, ByteString)?, Never>?
     }
 
     private let state = Mutex(State())
@@ -259,7 +260,7 @@ private final class RangeIterationGate: Sendable {
         }
     }
 
-    func suspendAdvance() async -> (Bytes, Bytes)? {
+    func suspendAdvance() async -> (ByteString, ByteString)? {
         let waiters = state.withLock { state in
             state.advanceStarted = true
             let waiters = state.startWaiters
@@ -278,7 +279,7 @@ private final class RangeIterationGate: Sendable {
         }
     }
 
-    func resumeAdvance(with row: (Bytes, Bytes)?) {
+    func resumeAdvance(with row: (ByteString, ByteString)?) {
         let continuation = state.withLock { state in
             let continuation = state.advanceContinuation
             state.advanceContinuation = nil
@@ -290,7 +291,7 @@ private final class RangeIterationGate: Sendable {
 }
 
 private struct SuspendedRows: TransactionRangeResult {
-    typealias Element = (Bytes, Bytes)
+    typealias Element = (ByteString, ByteString)
 
     let iterationGate: RangeIterationGate
     let iterationRecorder: RangeIterationRecorder
@@ -328,7 +329,7 @@ private struct SuspendedRows: TransactionRangeResult {
 }
 
 private struct FailingRows: TransactionRangeResult {
-    typealias Element = (Bytes, Bytes)
+    typealias Element = (ByteString, ByteString)
 
     let iterationRecorder: RangeIterationRecorder
 

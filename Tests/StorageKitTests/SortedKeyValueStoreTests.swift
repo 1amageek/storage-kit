@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 @testable import StorageKit
 
@@ -164,7 +165,7 @@ struct SortedKeyValueStoreTests {
     // MARK: - Init from Existing Entries
 
     @Test func initFromEntries_preservesOrder() {
-        let entries: [(key: Bytes, value: Bytes)] = [
+        let entries: [(key: ByteString, value: ByteString)] = [
             (key: [0x01], value: [10]),
             (key: [0x02], value: [20]),
             (key: [0x03], value: [30]),

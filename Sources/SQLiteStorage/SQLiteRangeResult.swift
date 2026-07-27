@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 
 /// Lazy, re-iterable SQLite range sequence.
@@ -5,7 +6,7 @@ import StorageKit
 /// Constructing the sequence and iterator performs no SQLite prepare, step, or
 /// row copy. The first `next()` opens the statement and advances one row.
 public struct SQLiteRangeResult: TransactionRangeResult {
-    public typealias Element = (Bytes, Bytes)
+    public typealias Element = (ByteString, ByteString)
 
     private enum Backing: Sendable {
         case scan(SQLiteStorageTransaction, SQLiteRangeScanPlan)
@@ -51,7 +52,7 @@ public struct SQLiteRangeResult: TransactionRangeResult {
             self.state = SQLiteRangeIteratorState(error: error)
         }
 
-        public mutating func next() async throws -> (Bytes, Bytes)? {
+        public mutating func next() async throws -> (ByteString, ByteString)? {
             try await state.next()
         }
 

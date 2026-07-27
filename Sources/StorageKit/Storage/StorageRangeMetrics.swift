@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Exact range metrics computed from an ordered transaction view.
 public enum StorageRangeMetrics {
     public static let defaultMaximumSplitPointCount = 10_000
@@ -26,12 +27,12 @@ public enum StorageRangeMetrics {
     }
 
     public static func splitPoints<Rows: TransactionRangeResult>(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         chunkSize: Int,
         maximumPointCount: Int,
         rows: Rows
-    ) async throws -> [Bytes] {
+    ) async throws -> [ByteString] {
         guard compareBytes(beginKey, endKey) <= 0 else {
             throw StorageError(
                 code: .invalidOperation,
@@ -57,7 +58,7 @@ public enum StorageRangeMetrics {
 
         // The result outlives each source page. Detach only the selected keys at
         // that lifetime boundary so a tiny split point cannot pin a full page.
-        var splitPoints: [Bytes] = [beginKey.detached()]
+        var splitPoints: [ByteString] = [beginKey.detached()]
         var chunkBytes = 0
         try await rows.consumeRows { key, value in
             let (rowSize, rowOverflow) = key.count.addingReportingOverflow(

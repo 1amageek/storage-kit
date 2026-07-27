@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import StorageKit
@@ -15,27 +16,30 @@ struct FDBStorageEngineTests {
         try await FDBStorageEngine(configuration: .init())
     }
 
-    private func testPrefix() -> Bytes {
-        let uuid = UUID().uuidString.prefix(8)
-        return Bytes("_test_\(uuid)_".utf8)
+    private func testPrefix() -> ByteString {
+        let uuid = Foundation.UUID().uuidString.prefix(8)
+        return ByteString(Array("_test_\(uuid)_".utf8))
     }
 
-    private func prefixedKey(_ prefix: Bytes, _ suffix: [UInt8]) -> Bytes {
-        prefix + suffix
+    private func prefixedKey(_ prefix: ByteString, _ suffix: [UInt8]) -> ByteString {
+        ByteString(prefix.copyBytes() + suffix)
     }
 
-    private func cleanup(engine: FDBStorageEngine, prefix: Bytes) async throws {
+    private func cleanup(engine: FDBStorageEngine, prefix: ByteString) async throws {
         try await engine.withTransaction { tx in
-            try tx.clearRange(beginKey: prefix, endKey: prefix + [0xFF, 0xFF])
+            try tx.clearRange(
+                beginKey: prefix,
+                endKey: prefixedKey(prefix, [0xFF, 0xFF])
+            )
         }
     }
 
     private func collectRange(
         _ tx: some TransactionAccess,
-        begin: Bytes, end: Bytes
-    ) async throws -> [(key: Bytes, value: Bytes)] {
+        begin: ByteString, end: ByteString
+    ) async throws -> [(key: ByteString, value: ByteString)] {
         let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
-        var result: [(key: Bytes, value: Bytes)] = []
+        var result: [(key: ByteString, value: ByteString)] = []
         for try await (key, value) in seq { result.append((key: key, value: value)) }
         return result
     }
@@ -44,7 +48,7 @@ struct FDBStorageEngineTests {
         let engine = try await makeEngine()
         let prefix = testPrefix()
         let key = prefixedKey(prefix, [0x01])
-        let expectedValue = Bytes(repeating: 0xA5, count: 4_096)
+        let expectedValue = ByteString([UInt8](repeating: 0xA5, count: 4_096))
 
         try await engine.withTransaction { transaction in
             try transaction.setValue(expectedValue, for: key)
@@ -224,9 +228,12 @@ struct FDBStorageEngineTests {
 
         try await engine.withTransaction { tx in
             for i: UInt16 in 0..<500 {
-                let key = prefix + withUnsafeBytes(of: i.bigEndian) { Array($0) }
+                let key = prefixedKey(
+                    prefix,
+                    withUnsafeBytes(of: i.bigEndian) { Array($0) }
+                )
                 try tx.setValue(
-                    withUnsafeBytes(of: i) { Bytes($0) },
+                    withUnsafeBytes(of: i) { ByteString(Array($0)) },
                     for: key
                 )
             }
@@ -235,9 +242,9 @@ struct FDBStorageEngineTests {
         try await engine.withTransaction { tx in
             let results = try await tx.collectRange(
                 begin: prefix,
-                end: prefix + [0xFF, 0xFF]
+                end: prefixedKey(prefix, [0xFF, 0xFF])
             )
-            var prevKey: Bytes?
+            var prevKey: ByteString?
             for (key, _) in results {
                 if let prev = prevKey {
                     #expect(prev.lexicographicallyPrecedes(key))
@@ -256,9 +263,12 @@ struct FDBStorageEngineTests {
 
         try await engine.withTransaction { tx in
             for i: UInt16 in 0..<500 {
-                let key = prefix + withUnsafeBytes(of: i.bigEndian) { Array($0) }
+                let key = prefixedKey(
+                    prefix,
+                    withUnsafeBytes(of: i.bigEndian) { Array($0) }
+                )
                 try tx.setValue(
-                    withUnsafeBytes(of: i) { Bytes($0) },
+                    withUnsafeBytes(of: i) { ByteString(Array($0)) },
                     for: key
                 )
             }
@@ -267,10 +277,10 @@ struct FDBStorageEngineTests {
         try await engine.withTransaction { tx in
             let results = try await tx.collectRange(
                 begin: prefix,
-                end: prefix + [0xFF, 0xFF],
+                end: prefixedKey(prefix, [0xFF, 0xFF]),
                 reverse: true
             )
-            var prevKey: Bytes?
+            var prevKey: ByteString?
             for (key, _) in results {
                 if let prev = prevKey {
                     // Descending order
@@ -373,7 +383,7 @@ struct FDBStorageEngineTests {
         try await engine.withTransaction { tx in
             try tx.setValue([20], for: prefixedKey(prefix, [0x02]))
             let range = try await collectRange(
-                tx, begin: prefix, end: prefix + [0xFF]
+                tx, begin: prefix, end: prefixedKey(prefix, [0xFF])
             )
             // New key [0x02] should appear in range scan
             #expect(range.count == 3)
@@ -536,7 +546,7 @@ struct FDBStorageEngineTests {
 
         try await engine.withTransaction { tx in
             let range = try await collectRange(
-                tx, begin: prefix, end: prefix + [0xFF]
+                tx, begin: prefix, end: prefixedKey(prefix, [0xFF])
             )
             let values = range.map { $0.value }
             #expect(values == [[1], [2], [3], [5]])
@@ -552,8 +562,8 @@ struct FDBStorageEngineTests {
     @Test func subspaceRangeIsolation() async throws {
         let engine = try await makeEngine()
         let prefix = testPrefix()
-        let spaceA = Subspace(prefix + Array("alpha".utf8))
-        let spaceB = Subspace(prefix + Array("beta".utf8))
+        let spaceA = Subspace(prefix: prefixedKey(prefix, Array("alpha".utf8)))
+        let spaceB = Subspace(prefix: prefixedKey(prefix, Array("beta".utf8)))
 
         try await engine.withTransaction { tx in
             try tx.setValue([1], for: spaceA.pack(Tuple(Int64(1))))

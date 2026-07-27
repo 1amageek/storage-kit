@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 import Synchronization
@@ -20,14 +21,14 @@ struct KeyValueSequenceTests {
     }
 
     @Test func arrayInit_iteratesAllElements() async throws {
-        let input: [(key: Bytes, value: Bytes)] = [
+        let input: [(key: ByteString, value: ByteString)] = [
             (key: [0x01], value: [10]),
             (key: [0x02], value: [20]),
             (key: [0x03], value: [30]),
         ]
         let seq = KeyValueSequence(input)
 
-        var results: [(key: Bytes, value: Bytes)] = []
+        var results: [(key: ByteString, value: ByteString)] = []
         for try await (key, value) in seq {
             results.append((key: key, value: value))
         }
@@ -39,8 +40,8 @@ struct KeyValueSequenceTests {
     }
 
     @Test func arrayInit_singleElement() async throws {
-        let seq = KeyValueSequence([(key: [0x01] as Bytes, value: [42] as Bytes)])
-        var results: [(Bytes, Bytes)] = []
+        let seq = KeyValueSequence([(key: [0x01] as ByteString, value: [42] as ByteString)])
+        var results: [(ByteString, ByteString)] = []
         for try await pair in seq {
             results.append(pair)
         }
@@ -54,14 +55,14 @@ struct KeyValueSequenceTests {
     // =========================================================================
 
     @Test func streamInit_iteratesAllElements() async throws {
-        let stream = AsyncStream<(key: Bytes, value: Bytes)> { continuation in
+        let stream = AsyncStream<(key: ByteString, value: ByteString)> { continuation in
             continuation.yield((key: [0x01], value: [10]))
             continuation.yield((key: [0x02], value: [20]))
             continuation.finish()
         }
         let seq = KeyValueSequence(stream)
 
-        var results: [(key: Bytes, value: Bytes)] = []
+        var results: [(key: ByteString, value: ByteString)] = []
         for try await (key, value) in seq {
             results.append((key: key, value: value))
         }
@@ -72,7 +73,7 @@ struct KeyValueSequenceTests {
     }
 
     @Test func streamInit_emptyStream() async throws {
-        let stream = AsyncStream<(key: Bytes, value: Bytes)> { continuation in
+        let stream = AsyncStream<(key: ByteString, value: ByteString)> { continuation in
             continuation.finish()
         }
         let seq = KeyValueSequence(stream)
@@ -124,11 +125,11 @@ struct KeyValueSequenceTests {
 
     @Test func rangeResult_normalIteration() async throws {
         let result = KeyValueRangeResult([
-            (key: [0x01] as Bytes, value: [10] as Bytes),
-            (key: [0x02] as Bytes, value: [20] as Bytes),
+            (key: [0x01] as ByteString, value: [10] as ByteString),
+            (key: [0x02] as ByteString, value: [20] as ByteString),
         ])
 
-        var keys: [Bytes] = []
+        var keys: [ByteString] = []
         for try await (key, _) in result {
             keys.append(key)
         }
@@ -150,18 +151,18 @@ struct KeyValueSequenceTests {
         let secondReleaseRecorder = RangeResultReleaseRecorder()
         var result: KeyValueRangeResult? = KeyValueRangeResult([
             (
-                key: Bytes(retaining: RangeResultBytesOwner(
+                key: ByteString(retaining: RangeResultBytesOwner(
                     bytes: [0x01],
                     releaseRecorder: firstReleaseRecorder
                 )),
-                value: [0x11] as Bytes
+                value: [0x11] as ByteString
             ),
             (
-                key: Bytes(retaining: RangeResultBytesOwner(
+                key: ByteString(retaining: RangeResultBytesOwner(
                     bytes: [0x02],
                     releaseRecorder: secondReleaseRecorder
                 )),
-                value: [0x22] as Bytes
+                value: [0x22] as ByteString
             ),
         ])
         var iterator = try #require(result?.makeAsyncIterator())
@@ -186,7 +187,7 @@ struct KeyValueSequenceTests {
     }
 }
 
-private final class RangeResultBytesOwner: BytesOwner {
+private final class RangeResultBytesOwner: ByteStringOwner {
     let bytes: [UInt8]
     let releaseRecorder: RangeResultReleaseRecorder
 

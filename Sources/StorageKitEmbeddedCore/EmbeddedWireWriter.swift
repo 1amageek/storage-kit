@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Bounded little-endian writer for StorageKit Wire messages.
 public struct EmbeddedWireWriter: Sendable {
     public private(set) var bytes: [UInt8]
@@ -29,7 +30,7 @@ public struct EmbeddedWireWriter: Sendable {
 
     public static func encode<Failure: Error>(
         _ encode: (inout EmbeddedWireWriter) throws(Failure) -> Void
-    ) throws(Failure) -> EmbeddedBytes {
+    ) throws(Failure) -> ByteString {
         var measuringWriter = EmbeddedWireWriter(measuring: ())
         try encode(&measuringWriter)
         let byteCount = measuringWriter.writtenByteCount
@@ -39,7 +40,7 @@ public struct EmbeddedWireWriter: Sendable {
             writer.writtenByteCount == byteCount,
             "StorageKit Wire encoding changed between sizing and writing"
         )
-        return EmbeddedBytes(exactBytes: writer.bytes)
+        return ByteString(writer.bytes)
     }
 
     public mutating func writeUInt8(_ value: UInt8) {
@@ -91,11 +92,11 @@ public struct EmbeddedWireWriter: Sendable {
     public mutating func writeBytes(
         _ value: [UInt8]
     ) throws(EmbeddedWireError) {
-        try writeBytes(EmbeddedBytes(value))
+        try writeBytes(ByteString(value))
     }
 
     public mutating func writeBytes(
-        _ value: EmbeddedBytes
+        _ value: ByteString
     ) throws(EmbeddedWireError) {
         try writeCount(value.count)
         if isMeasuring {

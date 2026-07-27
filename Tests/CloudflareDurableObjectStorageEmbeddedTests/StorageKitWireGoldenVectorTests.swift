@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Foundation
 import Testing
 import CloudflareDurableObjectStorageEmbedded
@@ -132,7 +133,7 @@ struct StorageKitWireGoldenVectorTests {
             let request = try CloudflareDurableObjectStorageWireCodec.decodeRequest(bytes)
             #expect(
                 try CloudflareDurableObjectStorageWireCodec.encode(request)
-                    == EmbeddedBytes(bytes)
+                    == ByteString(bytes)
             )
         }
         for hex in [
@@ -145,7 +146,7 @@ struct StorageKitWireGoldenVectorTests {
             let response = try CloudflareDurableObjectStorageWireCodec.decodeResponse(bytes)
             #expect(
                 try CloudflareDurableObjectStorageWireCodec.encode(response)
-                    == EmbeddedBytes(bytes)
+                    == ByteString(bytes)
             )
         }
     }
@@ -218,8 +219,8 @@ struct StorageKitWireGoldenVectorTests {
         hex(try CloudflareDurableObjectStorageWireCodec.encode(response))
     }
 
-    private func hex<Bytes: Collection>(_ bytes: Bytes) -> String
-    where Bytes.Element == UInt8 {
+    private func hex<ByteString: Collection>(_ bytes: ByteString) -> String
+    where ByteString.Element == UInt8 {
         let alphabet = Array("0123456789abcdef".utf8)
         var output: [UInt8] = []
         output.reserveCapacity(bytes.count * 2)

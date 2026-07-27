@@ -1,9 +1,10 @@
+import DatabaseTypes
 /// AsyncSequence representing range scan results.
 ///
 /// Has different internal implementations per backend, but provides a unified AsyncSequence interface.
 /// Includes a convenience initializer for immediate results (e.g. InMemory).
 public struct KeyValueSequence: AsyncSequence, Sendable {
-    public typealias Element = (key: Bytes, value: Bytes)
+    public typealias Element = (key: ByteString, value: ByteString)
 
     private let stream: AsyncStream<Element>
 
@@ -13,7 +14,7 @@ public struct KeyValueSequence: AsyncSequence, Sendable {
     }
 
     /// Create from immediate results (e.g. InMemory, when all results are available at once).
-    public init(_ results: [(key: Bytes, value: Bytes)]) {
+    public init(_ results: [(key: ByteString, value: ByteString)]) {
         self.stream = AsyncStream { continuation in
             for item in results {
                 continuation.yield(item)

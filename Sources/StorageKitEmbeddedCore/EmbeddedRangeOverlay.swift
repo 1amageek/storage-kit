@@ -1,10 +1,11 @@
+import DatabaseTypes
 /// Applies transaction-local writes to committed rows using StorageKit ordering.
 public enum EmbeddedRangeOverlay {
     public static func value(
-        for key: EmbeddedBytes,
-        committed: EmbeddedBytes?,
+        for key: ByteString,
+        committed: ByteString?,
         applying writes: [EmbeddedWriteOperation]
-    ) throws(EmbeddedRangeOverlayError) -> EmbeddedBytes? {
+    ) throws(EmbeddedRangeOverlayError) -> ByteString? {
         var value = committed
         for write in writes {
             switch write {
@@ -81,7 +82,7 @@ public enum EmbeddedRangeOverlay {
         }
 
         rows.sort { EmbeddedByteOrdering.lessThan($0.key, $1.key) }
-        var keys: [EmbeddedBytes] = []
+        var keys: [ByteString] = []
         keys.reserveCapacity(rows.count)
         for row in rows {
             keys.append(row.key)

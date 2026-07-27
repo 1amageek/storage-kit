@@ -1,13 +1,14 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorageHostTransport
 import StorageKitEmbeddedCore
 
 struct ReversingStorageHostDispatcher:
     StorageHostDispatching {
     func dispatch(
-        _ requestBytes: EmbeddedBytes,
+        _ requestBytes: ByteString,
         maximumResponseBytes: Int
-    ) throws -> EmbeddedBytes {
-        EmbeddedBytes(
+    ) throws -> ByteString {
+        ByteString(
             Array(requestBytes.reversed().prefix(maximumResponseBytes))
         )
     }

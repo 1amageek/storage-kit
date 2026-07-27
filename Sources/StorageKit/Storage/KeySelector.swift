@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Key selector for specifying relative key positions in range scans.
 ///
 /// A KeySelector is resolved in two steps:
@@ -12,7 +13,7 @@
 public struct KeySelector: Sendable, Hashable {
 
     /// The reference key.
-    public let key: Bytes
+    public let key: ByteString
 
     /// If true, the reference key itself is included in the initial search.
     public let orEqual: Bool
@@ -20,7 +21,7 @@ public struct KeySelector: Sendable, Hashable {
     /// Offset from the resolved position (positive = forward, negative = backward).
     public let offset: Int
 
-    public init(key: Bytes, orEqual: Bool, offset: Int) {
+    public init(key: ByteString, orEqual: Bool, offset: Int) {
         self.key = key
         self.orEqual = orEqual
         self.offset = offset
@@ -32,7 +33,7 @@ public struct KeySelector: Sendable, Hashable {
     ///
     /// Resolution: find last key `k` where `k < key` (orEqual=false), then move +1 forward.
     /// Result: the first key that is >= `key`.
-    public static func firstGreaterOrEqual(_ key: Bytes) -> KeySelector {
+    public static func firstGreaterOrEqual(_ key: ByteString) -> KeySelector {
         KeySelector(key: key, orEqual: false, offset: 1)
     }
 
@@ -40,7 +41,7 @@ public struct KeySelector: Sendable, Hashable {
     ///
     /// Resolution: find last key `k` where `k <= key` (orEqual=true), then move +1 forward.
     /// Result: the first key that is strictly > `key`.
-    public static func firstGreaterThan(_ key: Bytes) -> KeySelector {
+    public static func firstGreaterThan(_ key: ByteString) -> KeySelector {
         KeySelector(key: key, orEqual: true, offset: 1)
     }
 
@@ -48,7 +49,7 @@ public struct KeySelector: Sendable, Hashable {
     ///
     /// Resolution: find last key `k` where `k <= key` (orEqual=true), offset 0.
     /// Result: `key` itself if it exists, otherwise the last key before it.
-    public static func lastLessOrEqual(_ key: Bytes) -> KeySelector {
+    public static func lastLessOrEqual(_ key: ByteString) -> KeySelector {
         KeySelector(key: key, orEqual: true, offset: 0)
     }
 
@@ -56,12 +57,12 @@ public struct KeySelector: Sendable, Hashable {
     ///
     /// Resolution: find last key `k` where `k < key` (orEqual=false), offset 0.
     /// Result: the last key strictly less than `key`.
-    public static func lastLessThan(_ key: Bytes) -> KeySelector {
+    public static func lastLessThan(_ key: ByteString) -> KeySelector {
         KeySelector(key: key, orEqual: false, offset: 0)
     }
 
     /// Convenience initializer treating raw bytes as firstGreaterOrEqual.
-    public init(_ key: Bytes) {
+    public init(_ key: ByteString) {
         self = .firstGreaterOrEqual(key)
     }
 
@@ -77,7 +78,7 @@ public struct KeySelector: Sendable, Hashable {
     /// - Returns: The resolved index into the sorted array, clamped to [0, keys.count].
     ///   The returned index points to the selected key. A value of keys.count means
     ///   "past the end" (no key selected).
-    public func resolve(in keys: [Bytes]) -> Int {
+    public func resolve(in keys: [ByteString]) -> Int {
         // Step 1: Find the base position.
         // If orEqual: find the last key <= self.key → upper_bound(key) - 1
         // If !orEqual: find the last key < self.key → lower_bound(key) - 1
@@ -103,7 +104,7 @@ public struct KeySelector: Sendable, Hashable {
 // MARK: - Binary search helpers (package-internal for testing)
 
 /// Returns the index of the first key >= target (lower bound).
-package func lowerBound(_ keys: [Bytes], for target: Bytes) -> Int {
+package func lowerBound(_ keys: [ByteString], for target: ByteString) -> Int {
     var lo = 0
     var hi = keys.count
     while lo < hi {
@@ -118,7 +119,7 @@ package func lowerBound(_ keys: [Bytes], for target: Bytes) -> Int {
 }
 
 /// Returns the index of the first key > target (upper bound).
-package func upperBound(_ keys: [Bytes], for target: Bytes) -> Int {
+package func upperBound(_ keys: [ByteString], for target: ByteString) -> Int {
     var lo = 0
     var hi = keys.count
     while lo < hi {

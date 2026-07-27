@@ -1,3 +1,4 @@
+import DatabaseTypes
 import SQLite3
 import StorageKit
 
@@ -104,7 +105,7 @@ final class SQLiteConnection {
     }
 
     /// INSERT OR REPLACE (key, value)
-    func insertOrReplace(key: Bytes, value: Bytes) throws {
+    func insertOrReplace(key: ByteString, value: ByteString) throws {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
@@ -126,7 +127,7 @@ final class SQLiteConnection {
     }
 
     /// SELECT value WHERE key = ?
-    func get(key: Bytes) throws -> Bytes? {
+    func get(key: ByteString) throws -> ByteString? {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
@@ -156,7 +157,7 @@ final class SQLiteConnection {
     }
 
     /// Resolves one key selector without materializing a range value payload.
-    func getKey(plan: SQLiteKeySelectionPlan) throws -> Bytes? {
+    func getKey(plan: SQLiteKeySelectionPlan) throws -> ByteString? {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
@@ -206,7 +207,7 @@ final class SQLiteConnection {
     }
 
     /// DELETE WHERE key = ?
-    func delete(key: Bytes) throws {
+    func delete(key: ByteString) throws {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
@@ -228,7 +229,7 @@ final class SQLiteConnection {
     }
 
     /// DELETE WHERE key >= ? AND key < ?
-    func deleteRange(begin: Bytes, end: Bytes) throws {
+    func deleteRange(begin: ByteString, end: ByteString) throws {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
@@ -276,7 +277,7 @@ final class SQLiteConnection {
 
         var clauses: [String] = []
         clauses.reserveCapacity(2)
-        var bindings: [Bytes] = []
+        var bindings: [ByteString] = []
         bindings.reserveCapacity(2)
         appendRangeBoundary(begin, clauses: &clauses, bindings: &bindings)
         appendRangeBoundary(end, clauses: &clauses, bindings: &bindings)
@@ -362,7 +363,7 @@ final class SQLiteConnection {
     /// reset, or finalize, so one owned copy per column is mandatory here.
     func nextRangeCursor(
         identifier: UInt64
-    ) throws -> (key: Bytes, value: Bytes)? {
+    ) throws -> (key: ByteString, value: ByteString)? {
         guard let cursor = rangeCursors[identifier] else {
             throw StorageError(
                 code: .invalidOperation,
@@ -463,7 +464,7 @@ final class SQLiteConnection {
     private func appendRangeBoundary(
         _ boundary: SQLRangeBoundary,
         clauses: inout [String],
-        bindings: inout [Bytes]
+        bindings: inout [ByteString]
     ) {
         switch boundary {
         case .direct(let operation, let key):
@@ -478,7 +479,7 @@ final class SQLiteConnection {
     }
 
     private func bindTransientBlob(
-        _ value: Bytes,
+        _ value: ByteString,
         statement: OpaquePointer,
         parameterIndex: Int32,
         operation: StorageOperation
@@ -535,7 +536,7 @@ final class SQLiteConnection {
     /// static bindings before any borrow scope ends.
     private func withPreparedStatement<Output>(
         _ sql: String,
-        blobBindings: [Bytes],
+        blobBindings: [ByteString],
         operation: StorageOperation,
         _ body: (OpaquePointer?) throws -> Output
     ) throws -> Output {
@@ -567,7 +568,7 @@ final class SQLiteConnection {
     }
 
     private func withBoundBlobs<Output>(
-        _ bindings: [Bytes],
+        _ bindings: [ByteString],
         at offset: Int,
         statement: OpaquePointer?,
         operation: StorageOperation,
@@ -704,7 +705,7 @@ final class SQLiteConnection {
         _ stmt: OpaquePointer?,
         column: Int32,
         operation: StorageOperation
-    ) throws -> Bytes? {
+    ) throws -> ByteString? {
         let colType = sqlite3_column_type(stmt, column)
         guard colType != SQLITE_NULL else { return nil }
         let blob = sqlite3_column_blob(stmt, column)
@@ -738,7 +739,7 @@ final class SQLiteConnection {
         if operation == .rangeRead {
             rangePayloadCopyCount &+= 1
         }
-        return Bytes.copying(count: count) { destination in
+        return ByteString.copying(count: count) { destination in
             destination.copyMemory(
                 from: UnsafeRawBufferPointer(start: blob, count: count)
             )

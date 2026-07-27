@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 @testable import StorageKit
 @testable import SQLiteStorage
@@ -10,7 +11,7 @@ struct SQLiteKeySelectorTests {
         defer { engine.shutdown() }
         try await engine.withTransaction { transaction in
             try transaction.setValue(
-                Bytes(repeating: 0xA5, count: 1_048_576),
+                ByteString([UInt8](repeating: 0xA5, count: 1_048_576)),
                 for: [0x42]
             )
         }
@@ -37,7 +38,7 @@ struct SQLiteKeySelectorTests {
         let memoryEngine = InMemoryEngine()
         let sqliteTransaction = try sqliteEngine.createTransaction()
         let memoryTransaction = try memoryEngine.createTransaction()
-        let keys: [Bytes] = [
+        let keys: [ByteString] = [
             [],
             [0x00],
             [0x01],
@@ -47,12 +48,12 @@ struct SQLiteKeySelectorTests {
             [0xFF, 0x00],
         ]
         for (index, key) in keys.enumerated() {
-            let value: Bytes = [UInt8(index)]
+            let value: ByteString = [UInt8(index)]
             try sqliteTransaction.setValue(value, for: key)
             try memoryTransaction.setValue(value, for: key)
         }
 
-        let probes: [Bytes] = [
+        let probes: [ByteString] = [
             [],
             [0x00],
             [0x00, 0xFF],

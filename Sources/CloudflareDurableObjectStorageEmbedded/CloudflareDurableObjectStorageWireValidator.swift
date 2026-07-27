@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 enum CloudflareDurableObjectStorageWireValidator {
@@ -132,9 +133,9 @@ enum CloudflareDurableObjectStorageWireValidator {
         }
     }
 
-    static func validateFrameBytes<Bytes: Collection>(
-        _ bytes: Bytes
-    ) throws(CloudflareDurableObjectEmbeddedError) where Bytes.Element == UInt8 {
+    static func validateFrameBytes<ByteString: Collection>(
+        _ bytes: ByteString
+    ) throws(CloudflareDurableObjectEmbeddedError) where ByteString.Element == UInt8 {
         guard bytes.count <= limits.maxFrameBytes else {
             throw .wire(
                 .byteCountExceedsLimit(
@@ -241,7 +242,7 @@ enum CloudflareDurableObjectStorageWireValidator {
         }
 
         mutating func addBytes(
-            _ bytes: EmbeddedBytes,
+            _ bytes: ByteString,
             maximum: Int
         ) throws(CloudflareDurableObjectEmbeddedError) {
             guard bytes.count <= maximum else {
@@ -274,7 +275,7 @@ enum CloudflareDurableObjectStorageWireValidator {
         }
 
         mutating func addOptionalBytes(
-            _ bytes: EmbeddedBytes?,
+            _ bytes: ByteString?,
             maximum: Int
         ) throws(CloudflareDurableObjectEmbeddedError) {
             try add(1)

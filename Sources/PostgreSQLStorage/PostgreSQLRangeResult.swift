@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 
 /// A lazy, re-iterable `AsyncSequence` over a PostgreSQL range scan.
@@ -14,7 +15,7 @@ import StorageKit
 /// nothing.
 public struct PostgreSQLRangeResult: TransactionRangeResult {
 
-    public typealias Element = (Bytes, Bytes)
+    public typealias Element = (ByteString, ByteString)
 
     private enum Backing: Sendable {
         case scan(PostgreSQLStorageTransaction, RangeScanPlan)
@@ -57,11 +58,11 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
         private var pendingFailure: StorageError?
 
         /// Rows fetched in the current batch and the serving cursor into them.
-        private var buffer: [(Bytes, Bytes)] = []
+        private var buffer: [(ByteString, ByteString)] = []
         private var bufferIndex = 0
 
         /// The last key emitted, used as the keyset cursor for the next batch.
-        private var lastKey: Bytes?
+        private var lastKey: ByteString?
 
         /// Total rows emitted so far (enforces `plan.limit`).
         private var emitted = 0
@@ -87,7 +88,7 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
             self.pendingFailure = failure
         }
 
-        public mutating func next() async throws -> (Bytes, Bytes)? {
+        public mutating func next() async throws -> (ByteString, ByteString)? {
             do {
                 return try await nextEntry()
             } catch {
@@ -102,7 +103,7 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
             finishState()
         }
 
-        private mutating func nextEntry() async throws -> (Bytes, Bytes)? {
+        private mutating func nextEntry() async throws -> (ByteString, ByteString)? {
             if done { return nil }
 
             if let failure = pendingFailure {

@@ -1,7 +1,8 @@
+import DatabaseTypes
 import StorageKit
 import Synchronization
 
-final class BorrowCountingBytesOwner: BytesOwner, Sendable {
+final class BorrowCountingBytesOwner: ByteStringOwner, Sendable {
     private let bytes: [UInt8]
     private let countState = Mutex(0)
 

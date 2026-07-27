@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// FoundationDB-compatible atomic mutation type used by the shared embedded core.
 public enum EmbeddedMutationType: UInt8, Sendable, Hashable {
     case add = 1
@@ -27,8 +28,8 @@ extension EmbeddedMutationType {
     /// Apply this mutation to an existing value using FoundationDB atomic
     /// operation semantics.
     public func apply(
-        to existing: EmbeddedBytes?,
-        param: EmbeddedBytes
+        to existing: ByteString?,
+        param: ByteString
     ) throws(EmbeddedMutationError) -> EmbeddedAtomicMutationResult {
         switch self {
         case .add:
@@ -94,16 +95,18 @@ extension EmbeddedMutationType {
     }
 
     private static func adjusted(
-        _ value: EmbeddedBytes,
+        _ value: ByteString,
         to length: Int
-    ) -> EmbeddedBytes {
+    ) -> ByteString {
         if value.count == length {
             return value
         }
         if value.count > length {
-            return value.slice(0..<length)
+            return value[
+                value.startIndex..<(value.startIndex + length)
+            ]
         }
-        return EmbeddedBytes.copying(count: length) { destination in
+        return ByteString.copying(count: length) { destination in
             destination.initializeMemory(as: UInt8.self, repeating: 0)
             value.withUnsafeBytes { source in
                 guard source.count > 0 else {
@@ -115,15 +118,15 @@ extension EmbeddedMutationType {
     }
 
     private static func combine(
-        _ existing: EmbeddedBytes?,
-        param: EmbeddedBytes,
+        _ existing: ByteString?,
+        param: ByteString,
         operation: (
             _ current: UInt8,
             _ parameter: UInt8,
             _ carry: UInt16
         ) -> (value: UInt8, carry: UInt16)
-    ) -> EmbeddedBytes {
-        EmbeddedBytes.copying(count: param.count) { destination in
+    ) -> ByteString {
+        ByteString.copying(count: param.count) { destination in
             param.withUnsafeBytes { parameter in
                 if let existing {
                     existing.withUnsafeBytes { current in
@@ -154,8 +157,8 @@ extension EmbeddedMutationType {
     }
 
     private static func compareLittleEndian(
-        _ lhs: EmbeddedBytes,
-        _ rhs: EmbeddedBytes
+        _ lhs: ByteString,
+        _ rhs: ByteString
     ) -> Int {
         precondition(lhs.count == rhs.count, "Operands must be adjusted to equal length")
         return lhs.withUnsafeBytes { lhsBytes in

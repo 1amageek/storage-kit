@@ -1,6 +1,15 @@
 {
-  "originHash" : "f4f413a1268559dad11adc73a1df6cf75868903f2465ac4611eb1b9da13527a2",
+  "originHash" : "e3c8462e251700c5212dddc1170d43862844fe6af7f78347456413e66c391feb",
   "pins" : [
+    {
+      "identity" : "database-types",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/database-types.git",
+      "state" : {
+        "revision" : "24404451ef6a4c918aa866d5f8925f4274a4d611",
+        "version" : "26.726.0"
+      }
+    },
     {
       "identity" : "fdb-swift-bindings",
       "kind" : "remoteSourceControl",

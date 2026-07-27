@@ -1,8 +1,9 @@
+import DatabaseTypes
 import StorageKit
 
 /// Lazy range result backed by a host range request and local write overlay.
 public struct CloudflareDurableObjectRangeResult: TransactionRangeResult {
-    public typealias Element = (Bytes, Bytes)
+    public typealias Element = (ByteString, ByteString)
 
     private let makeIteratorBody: @Sendable () -> Iterator
 
@@ -23,7 +24,7 @@ public struct CloudflareDurableObjectRangeResult: TransactionRangeResult {
             self.scan = scan
         }
 
-        public mutating func next() async throws -> (Bytes, Bytes)? {
+        public mutating func next() async throws -> (ByteString, ByteString)? {
             try await scan.next()
         }
 

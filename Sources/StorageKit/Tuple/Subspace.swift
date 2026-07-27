@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if canImport(FoundationEssentials)
 import FoundationEssentials
 #else
@@ -19,11 +20,11 @@ import Foundation
 public struct Subspace: Sendable, Hashable, Equatable {
 
     /// The prefix byte array of this subspace.
-    public let prefix: Bytes
+    public let prefix: ByteString
 
     // MARK: - Initializers
 
-    public init(prefix: Bytes = []) {
+    public init(prefix: ByteString = []) {
         self.prefix = prefix
     }
 
@@ -52,14 +53,14 @@ public struct Subspace: Sendable, Hashable, Equatable {
     // MARK: - Pack / Unpack
 
     /// Encode a Tuple with this subspace's prefix prepended.
-    public func pack(_ tuple: Tuple) -> Bytes {
+    public func pack(_ tuple: Tuple) -> ByteString {
         append(tuple)
     }
 
     /// Encode borrowed tuple elements directly into one final key allocation.
     public func pack<Elements: Collection>(
         elements: Elements
-    ) -> Bytes where Elements.Element == any TupleElement {
+    ) -> ByteString where Elements.Element == any TupleElement {
         pack(elements: elements, appending: nil)
     }
 
@@ -68,7 +69,7 @@ public struct Subspace: Sendable, Hashable, Equatable {
     public func pack<Elements: Collection>(
         elements: Elements,
         appending finalElement: (any TupleElement)?
-    ) -> Bytes where Elements.Element == any TupleElement {
+    ) -> ByteString where Elements.Element == any TupleElement {
         var measuringSink = TupleEncodingSink(measuringFrom: 0)
         Tuple.encodePacked(
             elements,
@@ -80,7 +81,7 @@ public struct Subspace: Sendable, Hashable, Equatable {
             tupleByteCount
         )
         precondition(!overflow, "Subspace key byte count overflow")
-        return Bytes.copying(count: byteCount) { buffer in
+        return ByteString.copying(count: byteCount) { buffer in
             prefix.withUnsafeBytes { source in
                 let destination = UnsafeMutableRawBufferPointer(
                     start: buffer.baseAddress,
@@ -108,7 +109,7 @@ public struct Subspace: Sendable, Hashable, Equatable {
     public func pack<Failure: Error>(
         encodedTupleByteCount: Int,
         encode: (inout TupleEncodingSink) throws(Failure) -> Void
-    ) throws(Failure) -> Bytes {
+    ) throws(Failure) -> ByteString {
         precondition(encodedTupleByteCount >= 0)
         let (byteCount, overflow) = prefix.count.addingReportingOverflow(
             encodedTupleByteCount
@@ -131,30 +132,34 @@ public struct Subspace: Sendable, Hashable, Equatable {
             try encode(&sink)
             sink.validateFinalByteCount(byteCount)
         }
-        return try Bytes.copying(count: byteCount, initialize)
+        return try ByteString.copying(count: byteCount, initialize)
     }
 
     /// Strip the prefix and decode a Tuple.
-    public func unpack(_ key: Bytes) throws -> Tuple {
+    public func unpack(_ key: ByteString) throws -> Tuple {
         guard contains(key) else {
             throw TupleError.prefixMismatch
         }
-        let remaining = key[prefix.count..<key.count]
+        let remaining = key[
+            (key.startIndex + prefix.count)..<key.endIndex
+        ]
         return try Tuple(packed: remaining)
     }
 
     /// Opens a single-pass decoder over the key suffix without copying it.
-    public func tupleCursor(for key: Bytes) throws -> TupleCursor {
+    public func tupleCursor(for key: ByteString) throws -> TupleCursor {
         guard contains(key) else {
             throw TupleError.prefixMismatch
         }
-        return TupleCursor(bytes: key[prefix.count..<key.count])
+        return TupleCursor(
+            bytes: key[(key.startIndex + prefix.count)..<key.endIndex]
+        )
     }
 
     // MARK: - Contains
 
     /// Check whether a key is contained within this subspace.
-    public func contains(_ key: Bytes) -> Bool {
+    public func contains(_ key: ByteString) -> Bool {
         guard key.count >= prefix.count else { return false }
         return key.prefix(prefix.count) == prefix[...]
     }
@@ -164,37 +169,37 @@ public struct Subspace: Sendable, Hashable, Equatable {
     /// Returns the full key range of this subspace [prefix + 0x00, strinc(prefix)).
     ///
     /// Does not include the prefix itself. Only keys that have at least 1 byte of additional data after the prefix.
-    public func range() -> (begin: Bytes, end: Bytes) {
-        let begin = prefix + [0x00]
-        let end: Bytes
+    public func range() -> (begin: ByteString, end: ByteString) {
+        let begin = appending(0x00, to: prefix)
+        let end: ByteString
         if prefix.isEmpty {
             end = [0xFF]
         } else {
             do {
                 end = try strinc(prefix)
             } catch TupleError.cannotIncrementKey {
-                end = prefix + [0xFF]
+                end = appending(0xFF, to: prefix)
             } catch {
-                end = prefix + [0xFF]
+                end = appending(0xFF, to: prefix)
             }
         }
         return (begin: begin, end: end)
     }
 
     /// Generate a key range from a Tuple range.
-    public func range(from start: Tuple, to end: Tuple) -> (begin: Bytes, end: Bytes) {
+    public func range(from start: Tuple, to end: Tuple) -> (begin: ByteString, end: ByteString) {
         let beginKey = append(start)
         let endKey = append(end)
         return (begin: beginKey, end: endKey)
     }
 
-    private func append(_ tuple: Tuple) -> Bytes {
+    private func append(_ tuple: Tuple) -> ByteString {
         let tupleByteCount = tuple.packedByteCount
         let (byteCount, overflow) = prefix.count.addingReportingOverflow(
             tupleByteCount
         )
         precondition(!overflow)
-        return Bytes.copying(count: byteCount) { buffer in
+        return ByteString.copying(count: byteCount) { buffer in
             prefix.withUnsafeBytes { source in
                 let destination = UnsafeMutableRawBufferPointer(
                     start: buffer.baseAddress,
@@ -214,8 +219,20 @@ public struct Subspace: Sendable, Hashable, Equatable {
     /// Prefix-based range [prefix, strinc(prefix)).
     ///
     /// Targets all keys including the prefix itself.
-    public func prefixRange() throws -> (begin: Bytes, end: Bytes) {
+    public func prefixRange() throws -> (begin: ByteString, end: ByteString) {
         let end = try strinc(prefix)
         return (begin: prefix, end: end)
+    }
+
+    private func appending(
+        _ byte: UInt8,
+        to bytes: ByteString
+    ) -> ByteString {
+        ByteString.copying(count: bytes.count + 1) { destination in
+            bytes.withUnsafeBytes { source in
+                destination.copyMemory(from: source)
+            }
+            destination[bytes.count] = byte
+        }
     }
 }

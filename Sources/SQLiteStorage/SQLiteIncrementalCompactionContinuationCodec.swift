@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 
 /// Canonical DatabaseStorageCompaction continuation for SQLite incremental vacuum.
@@ -11,14 +12,18 @@ import StorageKit
 enum SQLiteIncrementalCompactionContinuationCodec {
     static let currentVersion: UInt8 = 1
 
-    private static let magic: Bytes = [0x44, 0x42, 0x53, 0x43]
+    private static let magic: ByteString = [0x44, 0x42, 0x53, 0x43]
     private static let sqliteBackend: UInt8 = 1
     private static let incrementalVacuumAlgorithm: UInt8 = 1
     private static let reservedFlags: UInt8 = 0
 
     static var current: DatabaseStorageCompactionContinuation {
         DatabaseStorageCompactionContinuation(
-            bytes: magic + [
+            bytes: [
+                0x44,
+                0x42,
+                0x53,
+                0x43,
                 currentVersion,
                 sqliteBackend,
                 incrementalVacuumAlgorithm,
@@ -31,20 +36,22 @@ enum SQLiteIncrementalCompactionContinuationCodec {
         _ continuation: DatabaseStorageCompactionContinuation
     ) throws(DatabaseStorageCompactionError) {
         let bytes = continuation.bytes
-        guard bytes.count == 8, bytes[0..<4] == magic else {
+        let startIndex = bytes.startIndex
+        guard bytes.count == 8,
+              bytes[startIndex..<(startIndex + 4)] == magic else {
             throw .invalidContinuation
         }
-        guard bytes[4] == currentVersion else {
+        guard bytes[startIndex + 4] == currentVersion else {
             throw .unsupportedContinuationVersion(
-                actual: bytes[4],
+                actual: bytes[startIndex + 4],
                 supported: currentVersion
             )
         }
-        guard bytes[5] == sqliteBackend,
-              bytes[6] == incrementalVacuumAlgorithm else {
+        guard bytes[startIndex + 5] == sqliteBackend,
+              bytes[startIndex + 6] == incrementalVacuumAlgorithm else {
             throw .incompatibleContinuation
         }
-        guard bytes[7] == reservedFlags else {
+        guard bytes[startIndex + 7] == reservedFlags else {
             throw .invalidContinuation
         }
     }

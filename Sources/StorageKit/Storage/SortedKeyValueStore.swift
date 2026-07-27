@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Sorted key-value store backed by a contiguous array.
 ///
 /// Maintains lexicographic order via `compareBytes`. All key-lookup operations
@@ -10,13 +11,13 @@
 /// patterns that were previously duplicated across transaction and engine code.
 package struct SortedKeyValueStore: Sendable {
 
-    private(set) var entries: [(key: Bytes, value: Bytes)]
+    private(set) var entries: [(key: ByteString, value: ByteString)]
 
     init() {
         self.entries = []
     }
 
-    init(_ entries: [(key: Bytes, value: Bytes)]) {
+    init(_ entries: [(key: ByteString, value: ByteString)]) {
         self.entries = entries
     }
 
@@ -26,13 +27,13 @@ package struct SortedKeyValueStore: Sendable {
     // MARK: - Point Operations
 
     /// O(log n) lookup.
-    func get(_ key: Bytes) -> Bytes? {
+    func get(_ key: ByteString) -> ByteString? {
         guard let idx = findIndex(of: key) else { return nil }
         return entries[idx].value
     }
 
     /// O(log n) search + O(n) shift for insert; O(1) for in-place update.
-    mutating func set(_ key: Bytes, _ value: Bytes) {
+    mutating func set(_ key: ByteString, _ value: ByteString) {
         if let idx = findIndex(of: key) {
             entries[idx] = (key: key, value: value)
         } else {
@@ -42,7 +43,7 @@ package struct SortedKeyValueStore: Sendable {
     }
 
     /// O(log n) search + O(n) shift for removal.
-    mutating func delete(_ key: Bytes) {
+    mutating func delete(_ key: ByteString) {
         if let idx = findIndex(of: key) {
             entries.remove(at: idx)
         }
@@ -53,7 +54,7 @@ package struct SortedKeyValueStore: Sendable {
     /// Uses binary search to locate the begin and end boundaries,
     /// then removes the subrange in one operation.
     /// Range is [begin, end) — begin inclusive, end exclusive.
-    mutating func deleteRange(begin: Bytes, end: Bytes) {
+    mutating func deleteRange(begin: ByteString, end: ByteString) {
         let lo = insertionPoint(for: begin)
         let hi = insertionPoint(for: end)
         guard lo < hi else { return }
@@ -63,19 +64,19 @@ package struct SortedKeyValueStore: Sendable {
     // MARK: - Range Access
 
     /// Returns entries in [beginIdx, endIdx) as a slice.
-    func slice(_ range: Range<Int>) -> ArraySlice<(key: Bytes, value: Bytes)> {
+    func slice(_ range: Range<Int>) -> ArraySlice<(key: ByteString, value: ByteString)> {
         entries[range]
     }
 
     /// Extract all keys (for KeySelector resolution).
-    var keys: [Bytes] {
+    var keys: [ByteString] {
         entries.map(\.key)
     }
 
     // MARK: - Binary Search
 
     /// Returns the index of the entry with the given key, or nil.
-    private func findIndex(of key: Bytes) -> Int? {
+    private func findIndex(of key: ByteString) -> Int? {
         var lo = 0
         var hi = entries.count - 1
         while lo <= hi {
@@ -90,7 +91,7 @@ package struct SortedKeyValueStore: Sendable {
 
     /// Returns the index where key should be inserted to maintain sort order.
     /// Equivalent to C++ `std::lower_bound`.
-    private func insertionPoint(for key: Bytes) -> Int {
+    private func insertionPoint(for key: ByteString) -> Int {
         var lo = 0
         var hi = entries.count
         while lo < hi {

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Synchronization
 
 private enum InMemoryConflictCutSide: Sendable {
@@ -9,7 +10,7 @@ private enum InMemoryConflictCutSide: Sendable {
 /// represent point keys and strict KeySelector boundaries without constructing
 /// synthetic `key + 0x00` buffers.
 private struct InMemoryConflictCut: Sendable {
-    let key: Bytes
+    let key: ByteString
     let side: InMemoryConflictCutSide
 
     static func compare(
@@ -39,14 +40,14 @@ private struct InMemoryConflictRegion: Sendable {
         InMemoryConflictRegion(lower: nil, upper: nil)
     }
 
-    static func point(_ key: Bytes) -> InMemoryConflictRegion {
+    static func point(_ key: ByteString) -> InMemoryConflictRegion {
         InMemoryConflictRegion(
             lower: InMemoryConflictCut(key: key, side: .before),
             upper: InMemoryConflictCut(key: key, side: .after)
         )
     }
 
-    static func halfOpen(begin: Bytes, end: Bytes) -> InMemoryConflictRegion? {
+    static func halfOpen(begin: ByteString, end: ByteString) -> InMemoryConflictRegion? {
         let lower = InMemoryConflictCut(key: begin, side: .before)
         let upper = InMemoryConflictCut(key: end, side: .before)
         guard InMemoryConflictCut.compare(lower, upper) < 0 else {
@@ -260,10 +261,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
     private let _state: Mutex<MutableState>
 
     private enum WriteOp: Sendable {
-        case set(key: Bytes, value: Bytes)
-        case clear(key: Bytes)
-        case clearRange(begin: Bytes, end: Bytes)
-        case atomic(key: Bytes, param: Bytes, mutationType: MutationType)
+        case set(key: ByteString, value: ByteString)
+        case clear(key: ByteString)
+        case clearRange(begin: ByteString, end: ByteString)
+        case atomic(key: ByteString, param: ByteString, mutationType: MutationType)
     }
 
     private struct CommitPayload: Sendable {
@@ -295,7 +296,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
 
     // MARK: - Read
 
-    public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
+    public func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString? {
         try _state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .read)
             if !snapshot {
@@ -394,7 +395,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
                 }
 
                 let slice = effective.slice(startIndex..<endIndex)
-                var results: [(key: Bytes, value: Bytes)]
+                var results: [(key: ByteString, value: ByteString)]
 
                 if reverse {
                     results = Array(slice.reversed())
@@ -415,7 +416,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
 
     // MARK: - Write
 
-    public func setValue(_ value: Bytes, for key: Bytes) throws {
+    public func setValue(_ value: ByteString, for key: ByteString) throws {
         try _state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .write)
             try mutationByteMeter.recordSet(
@@ -427,7 +428,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
         }
     }
 
-    public func clear(key: Bytes) throws {
+    public func clear(key: ByteString) throws {
         try _state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .delete)
             try mutationByteMeter.recordClear(key: key)
@@ -436,7 +437,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
         }
     }
 
-    public func clearRange(beginKey: Bytes, endKey: Bytes) throws {
+    public func clearRange(beginKey: ByteString, endKey: ByteString) throws {
         try _state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .deleteRange)
             try mutationByteMeter.recordClearRange(
@@ -456,8 +457,8 @@ public final class InMemoryTransaction: Transaction, Sendable {
     // MARK: - Atomic Operations
 
     public func atomicOp(
-        key: Bytes,
-        param: Bytes,
+        key: ByteString,
+        param: ByteString,
         mutationType: MutationType
     ) throws {
         try _state.withLock { state in
@@ -472,8 +473,8 @@ public final class InMemoryTransaction: Transaction, Sendable {
     }
 
     public func addConflictRange(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         type: ConflictRangeType
     ) throws {
         guard let conflictRegion = InMemoryConflictRegion.halfOpen(

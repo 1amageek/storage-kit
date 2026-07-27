@@ -1,7 +1,8 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 import Synchronization
 
-final class EmbeddedBorrowCountingOwner: EmbeddedByteOwner, Sendable {
+final class EmbeddedBorrowCountingOwner: ByteStringOwner, Sendable {
     private let bytes: [UInt8]
     private let countState = Mutex(0)
 

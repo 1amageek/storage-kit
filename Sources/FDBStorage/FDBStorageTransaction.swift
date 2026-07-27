@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import FoundationDB
 import Synchronization
@@ -191,7 +192,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     }
 
     private static func validateFoundationDBLength(
-        _ bytes: Bytes,
+        _ bytes: ByteString,
         operation: StorageOperation
     ) throws {
         guard Int32(exactly: bytes.count) != nil else {
@@ -206,7 +207,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     // MARK: - Read
 
-    public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
+    public func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString? {
         try beginOperation(.read)
         defer { finishOperation() }
         do {
@@ -215,7 +216,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 snapshot: snapshot
             )
             return value.map {
-                Bytes(retaining: ResultBytesOwner($0))
+                ByteString(retaining: ResultBytesOwner($0))
             }
         } catch is CancellationError {
             throw CancellationError()
@@ -270,7 +271,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     // MARK: - Write
 
-    public func setValue(_ value: Bytes, for key: Bytes) throws {
+    public func setValue(_ value: ByteString, for key: ByteString) throws {
         try Self.validateFoundationDBLength(key, operation: .write)
         try Self.validateFoundationDBLength(value, operation: .write)
         try key.withUnsafeBytes { keyBytes in
@@ -299,7 +300,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
     }
 
-    public func clear(key: Bytes) throws {
+    public func clear(key: ByteString) throws {
         try Self.validateFoundationDBLength(key, operation: .delete)
         try key.withUnsafeBytes { keyBytes in
             let borrowedKey = ScopedByteInput(keyBytes)
@@ -321,7 +322,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
     }
 
-    public func clearRange(beginKey: Bytes, endKey: Bytes) throws {
+    public func clearRange(beginKey: ByteString, endKey: ByteString) throws {
         try Self.validateFoundationDBLength(beginKey, operation: .deleteRange)
         try Self.validateFoundationDBLength(endKey, operation: .deleteRange)
         try beginKey.withUnsafeBytes { beginBytes in
@@ -359,8 +360,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     // MARK: - Atomic Operations
 
     public func atomicOp(
-        key: Bytes,
-        param: Bytes,
+        key: ByteString,
+        param: ByteString,
         mutationType: MutationType
     ) throws {
         try Self.validateFoundationDBLength(key, operation: .write)
@@ -797,7 +798,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
     }
 
-    public func setOption(to value: Bytes?, forOption option: TransactionOption) throws {
+    public func setOption(to value: ByteString?, forOption option: TransactionOption) throws {
         guard let value else {
             return try setOption(forOption: option)
         }
@@ -979,7 +980,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     // MARK: - Conflict Range
 
-    public func addConflictRange(beginKey: Bytes, endKey: Bytes, type: ConflictRangeType) throws {
+    public func addConflictRange(beginKey: ByteString, endKey: ByteString, type: ConflictRangeType) throws {
         try Self.validateFoundationDBLength(beginKey, operation: .write)
         try Self.validateFoundationDBLength(endKey, operation: .write)
         try beginKey.withUnsafeBytes { beginBytes in
@@ -1006,7 +1007,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     // MARK: - Statistics
 
-    public func getEstimatedRangeSizeBytes(beginKey: Bytes, endKey: Bytes) async throws -> Int {
+    public func getEstimatedRangeSizeBytes(beginKey: ByteString, endKey: ByteString) async throws -> Int {
         try beginOperation(.rangeRead)
         defer { finishOperation() }
         let hasPendingMutations = state.withLock { state in
@@ -1054,10 +1055,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     }
 
     public func getRangeSplitPoints(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         chunkSize: Int
-    ) async throws -> [Bytes] {
+    ) async throws -> [ByteString] {
         try beginOperation(.rangeRead)
         defer { finishOperation() }
         return try await StorageRangeMetrics.splitPoints(
@@ -1098,7 +1099,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             do {
                 let versionstamp = try await pendingVersionstamp.value
                 return try TransactionVersionstamp(
-                    bytes: Bytes(
+                    bytes: ByteString(
                         retaining: ResultBytesOwner(versionstamp.bytes)
                     )
                 )

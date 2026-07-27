@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
@@ -8,7 +9,7 @@ public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
     public let reverse: Bool
     public let snapshot: Bool
     public let expectedReadVersion: Int64?
-    public let cursorKey: EmbeddedBytes?
+    public let cursorKey: ByteString?
 
     public init(
         scope: CloudflareDurableObjectEmbeddedScope,
@@ -18,7 +19,7 @@ public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
         reverse: Bool,
         snapshot: Bool,
         expectedReadVersion: Int64? = nil,
-        cursorKey: EmbeddedBytes? = nil
+        cursorKey: ByteString? = nil
     ) {
         self.scope = scope
         self.begin = begin
@@ -38,7 +39,7 @@ public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
         reverse: Bool,
         snapshot: Bool,
         expectedReadVersion: Int64? = nil,
-        cursorKey: EmbeddedBytes? = nil
+        cursorKey: ByteString? = nil
     ) {
         self.init(
             scope: scope,
@@ -86,7 +87,7 @@ public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
     }
 
     static func writeOptionalCursorKey(
-        _ value: EmbeddedBytes?,
+        _ value: ByteString?,
         into writer: inout EmbeddedWireWriter
     ) throws(CloudflareDurableObjectEmbeddedError) {
         if let value {
@@ -103,7 +104,7 @@ public struct CloudflareDurableObjectEmbeddedRangeRequest: Sendable, Hashable {
 
     static func readOptionalCursorKey(
         from reader: inout EmbeddedWireReader
-    ) throws(CloudflareDurableObjectEmbeddedError) -> EmbeddedBytes? {
+    ) throws(CloudflareDurableObjectEmbeddedError) -> ByteString? {
         let hasValue = try CloudflareDurableObjectEmbeddedError.readBool(from: &reader)
         guard hasValue else {
             return nil

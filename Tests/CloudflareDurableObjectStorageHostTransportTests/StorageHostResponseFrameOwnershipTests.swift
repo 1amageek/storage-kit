@@ -1,3 +1,4 @@
+import DatabaseTypes
 @testable import CloudflareDurableObjectStorageHostTransport
 import StorageKitEmbeddedCore
 import Synchronization
@@ -8,7 +9,7 @@ struct StorageHostResponseFrameOwnershipTests {
     @Test func successfulResponseRetainsOneSharedFrame() throws {
         let releaseRecorder = StorageFrameReleaseRecorder()
         let address = makeFrame(payload: [0x10, 0x20, 0x30])
-        var response: EmbeddedBytes? = try adopt(
+        var response: ByteString? = try adopt(
             address: address,
             maximumResponseBytes: 3,
             releaseRecorder: releaseRecorder
@@ -20,7 +21,7 @@ struct StorageHostResponseFrameOwnershipTests {
         )
 
         #expect(payloadAddress == address + 4)
-        #expect(response?.contiguousArray() == [0x10, 0x20, 0x30])
+        #expect(response?.copyBytes() == [0x10, 0x20, 0x30])
         #expect(releaseRecorder.releases == [])
 
         response = nil
@@ -49,7 +50,7 @@ struct StorageHostResponseFrameOwnershipTests {
     @Test func emptyResponseRetainsAndReleasesItsHeaderFrame() throws {
         let releaseRecorder = StorageFrameReleaseRecorder()
         let address = makeFrame(payload: [])
-        var response: EmbeddedBytes? = try adopt(
+        var response: ByteString? = try adopt(
             address: address,
             maximumResponseBytes: 1,
             releaseRecorder: releaseRecorder
@@ -66,7 +67,7 @@ struct StorageHostResponseFrameOwnershipTests {
         address: UInt,
         maximumResponseBytes: Int,
         releaseRecorder: StorageFrameReleaseRecorder
-    ) throws -> EmbeddedBytes {
+    ) throws -> ByteString {
         try StorageHostResponseFrame.adopt(
             unsafeAddress: address,
             maximumResponseBytes: maximumResponseBytes,

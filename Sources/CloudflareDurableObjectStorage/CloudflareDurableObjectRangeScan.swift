@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 
 struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
@@ -14,7 +15,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
 
     private enum ResolvedBoundary: Sendable, Equatable {
         case beforeAll
-        case key(Bytes)
+        case key(ByteString)
         case pastEnd
     }
 
@@ -29,18 +30,18 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     private let userLimit: Int
     private let reverse: Bool
     private var mutations: [CloudflareDurableObjectMutation]
-    private var cursorKey: Bytes?
+    private var cursorKey: ByteString?
     private var stableReadVersion: Int64?
     private var finishedHostPages = false
-    private var hostRows: [(Bytes, Bytes)] = []
+    private var hostRows: [(ByteString, ByteString)] = []
     private var hostIndex = 0
-    private var localRows: [(Bytes, Bytes)] = []
+    private var localRows: [(ByteString, ByteString)] = []
     private var localIndex = 0
-    private var allLocalRows: [(Bytes, Bytes)] = []
+    private var allLocalRows: [(ByteString, ByteString)] = []
     private var viewPrepared = false
     private var hostBegin = CloudflareDurableObjectRangeBoundary.unbounded
     private var hostEnd = CloudflareDurableObjectRangeBoundary.unbounded
-    private var lastEmittedKey: Bytes?
+    private var lastEmittedKey: ByteString?
     private var emittedCount = 0
     private var selectorResolutionSteps = 0
     private var finished = false
@@ -87,7 +88,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         self.mutations = mutations
     }
 
-    mutating func next() async throws -> (Bytes, Bytes)? {
+    mutating func next() async throws -> (ByteString, ByteString)? {
         guard !finished else { return nil }
         do {
             guard let storageAccess else {
@@ -190,11 +191,11 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         userLimit > 0 && emittedCount >= userLimit
     }
 
-    private var currentHostRow: (Bytes, Bytes)? {
+    private var currentHostRow: (ByteString, ByteString)? {
         hostIndex < hostRows.count ? hostRows[hostIndex] : nil
     }
 
-    private var currentLocalRow: (Bytes, Bytes)? {
+    private var currentLocalRow: (ByteString, ByteString)? {
         localIndex < localRows.count ? localRows[localIndex] : nil
     }
 
@@ -205,7 +206,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         reverse ? comparison > 0 : comparison < 0
     }
 
-    private mutating func emit(_ row: (Bytes, Bytes)) throws -> (Bytes, Bytes) {
+    private mutating func emit(_ row: (ByteString, ByteString)) throws -> (ByteString, ByteString) {
         if let lastEmittedKey {
             let comparison = CloudflareDurableObjectByteOrdering.compare(
                 row.0,
@@ -250,7 +251,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private mutating func prepareAllLocalRows() async throws {
-        var keys: [Bytes] = []
+        var keys: [ByteString] = []
         keys.reserveCapacity(mutations.count)
         for operation in mutations {
             switch operation {
@@ -264,7 +265,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
             CloudflareDurableObjectByteOrdering.compare($0, $1) < 0
         }
         removeDuplicateKeys(from: &keys)
-        var rows: [(Bytes, Bytes)] = []
+        var rows: [(ByteString, ByteString)] = []
         rows.reserveCapacity(keys.count)
         for key in keys {
             try Task.checkCancellation()
@@ -276,7 +277,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         allLocalRows = rows
     }
 
-    private func removeDuplicateKeys(from keys: inout [Bytes]) {
+    private func removeDuplicateKeys(from keys: inout [ByteString]) {
         guard keys.count > 1 else { return }
         var uniqueCount = 1
         for index in 1..<keys.count {
@@ -342,7 +343,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private mutating func predecessor(
-        of reference: Bytes,
+        of reference: ByteString,
         inclusive: Bool
     ) async throws -> ResolvedBoundary {
         let committed = try await committedPredecessor(
@@ -354,7 +355,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private mutating func successor(
-        of reference: Bytes,
+        of reference: ByteString,
         inclusive: Bool
     ) async throws -> ResolvedBoundary {
         let committed = try await committedSuccessor(
@@ -372,7 +373,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private func localPredecessor(
-        of reference: Bytes,
+        of reference: ByteString,
         inclusive: Bool
     ) -> ResolvedBoundary? {
         allLocalRows.reversed().first {
@@ -385,7 +386,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private func localSuccessor(
-        of reference: Bytes,
+        of reference: ByteString,
         inclusive: Bool
     ) -> ResolvedBoundary? {
         allLocalRows.first {
@@ -398,7 +399,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private mutating func committedPredecessor(
-        of reference: Bytes,
+        of reference: ByteString,
         inclusive: Bool
     ) async throws -> ResolvedBoundary? {
         var current = reference
@@ -433,7 +434,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private mutating func committedSuccessor(
-        of reference: Bytes,
+        of reference: ByteString,
         inclusive: Bool
     ) async throws -> ResolvedBoundary? {
         var current = reference
@@ -551,7 +552,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private func contains(
-        _ key: Bytes,
+        _ key: ByteString,
         begin: ResolvedBoundary,
         end: ResolvedBoundary
     ) -> Bool {
@@ -612,7 +613,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         )
         try validateHostPageOrder(response.rows)
         try updateCursor(hasMore: response.hasMore, rows: response.rows)
-        var rows: [(Bytes, Bytes)] = []
+        var rows: [(ByteString, ByteString)] = []
         rows.reserveCapacity(response.rows.count)
         for row in response.rows {
             let key = row.key.rawValue
@@ -625,7 +626,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         hostIndex = 0
     }
 
-    private func containsLocalRow(for key: Bytes) -> Bool {
+    private func containsLocalRow(for key: ByteString) -> Bool {
         var lowerBound = 0
         var upperBound = allLocalRows.count
         while lowerBound < upperBound {
@@ -650,7 +651,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         end: CloudflareDurableObjectRangeBoundary,
         limit: Int,
         reverse: Bool,
-        cursorKey: Bytes?
+        cursorKey: ByteString?
     ) async throws -> CloudflareDurableObjectRangeResponse {
         guard let storageAccess else {
             throw invalidRange("Range storage access is unavailable")
@@ -744,7 +745,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         try storageAccess.recordReadVersion(version)
     }
 
-    private mutating func readCommittedValue(for key: Bytes) async throws -> Bytes? {
+    private mutating func readCommittedValue(for key: ByteString) async throws -> ByteString? {
         guard let storageAccess else {
             throw invalidRange("Range storage access is unavailable")
         }
@@ -765,7 +766,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         return response.value?.rawValue
     }
 
-    private func value(for key: Bytes, committed: Bytes?) throws -> Bytes? {
+    private func value(for key: ByteString, committed: ByteString?) throws -> ByteString? {
         var value = committed
         for operation in mutations {
             switch operation {

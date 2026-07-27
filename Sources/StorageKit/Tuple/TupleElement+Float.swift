@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if canImport(FoundationEssentials)
 import FoundationEssentials
 #else
@@ -24,8 +25,8 @@ extension Float: TupleElement {
         sink.writeByte(UInt8(truncatingIfNeeded: encoded))
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Float {
-        guard offset + 4 <= bytes.count else { throw TupleError.unexpectedEndOfData }
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Float {
+        guard offset + 4 <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
         var encoded = UInt32(bytes[offset]) << 24
             | UInt32(bytes[offset + 1]) << 16
             | UInt32(bytes[offset + 2]) << 8
@@ -54,8 +55,8 @@ extension Double: TupleElement {
         }
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Double {
-        guard offset + 8 <= bytes.count else { throw TupleError.unexpectedEndOfData }
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Double {
+        guard offset + 8 <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
         var encoded: UInt64 = 0
         for index in 0..<8 {
             encoded = (encoded << 8) | UInt64(bytes[offset + index])

@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Type codes fully compliant with the FDB Tuple Layer binary encoding specification.
 ///
 /// Reference: https://github.com/apple/foundationdb/blob/main/design/tuple.md
@@ -39,16 +40,26 @@ public enum TupleTypeCode: UInt8, Sendable {
 /// Used for generating end keys in range scans.
 ///
 /// Reference: FoundationDB strinc specification
-public func strinc(_ bytes: Bytes) throws -> Bytes {
-    var result = bytes
-    while result.last == 0xFF {
-        result.removeLast()
+public func strinc(_ bytes: ByteString) throws -> ByteString {
+    var resultCount = bytes.count
+    bytes.withUnsafeBytes { source in
+        while resultCount > 0, source[resultCount - 1] == 0xFF {
+            resultCount -= 1
+        }
     }
-    guard !result.isEmpty else {
+    guard resultCount > 0 else {
         throw TupleError.cannotIncrementKey
     }
-    result[result.count - 1] &+= 1
-    return result
+    return ByteString.copying(count: resultCount) { destination in
+        bytes.withUnsafeBytes { source in
+            destination.copyMemory(
+                from: UnsafeRawBufferPointer(
+                    rebasing: source[0..<resultCount]
+                )
+            )
+        }
+        destination[resultCount - 1] &+= 1
+    }
 }
 
 /// Protocol for encoding/decoding with the Tuple Layer.
@@ -64,16 +75,16 @@ public protocol TupleElement: Sendable, Hashable {
     /// - Parameters:
     ///   - bytes: The encoded byte array.
     ///   - offset: The read start position (the byte after the type code). Updated after decoding.
-    static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Self
+    static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Self
 }
 
 extension TupleElement {
     /// Encode into one exactly-sized owned allocation.
-    public func encodeTuple() -> Bytes {
+    public func encodeTuple() -> ByteString {
         var measuringSink = TupleEncodingSink(measuringFrom: 0)
         encodeTuple(to: &measuringSink)
         let byteCount = measuringSink.byteCount
-        return Bytes.copying(count: byteCount) { buffer in
+        return ByteString.copying(count: byteCount) { buffer in
             var sink = TupleEncodingSink(buffer: buffer)
             encodeTuple(to: &sink)
             sink.validateFinalByteCount(byteCount)

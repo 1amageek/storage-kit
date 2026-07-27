@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -13,7 +14,7 @@ final class CloudflareDurableObjectHTTPResponseCollector:
         var body = CloudflareDurableObjectHTTPResponseBody()
         var response: URLResponse?
         var continuation:
-            CheckedContinuation<(EmbeddedBytes, URLResponse), any Error>?
+            CheckedContinuation<(ByteString, URLResponse), any Error>?
         var session: URLSession?
         var task: URLSessionDataTask?
         var cancellationRequested = false
@@ -34,7 +35,7 @@ final class CloudflareDurableObjectHTTPResponseCollector:
 
     func data(
         for request: URLRequest
-    ) async throws -> (EmbeddedBytes, URLResponse) {
+    ) async throws -> (ByteString, URLResponse) {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let session = URLSession(
@@ -136,7 +137,7 @@ final class CloudflareDurableObjectHTTPResponseCollector:
             finish(.failure(error), cancelSession: false)
             return
         }
-        let result: Result<(EmbeddedBytes, URLResponse), any Error> =
+        let result: Result<(ByteString, URLResponse), any Error> =
             state.withLock { state in
                 guard let response = state.response else {
                     return .failure(
@@ -161,11 +162,11 @@ final class CloudflareDurableObjectHTTPResponseCollector:
     }
 
     private func finish(
-        _ result: Result<(EmbeddedBytes, URLResponse), any Error>,
+        _ result: Result<(ByteString, URLResponse), any Error>,
         cancelSession: Bool
     ) {
         let completion = state.withLock { state -> (
-            CheckedContinuation<(EmbeddedBytes, URLResponse), any Error>?,
+            CheckedContinuation<(ByteString, URLResponse), any Error>?,
             URLSession?
         ) in
             guard !state.completed, let continuation = state.continuation else {

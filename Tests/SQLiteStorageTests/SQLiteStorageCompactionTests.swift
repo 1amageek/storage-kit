@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Foundation
 import Testing
 @testable import SQLiteStorage
@@ -167,7 +168,7 @@ struct SQLiteStorageCompactionTests {
         try await populateAndDeleteRecords(engine: engine, count: 2_000, valueSize: 4_096)
         let before = try databasePageMetrics(path: path)
         #expect(before.freelistCount > 0)
-        let markerKey: Bytes = [0xFD, 0x72, 0x6F, 0x6C, 0x6C, 0x62, 0x61, 0x63, 0x6B]
+        let markerKey: ByteString = [0xFD, 0x72, 0x6F, 0x6C, 0x6C, 0x62, 0x61, 0x63, 0x6B]
 
         do {
             try await engine.withTransaction { transaction in
@@ -263,9 +264,11 @@ struct SQLiteStorageCompactionTests {
         try await engine.withTransaction { transaction in
             for value in 0..<count {
                 try transaction.setValue(
-                    Bytes(
-                        repeating: UInt8(truncatingIfNeeded: value),
-                        count: valueSize
+                    ByteString(
+                        [UInt8](
+                            repeating: UInt8(truncatingIfNeeded: value),
+                            count: valueSize
+                        )
                     ),
                     for: key(value)
                 )
@@ -310,7 +313,7 @@ struct SQLiteStorageCompactionTests {
         )
     }
 
-    private func key(_ value: Int) -> Bytes {
+    private func key(_ value: Int) -> ByteString {
         [
             UInt8(truncatingIfNeeded: value >> 24),
             UInt8(truncatingIfNeeded: value >> 16),

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import PostgreSQLStorage
@@ -35,40 +36,40 @@ struct DatabaseFrameworkTransactionContractTests {
     }
 
     /// Build a key with subspace prefix, type name, and id.
-    private func itemKey(type: String, id: String) -> Bytes {
-        var key: Bytes = [SubspacePrefix.items]
+    private func itemKey(type: String, id: String) -> ByteString {
+        var key: [UInt8] = [SubspacePrefix.items]
         key.append(contentsOf: Array(type.utf8))
         key.append(0x00) // separator
         key.append(contentsOf: Array(id.utf8))
-        return key
+        return ByteString(key)
     }
 
     /// Build an index key: [prefix][indexName][0x00][value][0x00][id]
-    private func indexKey(name: String, value: String, id: String) -> Bytes {
-        var key: Bytes = [SubspacePrefix.indexes]
+    private func indexKey(name: String, value: String, id: String) -> ByteString {
+        var key: [UInt8] = [SubspacePrefix.indexes]
         key.append(contentsOf: Array(name.utf8))
         key.append(0x00)
         key.append(contentsOf: Array(value.utf8))
         key.append(0x00)
         key.append(contentsOf: Array(id.utf8))
-        return key
+        return ByteString(key)
     }
 
     /// Build subspace range: [prefix][name][0x00] to [prefix][name][0x01]
-    private func subspaceRange(prefix: UInt8, name: String) -> (begin: Bytes, end: Bytes) {
-        var begin: Bytes = [prefix]
+    private func subspaceRange(prefix: UInt8, name: String) -> (begin: ByteString, end: ByteString) {
+        var begin: [UInt8] = [prefix]
         begin.append(contentsOf: Array(name.utf8))
         begin.append(0x00)
-        var end: Bytes = [prefix]
+        var end: [UInt8] = [prefix]
         end.append(contentsOf: Array(name.utf8))
         end.append(0x01)
-        return (begin, end)
+        return (ByteString(begin), ByteString(end))
     }
 
     /// Simulates ItemEnvelope serialization (magic header + protobuf payload).
-    private func serializeItem(name: String, email: String) -> Bytes {
+    private func serializeItem(name: String, email: String) -> ByteString {
         // ItemEnvelope magic: ITEM (0x49 0x54 0x45 0x4D)
-        var data: Bytes = [0x49, 0x54, 0x45, 0x4D]
+        var data: [UInt8] = [0x49, 0x54, 0x45, 0x4D]
         // Simplified payload: length-prefixed strings
         let nameBytes = Array(name.utf8)
         let emailBytes = Array(email.utf8)
@@ -76,27 +77,41 @@ struct DatabaseFrameworkTransactionContractTests {
         data.append(contentsOf: nameBytes)
         data.append(UInt8(emailBytes.count))
         data.append(contentsOf: emailBytes)
-        return data
+        return ByteString(data)
     }
 
     /// Deserialize simulated ItemEnvelope.
-    private func deserializeItem(_ data: Bytes) -> (name: String, email: String)? {
+    private func deserializeItem(_ data: ByteString) -> (name: String, email: String)? {
+        let start = data.startIndex
         guard data.count >= 4,
-              data[0] == 0x49, data[1] == 0x54, data[2] == 0x45, data[3] == 0x4D else {
+              data[start] == 0x49,
+              data[start + 1] == 0x54,
+              data[start + 2] == 0x45,
+              data[start + 3] == 0x4D else {
             return nil
         }
-        var offset = 4
-        guard offset < data.count else { return nil }
+        var offset = start + 4
+        guard offset < data.endIndex else { return nil }
         let nameLen = Int(data[offset])
         offset += 1
-        guard offset + nameLen <= data.count else { return nil }
-        let name = String(bytes: data[offset..<offset+nameLen], encoding: .utf8) ?? ""
+        guard offset + nameLen <= data.endIndex,
+              let name = String(
+                bytes: data[offset..<offset + nameLen],
+                encoding: .utf8
+              ) else {
+            return nil
+        }
         offset += nameLen
-        guard offset < data.count else { return nil }
+        guard offset < data.endIndex else { return nil }
         let emailLen = Int(data[offset])
         offset += 1
-        guard offset + emailLen <= data.count else { return nil }
-        let email = String(bytes: data[offset..<offset+emailLen], encoding: .utf8) ?? ""
+        guard offset + emailLen <= data.endIndex,
+              let email = String(
+                bytes: data[offset..<offset + emailLen],
+                encoding: .utf8
+              ) else {
+            return nil
+        }
         return (name, email)
     }
 
@@ -381,7 +396,7 @@ struct DatabaseFrameworkTransactionContractTests {
         try await ActiveTransactionScope.$current.withValue(tx1) {
             for i in 0..<20 {
                 let key = itemKey(type: "Event", id: String(format: "evt-%03d", i))
-                try tx1.setValue(Bytes("event-\(i)".utf8), for: key)
+                try tx1.setValue(ByteString(Array("event-\(i)".utf8)), for: key)
             }
             try await tx1.commit()
         }
@@ -423,13 +438,13 @@ struct DatabaseFrameworkTransactionContractTests {
             // Type A: 5 items
             for i in 0..<5 {
                 let key = itemKey(type: "TypeA", id: "a-\(i)")
-                try tx1.setValue(Bytes("value-a-\(i)".utf8), for: key)
+                try tx1.setValue(ByteString(Array("value-a-\(i)".utf8)), for: key)
                 try tx1.setValue([], for: indexKey(name: "typeA_idx", value: "v\(i)", id: "a-\(i)"))
             }
             // Type B: 3 items
             for i in 0..<3 {
                 let key = itemKey(type: "TypeB", id: "b-\(i)")
-                try tx1.setValue(Bytes("value-b-\(i)".utf8), for: key)
+                try tx1.setValue(ByteString(Array("value-b-\(i)".utf8)), for: key)
             }
             try await tx1.commit()
         }
@@ -478,18 +493,26 @@ struct DatabaseFrameworkTransactionContractTests {
         let tx1 = try engine.createTransaction()
         try tx1.setValue(serializeItem(name: "ToDelete", email: "del@test.com"), for: key)
         // Simulate blob chunks
-        let blobKey1: Bytes = [SubspacePrefix.blobs] + key + [0x00, 0x00]
-        let blobKey2: Bytes = [SubspacePrefix.blobs] + key + [0x00, 0x01]
-        try tx1.setValue(Bytes(repeating: 0xAA, count: 100), for: blobKey1)
-        try tx1.setValue(Bytes(repeating: 0xBB, count: 100), for: blobKey2)
+        let blobKey1 = ByteString(
+            [SubspacePrefix.blobs] + key.copyBytes() + [0x00, 0x00]
+        )
+        let blobKey2 = ByteString(
+            [SubspacePrefix.blobs] + key.copyBytes() + [0x00, 0x01]
+        )
+        try tx1.setValue(ByteString([UInt8](repeating: 0xAA, count: 100)), for: blobKey1)
+        try tx1.setValue(ByteString([UInt8](repeating: 0xBB, count: 100)), for: blobKey2)
         try await tx1.commit()
 
         // Delete: clear blobs range + clear item
         let tx2 = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(tx2) {
             // Clear blob range
-            let blobRangeBegin: Bytes = [SubspacePrefix.blobs] + key + [0x00]
-            let blobRangeEnd: Bytes = [SubspacePrefix.blobs] + key + [0x01]
+            let blobRangeBegin = ByteString(
+                [SubspacePrefix.blobs] + key.copyBytes() + [0x00]
+            )
+            let blobRangeEnd = ByteString(
+                [SubspacePrefix.blobs] + key.copyBytes() + [0x01]
+            )
             try tx2.clearRange(beginKey: blobRangeBegin, endKey: blobRangeEnd)
             // Clear item
             try tx2.clear(key: key)
@@ -525,12 +548,12 @@ struct DatabaseFrameworkTransactionContractTests {
         // Outer transaction (like TransactionRunner)
         let outerTx = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(outerTx) {
-            try outerTx.setValue(Bytes("outer-data".utf8), for: outerKey)
+            try outerTx.setValue(ByteString(Array("outer-data".utf8)), for: outerKey)
 
             // Inner transaction (like DatabaseDataStore calling createTransaction inside operation)
             let innerTx = try engine.createTransaction()
             // Should be nested — reuses the outer transaction lifecycle.
-            try innerTx.setValue(Bytes("inner-data".utf8), for: innerKey)
+            try innerTx.setValue(ByteString(Array("inner-data".utf8)), for: innerKey)
             try await innerTx.commit() // Merges into the parent buffer.
 
             try await outerTx.commit() // Actual COMMIT
@@ -558,10 +581,10 @@ struct DatabaseFrameworkTransactionContractTests {
 
         let outerTx = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(outerTx) {
-            try outerTx.setValue(Bytes("outer-kept".utf8), for: outerKey)
+            try outerTx.setValue(ByteString(Array("outer-kept".utf8)), for: outerKey)
 
             let innerTx = try engine.createTransaction()
-            try innerTx.setValue(Bytes("inner-discarded".utf8), for: innerKey)
+            try innerTx.setValue(ByteString(Array("inner-discarded".utf8)), for: innerKey)
             try await innerTx.cancel() // Discard inner writes only
 
             try await outerTx.commit()
@@ -581,7 +604,7 @@ struct DatabaseFrameworkTransactionContractTests {
         defer { engine.shutdown() }
 
         let key = itemKey(type: "NestedVisibility", id: "parent-buffer")
-        let value = Bytes("parent-buffered".utf8)
+        let value = ByteString(Array("parent-buffered".utf8))
 
         let parentTx = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(parentTx) {
@@ -607,7 +630,7 @@ struct DatabaseFrameworkTransactionContractTests {
             // Force the lazy parent to acquire a connection before either write.
             _ = try await parentTx.getValue(for: itemKey(type: "NestedOrdering", id: "missing"))
 
-            try parentTx.setValue(Bytes("parent-write".utf8), for: key)
+            try parentTx.setValue(ByteString(Array("parent-write".utf8)), for: key)
 
             let childTx = try engine.createTransaction()
             try childTx.clear(key: key)
@@ -629,7 +652,7 @@ struct DatabaseFrameworkTransactionContractTests {
         let parentTx = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(parentTx) {
             let childTx = try engine.createTransaction()
-            try childTx.setValue(Bytes("child-write".utf8), for: itemKey(type: "NestedRange", id: "child"))
+            try childTx.setValue(ByteString(Array("child-write".utf8)), for: itemKey(type: "NestedRange", id: "child"))
 
             let range = childTx.getRange(begin: [0x00], end: [0xFF])
             do {
@@ -674,7 +697,7 @@ struct DatabaseFrameworkTransactionContractTests {
             let tx = try engine.createTransaction()
             do {
                 try await ActiveTransactionScope.$current.withValue(tx) {
-                    try tx.setValue(Bytes("attempt-\(attempt)".utf8), for: key)
+                    try tx.setValue(ByteString(Array("attempt-\(attempt)".utf8)), for: key)
 
                     if attempt < 2 {
                         // Simulate retryable failure
@@ -769,22 +792,22 @@ struct DatabaseFrameworkTransactionContractTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let counterKey: Bytes = [SubspacePrefix.indexes, 0x10, 0x01] // Aggregation counter key
+        let counterKey: ByteString = [SubspacePrefix.indexes, 0x10, 0x01] // Aggregation counter key
 
         // Initialize counter to 0
         let tx1 = try engine.createTransaction()
-        var buf = Bytes(repeating: 0, count: 8)
+        var buf = ByteString([UInt8](repeating: 0, count: 8))
         withUnsafeBytes(of: Int64(0).littleEndian) { ptr in
-            buf = Bytes(ptr)
+            buf = ByteString(Array(ptr))
         }
         try tx1.setValue(buf, for: counterKey)
         try await tx1.commit()
 
         // Increment by 5 using atomicOp(.add)
         let tx2 = try engine.createTransaction()
-        var addend = Bytes(repeating: 0, count: 8)
+        var addend = ByteString([UInt8](repeating: 0, count: 8))
         withUnsafeBytes(of: Int64(5).littleEndian) { ptr in
-            addend = Bytes(ptr)
+            addend = ByteString(Array(ptr))
         }
         try tx2.atomicOp(key: counterKey, param: addend, mutationType: .add)
         try await tx2.commit()
@@ -792,7 +815,7 @@ struct DatabaseFrameworkTransactionContractTests {
         // Increment by 3 more
         let tx3 = try engine.createTransaction()
         withUnsafeBytes(of: Int64(3).littleEndian) { ptr in
-            addend = Bytes(ptr)
+            addend = ByteString(Array(ptr))
         }
         try tx3.atomicOp(key: counterKey, param: addend, mutationType: .add)
         try await tx3.commit()
@@ -904,7 +927,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Pre-populate
         let setup = try engine.createTransaction()
-        try setup.setValue(Bytes("data".utf8), for: itemKey(type: "LazyTest", id: "lt-1"))
+        try setup.setValue(ByteString(Array("data".utf8)), for: itemKey(type: "LazyTest", id: "lt-1"))
         try await setup.commit()
 
         // Read-only transaction that touches DB via getValue
@@ -940,11 +963,11 @@ struct DatabaseFrameworkTransactionContractTests {
         try await ActiveTransactionScope.$current.withValue(tx) {
             // Write User items
             for i in 0..<3 {
-                try tx.setValue(Bytes("user-\(i)".utf8), for: itemKey(type: "User", id: "u-\(i)"))
+                try tx.setValue(ByteString(Array("user-\(i)".utf8)), for: itemKey(type: "User", id: "u-\(i)"))
             }
             // Write Order items
             for i in 0..<5 {
-                try tx.setValue(Bytes("order-\(i)".utf8), for: itemKey(type: "Order", id: "o-\(i)"))
+                try tx.setValue(ByteString(Array("order-\(i)".utf8)), for: itemKey(type: "Order", id: "o-\(i)"))
             }
             try await tx.commit()
         }
@@ -988,7 +1011,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Pre-populate data
         let setup = try engine.createTransaction()
-        try setup.setValue(Bytes("lazy-nested-data".utf8), for: key)
+        try setup.setValue(ByteString(Array("lazy-nested-data".utf8)), for: key)
         try await setup.commit()
 
         // Create lazy parent (no async ops yet — no connection acquired)
@@ -1022,7 +1045,7 @@ struct DatabaseFrameworkTransactionContractTests {
         let parentTx = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(parentTx) {
             let nestedTx = try engine.createTransaction()
-            try nestedTx.setValue(Bytes("transferred-write".utf8), for: key)
+            try nestedTx.setValue(ByteString(Array("transferred-write".utf8)), for: key)
             try await nestedTx.commit() // transfers to parent buffer
 
             try await parentTx.commit() // acquires connection, flushes, commits
@@ -1047,7 +1070,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Pre-populate
         let setup = try engine.createTransaction()
-        try setup.setValue(Bytes("existing-data".utf8), for: readKey)
+        try setup.setValue(ByteString(Array("existing-data".utf8)), for: readKey)
         try await setup.commit()
 
         let parentTx = try engine.createTransaction()
@@ -1059,7 +1082,7 @@ struct DatabaseFrameworkTransactionContractTests {
             #expect(result != nil)
 
             // Write (buffered in nested)
-            try nestedTx.setValue(Bytes("new-data".utf8), for: writeKey)
+            try nestedTx.setValue(ByteString(Array("new-data".utf8)), for: writeKey)
 
             try await nestedTx.commit() // transfers to parent buffer
             try await parentTx.commit()
@@ -1083,12 +1106,12 @@ struct DatabaseFrameworkTransactionContractTests {
         defer { engine.shutdown() }
 
         let tx = try engine.createTransaction()
-        try tx.setValue(Bytes("data".utf8), for: [0xF0, 0x01])
+        try tx.setValue(ByteString(Array("data".utf8)), for: [0xF0, 0x01])
         try await tx.cancel()
 
         // Verify: buffer was discarded, engine still functional
         try await engine.withTransaction { tx in
-            try tx.setValue(Bytes("after-cancel".utf8), for: [0xF0, 0x02])
+            try tx.setValue(ByteString(Array("after-cancel".utf8)), for: [0xF0, 0x02])
         }
 
         let verifyTx = try engine.createTransaction()
@@ -1108,7 +1131,7 @@ struct DatabaseFrameworkTransactionContractTests {
         let tx = try engine.createTransaction()
         // Force connection acquisition via read
         _ = try await tx.getValue(for: key)
-        try tx.setValue(Bytes("should-be-rolled-back".utf8), for: key)
+        try tx.setValue(ByteString(Array("should-be-rolled-back".utf8)), for: key)
         try await tx.cancel()
 
         // Allow cancel's Task to complete
@@ -1132,7 +1155,7 @@ struct DatabaseFrameworkTransactionContractTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let counterKey: Bytes = [SubspacePrefix.schema, 0xF0, 0x01]
+        let counterKey: ByteString = [SubspacePrefix.schema, 0xF0, 0x01]
 
         let tx = try engine.createTransaction()
         try tx.atomicOp(key: counterKey, param: [0x01, 0x02, 0x03], mutationType: .add)
@@ -1159,7 +1182,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         do {
             try await engine.withTransaction { tx in
-                try tx.setValue(Bytes("should-not-persist".utf8), for: key)
+                try tx.setValue(ByteString(Array("should-not-persist".utf8)), for: key)
                 throw StorageError.invalidOperation("simulated error")
             }
         } catch {

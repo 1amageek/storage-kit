@@ -1,24 +1,25 @@
+import DatabaseTypes
 /// Bounded little-endian reader for StorageKit Wire messages.
 public struct EmbeddedWireReader: Sendable {
-    private let bytes: EmbeddedBytes
+    private let bytes: ByteString
     private var offset: Int
 
     public init(_ bytes: [UInt8]) {
-        self.bytes = EmbeddedBytes(bytes)
+        self.bytes = ByteString(bytes)
         self.offset = 0
     }
 
-    public init(_ bytes: EmbeddedBytes) {
+    public init(_ bytes: ByteString) {
         self.bytes = bytes
-        self.offset = 0
+        self.offset = bytes.startIndex
     }
 
     public var remainingCount: Int {
-        bytes.count - offset
+        bytes.endIndex - offset
     }
 
     public mutating func readUInt8() throws(EmbeddedWireError) -> UInt8 {
-        guard offset < bytes.count else {
+        guard offset < bytes.endIndex else {
             throw EmbeddedWireError.truncated
         }
         let value = bytes[offset]
@@ -39,14 +40,15 @@ public struct EmbeddedWireReader: Sendable {
     }
 
     public mutating func readUInt32() throws(EmbeddedWireError) -> UInt32 {
-        guard bytes.count - offset >= 4 else {
+        guard bytes.endIndex - offset >= 4 else {
             throw EmbeddedWireError.truncated
         }
         let value = bytes.withUnsafeBytes { storage in
-            UInt32(storage[offset])
-                | (UInt32(storage[offset + 1]) << 8)
-                | (UInt32(storage[offset + 2]) << 16)
-                | (UInt32(storage[offset + 3]) << 24)
+            let relativeOffset = offset - bytes.startIndex
+            return UInt32(storage[relativeOffset])
+                | (UInt32(storage[relativeOffset + 1]) << 8)
+                | (UInt32(storage[relativeOffset + 2]) << 16)
+                | (UInt32(storage[relativeOffset + 3]) << 24)
         }
         offset += 4
         return value
@@ -57,18 +59,19 @@ public struct EmbeddedWireReader: Sendable {
     }
 
     public mutating func readUInt64() throws(EmbeddedWireError) -> UInt64 {
-        guard bytes.count - offset >= 8 else {
+        guard bytes.endIndex - offset >= 8 else {
             throw EmbeddedWireError.truncated
         }
         let value = bytes.withUnsafeBytes { storage in
-            UInt64(storage[offset])
-                | (UInt64(storage[offset + 1]) << 8)
-                | (UInt64(storage[offset + 2]) << 16)
-                | (UInt64(storage[offset + 3]) << 24)
-                | (UInt64(storage[offset + 4]) << 32)
-                | (UInt64(storage[offset + 5]) << 40)
-                | (UInt64(storage[offset + 6]) << 48)
-                | (UInt64(storage[offset + 7]) << 56)
+            let relativeOffset = offset - bytes.startIndex
+            return UInt64(storage[relativeOffset])
+                | (UInt64(storage[relativeOffset + 1]) << 8)
+                | (UInt64(storage[relativeOffset + 2]) << 16)
+                | (UInt64(storage[relativeOffset + 3]) << 24)
+                | (UInt64(storage[relativeOffset + 4]) << 32)
+                | (UInt64(storage[relativeOffset + 5]) << 40)
+                | (UInt64(storage[relativeOffset + 6]) << 48)
+                | (UInt64(storage[relativeOffset + 7]) << 56)
         }
         offset += 8
         return value
@@ -78,13 +81,13 @@ public struct EmbeddedWireReader: Sendable {
         Int64(bitPattern: try readUInt64())
     }
 
-    public mutating func readByteRegion() throws(EmbeddedWireError) -> EmbeddedBytes {
+    public mutating func readByteRegion() throws(EmbeddedWireError) -> ByteString {
         try readByteRegion(maximum: Int.max)
     }
 
     public mutating func readByteRegion(
         maximum: Int
-    ) throws(EmbeddedWireError) -> EmbeddedBytes {
+    ) throws(EmbeddedWireError) -> ByteString {
         let intCount = try readCount()
         guard intCount <= maximum else {
             throw EmbeddedWireError.byteCountExceedsLimit(
@@ -95,7 +98,7 @@ public struct EmbeddedWireReader: Sendable {
         guard intCount <= remainingCount else {
             throw EmbeddedWireError.truncated
         }
-        let value = bytes.slice(offset..<(offset + intCount))
+        let value = bytes[offset..<(offset + intCount)]
         offset += intCount
         return value
     }

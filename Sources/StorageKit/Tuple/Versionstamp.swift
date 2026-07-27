@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// A FoundationDB versionstamp (12 bytes: 10-byte transaction version + 2-byte user version).
 ///
 /// Versionstamps provide globally unique, monotonically increasing identifiers
@@ -33,13 +34,15 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
     public static let totalSize = transactionVersionSize + userVersionSize
 
     /// Placeholder for incomplete transaction version (10 bytes of 0xFF)
-    private static let incompletePlaceholder = Bytes(repeating: 0xFF, count: transactionVersionSize)
+    private static let incompletePlaceholder = ByteString(
+        [UInt8](repeating: 0xFF, count: transactionVersionSize)
+    )
 
     // MARK: - Properties
 
     /// Transaction version (10 bytes).
     /// nil for incomplete versionstamp (to be filled by FDB at commit time).
-    public let transactionVersion: Bytes?
+    public let transactionVersion: ByteString?
 
     /// User-defined version (2 bytes, big-endian).
     /// Used for ordering within a single transaction. Range: 0-65535.
@@ -52,7 +55,7 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
     /// - Parameters:
     ///   - transactionVersion: 10-byte transaction version from FDB (nil for incomplete).
     ///   - userVersion: User-defined version (0-65535).
-    public init(transactionVersion: Bytes?, userVersion: UInt16 = 0) {
+    public init(transactionVersion: ByteString?, userVersion: UInt16 = 0) {
         if let tv = transactionVersion {
             precondition(
                 tv.count == Self.transactionVersionSize,
@@ -80,9 +83,9 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
     /// Convert to 12-byte representation.
     ///
     /// Layout: [10 bytes transaction version (big-endian)] [2 bytes user version (big-endian)]
-    public func toBytes() -> Bytes {
+    public func toBytes() -> ByteString {
         let version = transactionVersion ?? Self.incompletePlaceholder
-        return Bytes.copying(count: Self.totalSize) { output in
+        return ByteString.copying(count: Self.totalSize) { output in
             version.withUnsafeBytes { source in
                 let destination = UnsafeMutableRawBufferPointer(
                     start: output.baseAddress,
@@ -103,14 +106,17 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
     ///
     /// - Parameter bytes: 12-byte array.
     /// - Throws: `TupleError.unexpectedEndOfData` if bytes length is not 12.
-    public static func fromBytes(_ bytes: Bytes) throws -> Versionstamp {
+    public static func fromBytes(_ bytes: ByteString) throws -> Versionstamp {
         guard bytes.count == totalSize else {
             throw TupleError.unexpectedEndOfData
         }
 
-        let trVersionBytes = bytes[0..<transactionVersionSize]
-        let uv = UInt16(bytes[transactionVersionSize]) << 8
-            | UInt16(bytes[transactionVersionSize + 1])
+        let startIndex = bytes.startIndex
+        let trVersionBytes = bytes[
+            startIndex..<(startIndex + transactionVersionSize)
+        ]
+        let uv = UInt16(bytes[startIndex + transactionVersionSize]) << 8
+            | UInt16(bytes[startIndex + transactionVersionSize + 1])
 
         let isIncomplete = trVersionBytes == incompletePlaceholder
         return Versionstamp(
@@ -165,8 +171,8 @@ extension Versionstamp: TupleElement {
         sink.writeByte(UInt8(truncatingIfNeeded: userVersion))
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Versionstamp {
-        guard offset + Versionstamp.totalSize <= bytes.count else {
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Versionstamp {
+        guard offset + Versionstamp.totalSize <= bytes.endIndex else {
             throw TupleError.unexpectedEndOfData
         }
         let versionstampBytes = bytes[

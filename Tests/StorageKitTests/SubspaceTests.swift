@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import StorageKit
@@ -10,8 +11,10 @@ struct SubspaceTests {
         let child = root.subspace("users")
         let grandchild = child.subspace(Int64(42))
 
-        // grandchild のプレフィックスは "users" + 42 のエンコード結果
-        let expectedPrefix = Tuple("users").pack() + Tuple(Int64(42)).pack()
+        let expectedPrefix = concatenate(
+            Tuple("users").pack(),
+            Tuple(Int64(42)).pack()
+        )
         #expect(grandchild.prefix == expectedPrefix)
     }
 
@@ -20,7 +23,6 @@ struct SubspaceTests {
         let tuple = Tuple("key1", Int64(100))
         let key = space.pack(tuple)
 
-        // キーは prefix + tuple.pack()
         #expect(key.starts(with: space.prefix))
 
         let unpacked = try space.unpack(key)
@@ -43,9 +45,7 @@ struct SubspaceTests {
         let space = Subspace("users")
         let (begin, end) = space.range()
 
-        // begin は prefix + 0x00
-        #expect(begin == space.prefix + [0x00])
-        // end は strinc(prefix)
+        #expect(begin == concatenate(space.prefix, [0x00]))
         let expected = try strinc(space.prefix)
         #expect(end == expected)
     }
@@ -56,8 +56,8 @@ struct SubspaceTests {
         let end = Tuple(Int64(20))
         let (beginKey, endKey) = space.range(from: start, to: end)
 
-        #expect(beginKey == space.prefix + start.pack())
-        #expect(endKey == space.prefix + end.pack())
+        #expect(beginKey == concatenate(space.prefix, start.pack()))
+        #expect(endKey == concatenate(space.prefix, end.pack()))
     }
 
     @Test func prefixRange() throws {
@@ -73,7 +73,11 @@ struct SubspaceTests {
         let root = Subspace(prefix: [])
         let nested = root["app"]["users"][Int64(1)]
 
-        let expected = Tuple("app").pack() + Tuple("users").pack() + Tuple(Int64(1)).pack()
+        let expected = concatenate(
+            Tuple("app").pack(),
+            Tuple("users").pack(),
+            Tuple(Int64(1)).pack()
+        )
         #expect(nested.prefix == expected)
     }
 
@@ -84,5 +88,11 @@ struct SubspaceTests {
         #expect(throws: TupleError.self) {
             try space.unpack(wrongKey)
         }
+    }
+
+    private func concatenate(
+        _ parts: ByteString...
+    ) -> ByteString {
+        ByteString(parts.flatMap { $0 })
     }
 }

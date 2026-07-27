@@ -1,8 +1,9 @@
+import DatabaseTypes
 import StorageKit
 import Synchronization
 
 /// Poisons its allocation when a borrow ends so tests can detect escaped pointers.
-final class SQLiteBorrowInvalidatingBytesOwner: BytesOwner {
+final class SQLiteBorrowInvalidatingBytesOwner: ByteStringOwner {
     let count: Int
 
     private struct State {

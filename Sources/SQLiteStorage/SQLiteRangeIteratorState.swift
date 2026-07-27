@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 
 /// Owns one logical SQLite range iterator across copied iterator values.
@@ -25,7 +26,7 @@ actor SQLiteRangeIteratorState {
         self.pendingError = error
     }
 
-    func next() async throws -> (Bytes, Bytes)? {
+    func next() async throws -> (ByteString, ByteString)? {
         guard !advancing else {
             throw StorageError(
                 code: .invalidOperation,
@@ -39,7 +40,7 @@ actor SQLiteRangeIteratorState {
         return try await advance()
     }
 
-    private func advance() async throws -> (Bytes, Bytes)? {
+    private func advance() async throws -> (ByteString, ByteString)? {
         guard !done else { return nil }
         if let pendingError {
             finish()

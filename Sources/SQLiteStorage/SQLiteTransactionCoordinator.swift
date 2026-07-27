@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 
 /// Owns the FIFO lease for one SQLite connection and enforces the native
@@ -79,8 +80,8 @@ actor SQLiteTransactionCoordinator {
         rootIdentifier: UInt64,
         transactionIdentifier: UInt64,
         writes: [SQLiteWriteOperation],
-        key: Bytes
-    ) async throws -> Bytes? {
+        key: ByteString
+    ) async throws -> ByteString? {
         try await ensureRoot(identifier: rootIdentifier)
         try requireTopTransaction(
             rootIdentifier: rootIdentifier,
@@ -96,7 +97,7 @@ actor SQLiteTransactionCoordinator {
         transactionIdentifier: UInt64,
         writes: [SQLiteWriteOperation],
         plan: SQLiteKeySelectionPlan
-    ) async throws -> Bytes? {
+    ) async throws -> ByteString? {
         try await ensureRoot(identifier: rootIdentifier)
         try requireTopTransaction(
             rootIdentifier: rootIdentifier,
@@ -112,7 +113,7 @@ actor SQLiteTransactionCoordinator {
         transactionIdentifier: UInt64,
         writes: [SQLiteWriteOperation],
         plan: SQLiteRangeScanPlan
-    ) async throws -> (cursorIdentifier: UInt64, first: (Bytes, Bytes)?) {
+    ) async throws -> (cursorIdentifier: UInt64, first: (ByteString, ByteString)?) {
         try await ensureRoot(identifier: rootIdentifier)
         try requireTopTransaction(
             rootIdentifier: rootIdentifier,
@@ -142,7 +143,7 @@ actor SQLiteTransactionCoordinator {
         rootIdentifier: UInt64,
         transactionIdentifier: UInt64,
         cursorIdentifier: UInt64
-    ) throws -> (Bytes, Bytes)? {
+    ) throws -> (ByteString, ByteString)? {
         try requireTopTransaction(
             rootIdentifier: rootIdentifier,
             transactionIdentifier: transactionIdentifier,

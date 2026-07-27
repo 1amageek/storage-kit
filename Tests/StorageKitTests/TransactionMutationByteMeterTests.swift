@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Synchronization
 import Testing
@@ -6,8 +7,8 @@ import Testing
 struct TransactionMutationByteMeterTests {
     @Test func setCountsLogicalPayloadWithoutMaterializingBytes() throws {
         let meter = try TransactionMutationByteMeter(maximumBytes: 22)
-        let key = Bytes([0x01, 0x02])
-        let value = Bytes([0x03, 0x04, 0x05])
+        let key = ByteString([0x01, 0x02])
+        let value = ByteString([0x03, 0x04, 0x05])
 
         try meter.recordSet(key: key, value: value)
 
@@ -16,13 +17,13 @@ struct TransactionMutationByteMeterTests {
 
     @Test func rejectedMutationDoesNotAdvanceConsumedBytes() throws {
         let meter = try TransactionMutationByteMeter(maximumBytes: 31)
-        let key = Bytes([0x01])
+        let key = ByteString([0x01])
 
         try meter.recordClear(key: key)
         #expect(throws: TransactionMutationByteLimitError.self) {
             try meter.recordSet(
                 key: key,
-                value: Bytes(repeating: 0, count: 4)
+                value: ByteString([UInt8](repeating: 0, count: 4))
             )
         }
 
@@ -42,7 +43,7 @@ struct TransactionMutationByteMeterTests {
     @Test func concurrentScopesKeepAttemptMetersIndependent() async throws {
         let first = try TransactionMutationByteMeter(maximumBytes: 64)
         let second = try TransactionMutationByteMeter(maximumBytes: 64)
-        let key = Bytes([0x01])
+        let key = ByteString([0x01])
 
         async let firstWrite: Void = first.recordClear(key: key)
         async let secondWrite: Void = second.recordClear(key: key)
@@ -53,8 +54,8 @@ struct TransactionMutationByteMeterTests {
     }
 
     @Test func everyMutationFamilyHonorsItsExactBoundary() throws {
-        let key = Bytes([0x01, 0x02])
-        let value = Bytes([0x03, 0x04, 0x05])
+        let key = ByteString([0x01, 0x02])
+        let value = ByteString([0x03, 0x04, 0x05])
 
         try expectBoundary(byteCount: 22) { meter in
             try meter.recordSet(key: key, value: value)
@@ -76,8 +77,8 @@ struct TransactionMutationByteMeterTests {
         let meter = try TransactionMutationByteMeter(maximumBytes: 22)
 
         try meter.recordSet(
-            key: Bytes(retaining: keyOwner),
-            value: Bytes(retaining: valueOwner)
+            key: ByteString(retaining: keyOwner),
+            value: ByteString(retaining: valueOwner)
         )
 
         #expect(meter.consumedBytes == 22)
@@ -122,7 +123,7 @@ struct TransactionMutationByteMeterTests {
     }
 }
 
-private final class BorrowCountBytesOwner: BytesOwner, Sendable {
+private final class BorrowCountBytesOwner: ByteStringOwner, Sendable {
     private let bytes: [UInt8]
     private let countState = Mutex(0)
 

@@ -1,21 +1,22 @@
+import DatabaseTypes
 /// Padding-free base64url codec for diagnostic names and host boundary strings.
 public enum EmbeddedBase64URL {
     private static let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".utf8)
 
-    public static func encode<Bytes: RandomAccessCollection>(
-        _ bytes: Bytes
-    ) -> String where Bytes.Element == UInt8, Bytes.Index == Int {
+    public static func encode<ByteString: RandomAccessCollection>(
+        _ bytes: ByteString
+    ) -> String where ByteString.Element == UInt8, ByteString.Index == Int {
         if bytes.isEmpty {
             return ""
         }
         var output: [UInt8] = []
         output.reserveCapacity(((bytes.count + 2) / 3) * 4)
 
-        var index = 0
-        while index < bytes.count {
+        var index = bytes.startIndex
+        while index < bytes.endIndex {
             let first = bytes[index]
-            let hasSecond = index + 1 < bytes.count
-            let hasThird = index + 2 < bytes.count
+            let hasSecond = index + 1 < bytes.endIndex
+            let hasThird = index + 2 < bytes.endIndex
             let second = hasSecond ? bytes[index + 1] : 0
             let third = hasThird ? bytes[index + 2] : 0
 
@@ -38,7 +39,7 @@ public enum EmbeddedBase64URL {
 
     public static func decode(
         _ value: String
-    ) throws(EmbeddedWireError) -> EmbeddedBytes {
+    ) throws(EmbeddedWireError) -> ByteString {
         if value.isEmpty {
             return []
         }
@@ -70,7 +71,7 @@ public enum EmbeddedBase64URL {
         guard encode(output) == value else {
             throw EmbeddedWireError.invalidCursor
         }
-        return EmbeddedBytes(output)
+        return ByteString(output)
     }
 
     private static func decode(_ byte: UInt8) -> UInt8? {

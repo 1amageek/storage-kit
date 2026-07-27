@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 @testable import StorageKit
 
@@ -5,7 +6,7 @@ import Testing
 struct KeySelectorTests {
 
     @Test func firstGreaterOrEqual() throws {
-        let key: Bytes = [0x01, 0x02, 0x03]
+        let key: ByteString = [0x01, 0x02, 0x03]
         let selector = KeySelector.firstGreaterOrEqual(key)
         #expect(selector.key == key)
         #expect(selector.orEqual == false)
@@ -13,7 +14,7 @@ struct KeySelectorTests {
     }
 
     @Test func firstGreaterThan() throws {
-        let key: Bytes = [0x01, 0x02, 0x03]
+        let key: ByteString = [0x01, 0x02, 0x03]
         let selector = KeySelector.firstGreaterThan(key)
         #expect(selector.key == key)
         #expect(selector.orEqual == true)
@@ -21,7 +22,7 @@ struct KeySelectorTests {
     }
 
     @Test func lastLessOrEqual() throws {
-        let key: Bytes = [0x01, 0x02, 0x03]
+        let key: ByteString = [0x01, 0x02, 0x03]
         let selector = KeySelector.lastLessOrEqual(key)
         #expect(selector.key == key)
         #expect(selector.orEqual == true)
@@ -29,7 +30,7 @@ struct KeySelectorTests {
     }
 
     @Test func lastLessThan() throws {
-        let key: Bytes = [0x01, 0x02, 0x03]
+        let key: ByteString = [0x01, 0x02, 0x03]
         let selector = KeySelector.lastLessThan(key)
         #expect(selector.key == key)
         #expect(selector.orEqual == false)
@@ -47,7 +48,7 @@ struct KeySelectorTests {
     // MARK: - KeySelector Resolution Tests
 
     @Test func resolveFirstGreaterOrEqual() throws {
-        let keys: [Bytes] = [[1], [3], [5], [7], [9]]
+        let keys: [ByteString] = [[1], [3], [5], [7], [9]]
 
         // firstGreaterOrEqual([3]) → index of [3] = 1
         let sel1 = KeySelector.firstGreaterOrEqual([3])
@@ -67,7 +68,7 @@ struct KeySelectorTests {
     }
 
     @Test func resolveFirstGreaterThan() throws {
-        let keys: [Bytes] = [[1], [3], [5], [7], [9]]
+        let keys: [ByteString] = [[1], [3], [5], [7], [9]]
 
         // firstGreaterThan([3]) → index of [5] = 2
         let sel1 = KeySelector.firstGreaterThan([3])
@@ -83,7 +84,7 @@ struct KeySelectorTests {
     }
 
     @Test func resolveLastLessOrEqual() throws {
-        let keys: [Bytes] = [[1], [3], [5], [7], [9]]
+        let keys: [ByteString] = [[1], [3], [5], [7], [9]]
 
         // lastLessOrEqual([5]) → index of [5] = 2
         let sel1 = KeySelector.lastLessOrEqual([5])
@@ -101,7 +102,7 @@ struct KeySelectorTests {
     }
 
     @Test func resolveLastLessThan() throws {
-        let keys: [Bytes] = [[1], [3], [5], [7], [9]]
+        let keys: [ByteString] = [[1], [3], [5], [7], [9]]
 
         // lastLessThan([5]) → index of [3] = 1
         let sel1 = KeySelector.lastLessThan([5])
@@ -113,7 +114,7 @@ struct KeySelectorTests {
     }
 
     @Test func resolveEmptyKeys() throws {
-        let keys: [Bytes] = []
+        let keys: [ByteString] = []
 
         let sel = KeySelector.firstGreaterOrEqual([5])
         #expect(sel.resolve(in: keys) == 0)
@@ -122,7 +123,7 @@ struct KeySelectorTests {
     @Test func resolveRangePattern() throws {
         // Typical pattern: getRange(from: .firstGreaterOrEqual(begin), to: .firstGreaterOrEqual(end))
         // This should select keys in [begin, end)
-        let keys: [Bytes] = [[1], [2], [3], [4], [5]]
+        let keys: [ByteString] = [[1], [2], [3], [4], [5]]
 
         let beginIdx = KeySelector.firstGreaterOrEqual([2]).resolve(in: keys)
         let endIdx = KeySelector.firstGreaterOrEqual([4]).resolve(in: keys)

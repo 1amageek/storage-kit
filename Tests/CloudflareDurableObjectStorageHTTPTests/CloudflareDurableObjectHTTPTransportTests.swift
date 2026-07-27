@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -156,7 +157,7 @@ struct CloudflareDurableObjectHTTPTransportTests {
         )
         let transport = try makeTransport()
 
-        let result: Result<EmbeddedBytes, any Error> = await Task {
+        let result: Result<ByteString, any Error> = await Task {
             withUnsafeCurrentTask { task in
                 task?.cancel()
             }

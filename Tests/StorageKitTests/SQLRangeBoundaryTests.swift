@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 @testable import StorageKit
 
@@ -5,7 +6,7 @@ import Testing
 struct SQLRangeBoundaryTests {
 
     @Test func beginBoundaryMappings() throws {
-        let key: Bytes = [0x01, 0x02, 0x03]
+        let key: ByteString = [0x01, 0x02, 0x03]
 
         #expect(try SQLRangeBoundary.begin(.firstGreaterOrEqual(key)) == .direct(op: ">=", key: key))
         #expect(try SQLRangeBoundary.begin(.firstGreaterThan(key)) == .direct(op: ">", key: key))
@@ -20,7 +21,7 @@ struct SQLRangeBoundaryTests {
     }
 
     @Test func endBoundaryMappings() throws {
-        let key: Bytes = [0x01, 0x02, 0x03]
+        let key: ByteString = [0x01, 0x02, 0x03]
 
         #expect(try SQLRangeBoundary.end(.firstGreaterOrEqual(key)) == .direct(op: "<", key: key))
         #expect(try SQLRangeBoundary.end(.firstGreaterThan(key)) == .direct(op: "<=", key: key))

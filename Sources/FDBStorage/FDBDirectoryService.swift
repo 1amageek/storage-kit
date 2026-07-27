@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import FoundationDB
 
@@ -33,7 +34,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
                 transaction: fdbTransaction
             )
             return StorageKit.Subspace(
-                prefix: Bytes(directory.subspace.prefix)
+                prefix: ByteString(directory.subspace.prefix)
             )
         }
     }
@@ -53,7 +54,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
                 transaction: fdbTransaction
             )
             return StorageKit.Subspace(
-                prefix: Bytes(directory.subspace.prefix)
+                prefix: ByteString(directory.subspace.prefix)
             )
         }
     }

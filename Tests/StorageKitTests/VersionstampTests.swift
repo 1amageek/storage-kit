@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import StorageKit
@@ -8,7 +9,7 @@ struct VersionstampTests {
     // MARK: - Construction
 
     @Test func completeVersionstamp() {
-        let tv: Bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+        let tv: ByteString = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
         let vs = Versionstamp(transactionVersion: tv, userVersion: 42)
 
         #expect(vs.isComplete == true)
@@ -32,7 +33,7 @@ struct VersionstampTests {
     }
 
     @Test func completeVersionstampDefaultUserVersion() {
-        let tv = Bytes(repeating: 0xAB, count: 10)
+        let tv = ByteString([UInt8](repeating: 0xAB, count: 10))
         let vs = Versionstamp(transactionVersion: tv)
 
         #expect(vs.userVersion == 0)
@@ -41,13 +42,13 @@ struct VersionstampTests {
     // MARK: - toBytes / fromBytes Round-Trip
 
     @Test func completeToBytesRoundTrip() throws {
-        let tv: Bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+        let tv: ByteString = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
         let original = Versionstamp(transactionVersion: tv, userVersion: 1000)
         let bytes = original.toBytes()
 
         #expect(bytes.count == 12)
         // First 10 bytes: transaction version
-        #expect(Array(bytes.prefix(10)) == tv)
+        #expect(Array(bytes.prefix(10)) == tv.copyBytes())
         // Last 2 bytes: user version 1000 in big-endian = 0x03E8
         #expect(bytes[10] == 0x03)
         #expect(bytes[11] == 0xE8)
@@ -78,24 +79,24 @@ struct VersionstampTests {
     }
 
     @Test func fromBytesInvalidLength() {
-        let shortBytes: Bytes = [0x00, 0x01, 0x02]
+        let shortBytes: ByteString = [0x00, 0x01, 0x02]
         #expect(throws: TupleError.self) {
             _ = try Versionstamp.fromBytes(shortBytes)
         }
 
-        let longBytes = Bytes(repeating: 0x00, count: 13)
+        let longBytes = ByteString([UInt8](repeating: 0x00, count: 13))
         #expect(throws: TupleError.self) {
             _ = try Versionstamp.fromBytes(longBytes)
         }
 
-        let emptyBytes: Bytes = []
+        let emptyBytes: ByteString = []
         #expect(throws: TupleError.self) {
             _ = try Versionstamp.fromBytes(emptyBytes)
         }
     }
 
     @Test func userVersionBoundaryValues() throws {
-        let tv = Bytes(repeating: 0x01, count: 10)
+        let tv = ByteString([UInt8](repeating: 0x01, count: 10))
 
         // Min user version
         let vsMin = Versionstamp(transactionVersion: tv, userVersion: 0)
@@ -113,7 +114,7 @@ struct VersionstampTests {
     // MARK: - TupleElement Encoding/Decoding
 
     @Test func tupleElementRoundTrip() throws {
-        let tv: Bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+        let tv: ByteString = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
         let original = Versionstamp(transactionVersion: tv, userVersion: 100)
         let encoded = original.encodeTuple()
 
@@ -134,7 +135,7 @@ struct VersionstampTests {
 
         #expect(encoded.count == 13)
         #expect(encoded[0] == 0x33)
-        // Bytes 1-10 should be 0xFF (incomplete placeholder)
+        // ByteString 1-10 should be 0xFF (incomplete placeholder)
         for i in 1...10 {
             #expect(encoded[i] == 0xFF, "Byte \(i) should be 0xFF for incomplete versionstamp")
         }
@@ -147,7 +148,7 @@ struct VersionstampTests {
 
     @Test func decodeTupleTruncatedData() {
         // Only 5 bytes of data after type code (need 12)
-        let truncated: Bytes = [0x33, 0x00, 0x01, 0x02, 0x03, 0x04]
+        let truncated: ByteString = [0x33, 0x00, 0x01, 0x02, 0x03, 0x04]
         var offset = 1
         #expect(throws: TupleError.self) {
             _ = try Versionstamp.decodeTuple(from: truncated, at: &offset)
@@ -155,7 +156,7 @@ struct VersionstampTests {
     }
 
     @Test func decodeTupleEmptyAfterTypeCode() {
-        let bytes: Bytes = [0x33]
+        let bytes: ByteString = [0x33]
         var offset = 1
         #expect(throws: TupleError.self) {
             _ = try Versionstamp.decodeTuple(from: bytes, at: &offset)
@@ -165,7 +166,7 @@ struct VersionstampTests {
     // MARK: - Tuple Pack/Unpack Integration
 
     @Test func tuplePackUnpackWithVersionstamp() throws {
-        let tv: Bytes = [0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13]
+        let tv: ByteString = [0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13]
         let vs = Versionstamp(transactionVersion: tv, userVersion: 99)
         let tuple = Tuple(vs)
 
@@ -179,7 +180,7 @@ struct VersionstampTests {
     }
 
     @Test func tuplePackUnpackMixedWithVersionstamp() throws {
-        let tv: Bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
+        let tv: ByteString = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
         let vs = Versionstamp(transactionVersion: tv, userVersion: 1)
         let tuple = Tuple("prefix", Int64(42), vs, true)
 
@@ -197,7 +198,7 @@ struct VersionstampTests {
     }
 
     @Test func tupleSubscriptWithVersionstamp() throws {
-        let tv = Bytes(repeating: 0xAA, count: 10)
+        let tv = ByteString([UInt8](repeating: 0xAA, count: 10))
         let vs = Versionstamp(transactionVersion: tv, userVersion: 50)
         let tuple = Tuple("key", vs)
 
@@ -208,7 +209,7 @@ struct VersionstampTests {
     }
 
     @Test func tupleAppendVersionstamp() throws {
-        let tv = Bytes(repeating: 0x01, count: 10)
+        let tv = ByteString([UInt8](repeating: 0x01, count: 10))
         let vs = Versionstamp(transactionVersion: tv, userVersion: 0)
         let tuple = Tuple("base").appending(vs)
 
@@ -222,8 +223,8 @@ struct VersionstampTests {
 
     @Test func comparableOrdering() {
         // Earlier transaction version < later transaction version
-        let tv1: Bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
-        let tv2: Bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]
+        let tv1: ByteString = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
+        let tv2: ByteString = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]
 
         let vs1 = Versionstamp(transactionVersion: tv1, userVersion: 0)
         let vs2 = Versionstamp(transactionVersion: tv2, userVersion: 0)
@@ -234,7 +235,7 @@ struct VersionstampTests {
 
     @Test func comparableOrderingByUserVersion() {
         // Same transaction version, different user version
-        let tv: Bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
+        let tv: ByteString = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
 
         let vs1 = Versionstamp(transactionVersion: tv, userVersion: 0)
         let vs2 = Versionstamp(transactionVersion: tv, userVersion: 1)
@@ -247,7 +248,7 @@ struct VersionstampTests {
 
     @Test func comparableIncomplete() {
         // Incomplete versionstamps (0xFF...) are "greater" than any complete one
-        let tvMax: Bytes = [0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+        let tvMax: ByteString = [0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
         let complete = Versionstamp(transactionVersion: tvMax, userVersion: UInt16.max)
         let incomplete = Versionstamp.incomplete(userVersion: 0)
 
@@ -255,8 +256,8 @@ struct VersionstampTests {
     }
 
     @Test func lexicographicOrderingInTuple() {
-        let tv1: Bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
-        let tv2: Bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]
+        let tv1: ByteString = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
+        let tv2: ByteString = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]
 
         let packed1 = Tuple(Versionstamp(transactionVersion: tv1, userVersion: 0)).pack()
         let packed2 = Tuple(Versionstamp(transactionVersion: tv2, userVersion: 0)).pack()
@@ -267,7 +268,7 @@ struct VersionstampTests {
     // MARK: - Equatable / Hashable
 
     @Test func equality() {
-        let tv: Bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]
+        let tv: ByteString = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]
         let vs1 = Versionstamp(transactionVersion: tv, userVersion: 42)
         let vs2 = Versionstamp(transactionVersion: tv, userVersion: 42)
         let vs3 = Versionstamp(transactionVersion: tv, userVersion: 43)
@@ -286,7 +287,7 @@ struct VersionstampTests {
     }
 
     @Test func hashable() {
-        let tv: Bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]
+        let tv: ByteString = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]
         let vs1 = Versionstamp(transactionVersion: tv, userVersion: 42)
         let vs2 = Versionstamp(transactionVersion: tv, userVersion: 42)
 
@@ -299,7 +300,7 @@ struct VersionstampTests {
     // MARK: - Tuple Equality with Versionstamp
 
     @Test func tupleEqualityWithVersionstamp() {
-        let tv: Bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+        let tv: ByteString = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
         let vs = Versionstamp(transactionVersion: tv, userVersion: 0)
 
         let t1 = Tuple("key", vs)
@@ -311,7 +312,7 @@ struct VersionstampTests {
     // MARK: - Nested Tuple with Versionstamp
 
     @Test func nestedTupleWithVersionstamp() throws {
-        let tv: Bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+        let tv: ByteString = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
         let vs = Versionstamp(transactionVersion: tv, userVersion: 10)
         let inner = Tuple(vs, Int64(7))
         let outer = Tuple("outer", inner)
@@ -339,7 +340,7 @@ struct VersionstampTests {
     // MARK: - CustomStringConvertible
 
     @Test func descriptionComplete() {
-        let tv: Bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+        let tv: ByteString = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
         let vs = Versionstamp(transactionVersion: tv, userVersion: 42)
 
         #expect(vs.description == "Versionstamp(tr:00010203040506070809, user:42)")
@@ -357,19 +358,19 @@ struct VersionstampTests {
     }
 
     @Test func encodedLayout() {
-        let tv: Bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
+        let tv: ByteString = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09]
         let vs = Versionstamp(transactionVersion: tv, userVersion: 256) // 0x0100
         let encoded = vs.encodeTuple()
 
         // [0x33] [10 bytes TV] [2 bytes UV big-endian]
         #expect(encoded[0] == 0x33)
-        #expect(Array(encoded[1...10]) == tv)
+        #expect(Array(encoded[1...10]) == tv.copyBytes())
         #expect(encoded[11] == 0x01) // 256 >> 8
         #expect(encoded[12] == 0x00) // 256 & 0xFF
     }
 
     @Test func zeroTransactionVersion() throws {
-        let tv = Bytes(repeating: 0x00, count: 10)
+        let tv = ByteString([UInt8](repeating: 0x00, count: 10))
         let vs = Versionstamp(transactionVersion: tv, userVersion: 0)
 
         let bytes = vs.toBytes()

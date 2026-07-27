@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorage
 import StorageKit
 import Synchronization
@@ -10,15 +11,15 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     private struct State: Sendable {
-        var rowsByScope: [CloudflareDurableObjectStorageScope: [Bytes: Bytes]] = [:]
+        var rowsByScope: [CloudflareDurableObjectStorageScope: [ByteString: ByteString]] = [:]
         var versionsByScope: [CloudflareDurableObjectStorageScope: Int64] = [:]
         var conflictsByScope: [CloudflareDurableObjectStorageScope: [ConflictEntry]] = [:]
     }
 
     private struct ConflictEntry: Sendable {
         let version: Int64
-        let begin: Bytes
-        let end: Bytes
+        let begin: ByteString
+        let end: ByteString
     }
 
     private let state = Mutex(State())
@@ -95,7 +96,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                 unboundedIndex: keys.count
             )
 
-            var selected: [(key: Bytes, value: Bytes)] = []
+            var selected: [(key: ByteString, value: ByteString)] = []
             if startIndex < endIndex {
                 selected = Array(sortedRows[startIndex..<endIndex])
             }
@@ -349,7 +350,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         )
     }
 
-    private func writeConflictRange(for mutation: CloudflareDurableObjectMutation) -> (begin: Bytes, end: Bytes)? {
+    private func writeConflictRange(for mutation: CloudflareDurableObjectMutation) -> (begin: ByteString, end: ByteString)? {
         switch mutation {
         case .set(let key, _), .clear(let key), .atomic(let key, _, _):
             return singleKeyRange(key.rawValue)
@@ -397,10 +398,10 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     private func materializedVersionstampOperand(
-        _ operand: Bytes,
+        _ operand: ByteString,
         committedVersion: Int64,
         maximumResultBytes: Int
-    ) throws -> Bytes {
+    ) throws -> ByteString {
         guard operand.count >= 14 else {
             throw StorageError.invalidOperation(
                 "Versionstamp operand is shorter than fourteen bytes"
@@ -412,35 +413,47 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                 "Materialized versionstamp exceeds the byte limit"
             )
         }
-        let offset = Int(operand[payloadCount])
-            | (Int(operand[payloadCount + 1]) << 8)
-            | (Int(operand[payloadCount + 2]) << 16)
-            | (Int(operand[payloadCount + 3]) << 24)
+        let offset = operand.withUnsafeBytes { bytes in
+            Int(bytes[payloadCount])
+                | (Int(bytes[payloadCount + 1]) << 8)
+                | (Int(bytes[payloadCount + 2]) << 16)
+                | (Int(bytes[payloadCount + 3]) << 24)
+        }
         guard offset <= payloadCount - 10 else {
             throw StorageError.invalidOperation(
                 "Versionstamp offset does not identify ten payload bytes"
             )
         }
-        var result = operand[0..<payloadCount]
         let version = UInt64(committedVersion)
-        let stamp: Bytes = [
-            UInt8(truncatingIfNeeded: version >> 56),
-            UInt8(truncatingIfNeeded: version >> 48),
-            UInt8(truncatingIfNeeded: version >> 40),
-            UInt8(truncatingIfNeeded: version >> 32),
-            UInt8(truncatingIfNeeded: version >> 24),
-            UInt8(truncatingIfNeeded: version >> 16),
-            UInt8(truncatingIfNeeded: version >> 8),
-            UInt8(truncatingIfNeeded: version),
-            0,
-            0,
-        ]
-        result.replaceSubrange(offset..<(offset + stamp.count), with: stamp)
-        return result
+        return ByteString.copying(count: payloadCount) { destination in
+            operand.withUnsafeBytes { source in
+                destination.copyMemory(
+                    from: UnsafeRawBufferPointer(
+                        rebasing: source[0..<payloadCount]
+                    )
+                )
+            }
+            destination[offset] = UInt8(truncatingIfNeeded: version >> 56)
+            destination[offset + 1] = UInt8(truncatingIfNeeded: version >> 48)
+            destination[offset + 2] = UInt8(truncatingIfNeeded: version >> 40)
+            destination[offset + 3] = UInt8(truncatingIfNeeded: version >> 32)
+            destination[offset + 4] = UInt8(truncatingIfNeeded: version >> 24)
+            destination[offset + 5] = UInt8(truncatingIfNeeded: version >> 16)
+            destination[offset + 6] = UInt8(truncatingIfNeeded: version >> 8)
+            destination[offset + 7] = UInt8(truncatingIfNeeded: version)
+            destination[offset + 8] = 0
+            destination[offset + 9] = 0
+        }
     }
 
-    private func singleKeyRange(_ key: Bytes) -> (begin: Bytes, end: Bytes) {
-        (key, key + [0x00])
+    private func singleKeyRange(_ key: ByteString) -> (begin: ByteString, end: ByteString) {
+        let end = ByteString.copying(count: key.count + 1) { destination in
+            key.withUnsafeBytes { source in
+                destination.copyMemory(from: source)
+            }
+            destination[key.count] = 0
+        }
+        return (key, end)
     }
 
     private func overlaps(_ conflict: ConflictEntry, _ readRange: CloudflareDurableObjectConflictRange) -> Bool {
@@ -466,7 +479,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
 
     private func resolvedIndex(
         _ boundary: CloudflareDurableObjectRangeBoundary,
-        in keys: [Bytes],
+        in keys: [ByteString],
         unboundedIndex: Int
     ) -> Int {
         switch boundary {
@@ -479,7 +492,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
 
     private func boundaryKey(
         _ boundary: CloudflareDurableObjectRangeBoundary
-    ) -> Bytes? {
+    ) -> ByteString? {
         switch boundary {
         case .unbounded:
             return nil
@@ -488,18 +501,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         }
     }
 
-    private func compare(_ lhs: Bytes, _ rhs: Bytes) -> Int {
-        let minCount = min(lhs.count, rhs.count)
-        var index = 0
-        while index < minCount {
-            if lhs[index] != rhs[index] {
-                return lhs[index] < rhs[index] ? -1 : 1
-            }
-            index += 1
-        }
-        if lhs.count == rhs.count {
-            return 0
-        }
-        return lhs.count < rhs.count ? -1 : 1
+    private func compare(_ lhs: ByteString, _ rhs: ByteString) -> Int {
+        compareBytes(lhs, rhs)
     }
 }

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 /// Errors for the Cloudflare Durable Object Embedded wire layer.
@@ -88,14 +89,14 @@ extension CloudflareDurableObjectEmbeddedError {
 
     static func readBytes(
         from reader: inout EmbeddedWireReader
-    ) throws(CloudflareDurableObjectEmbeddedError) -> EmbeddedBytes {
+    ) throws(CloudflareDurableObjectEmbeddedError) -> ByteString {
         try readBytes(from: &reader, maximum: EmbeddedLimits.cloudflareDurableObject.maxValueBytes)
     }
 
     static func readBytes(
         from reader: inout EmbeddedWireReader,
         maximum: Int
-    ) throws(CloudflareDurableObjectEmbeddedError) -> EmbeddedBytes {
+    ) throws(CloudflareDurableObjectEmbeddedError) -> ByteString {
         do {
             return try reader.readByteRegion(maximum: maximum)
         } catch {
@@ -130,7 +131,7 @@ extension CloudflareDurableObjectEmbeddedError {
     }
 
     static func writeBytes(
-        _ value: EmbeddedBytes,
+        _ value: ByteString,
         into writer: inout EmbeddedWireWriter
     ) throws(CloudflareDurableObjectEmbeddedError) {
         try writeBytes(
@@ -141,7 +142,7 @@ extension CloudflareDurableObjectEmbeddedError {
     }
 
     static func writeBytes(
-        _ value: EmbeddedBytes,
+        _ value: ByteString,
         maximum: Int,
         into writer: inout EmbeddedWireWriter
     ) throws(CloudflareDurableObjectEmbeddedError) {
@@ -415,8 +416,8 @@ extension CloudflareDurableObjectEmbeddedError {
     }
 
     private static func validateAtomicOperands(
-        key: EmbeddedBytes,
-        param: EmbeddedBytes,
+        key: ByteString,
+        param: ByteString,
         mutationType: EmbeddedMutationType
     ) throws(CloudflareDurableObjectEmbeddedError) {
         let limits = EmbeddedLimits.cloudflareDurableObject
@@ -478,7 +479,7 @@ extension CloudflareDurableObjectEmbeddedError {
     }
 
     private static func writeOptionalBoundary(
-        _ value: EmbeddedBytes?,
+        _ value: ByteString?,
         into writer: inout EmbeddedWireWriter
     ) throws(CloudflareDurableObjectEmbeddedError) {
         guard let value else {
@@ -495,7 +496,7 @@ extension CloudflareDurableObjectEmbeddedError {
 
     private static func readOptionalBoundary(
         from reader: inout EmbeddedWireReader
-    ) throws(CloudflareDurableObjectEmbeddedError) -> EmbeddedBytes? {
+    ) throws(CloudflareDurableObjectEmbeddedError) -> ByteString? {
         guard try readBool(from: &reader) else {
             return nil
         }

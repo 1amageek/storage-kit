@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 /// Adopts the storage response frame allocated in guest memory by the host.
@@ -6,7 +7,7 @@ enum StorageHostResponseFrame {
         unsafeAddress address: UInt,
         maximumResponseBytes: Int,
         deallocator: @escaping @Sendable (UInt, Int) -> Void
-    ) throws(StorageHostTransportError) -> EmbeddedBytes {
+    ) throws(StorageHostTransportError) -> ByteString {
         guard maximumResponseBytes > 0 else {
             throw .invalidLimit
         }
@@ -30,7 +31,7 @@ enum StorageHostResponseFrame {
             )
         }
         let frameByteCount = Int(frameByteCount32)
-        let allocation = EmbeddedByteAllocation(
+        let allocation = StorageHostResponseAllocation(
             unsafeAddress: address,
             count: frameByteCount,
             deallocator: deallocator
@@ -41,8 +42,7 @@ enum StorageHostResponseFrame {
                 maximum: maximumResponseBytes
             )
         }
-        return EmbeddedBytes(allocation: allocation).slice(
-            4..<frameByteCount
-        )
+        let frameBytes = ByteString(retaining: allocation)
+        return frameBytes[4..<frameByteCount]
     }
 }

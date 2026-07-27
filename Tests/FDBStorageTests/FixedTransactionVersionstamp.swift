@@ -1,3 +1,4 @@
+import DatabaseTypes
 import FoundationDB
 
 struct FixedTransactionVersionstamp: FDB.PendingTransactionVersionstamp {

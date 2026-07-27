@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import StorageKit
@@ -6,12 +7,12 @@ import Foundation
 struct TupleTests {
 
     @Test func validatedElementRangePreservesValues() throws {
-        let tuple = Tuple("prefix", Int64(42), Bytes([0x01, 0x02]))
+        let tuple = Tuple("prefix", Int64(42), ByteString([0x01, 0x02]))
         let elements = try tuple.elements(in: 1..<3)
 
         #expect(elements.count == 2)
         #expect(elements[0] as? Int64 == 42)
-        #expect(elements[1] as? Bytes == Bytes([0x01, 0x02]))
+        #expect(elements[1] as? ByteString == ByteString([0x01, 0x02]))
     }
 
     @Test func invalidElementRangeThrowsTypedError() {
@@ -51,13 +52,13 @@ struct TupleTests {
         #expect(decoded == original)
     }
 
-    // MARK: - Bytes
+    // MARK: - ByteString
 
     @Test func bytesRoundTrip() throws {
-        let original: Bytes = [0x01, 0x02, 0x00, 0x03, 0xFF]
+        let original: ByteString = [0x01, 0x02, 0x00, 0x03, 0xFF]
         let encoded = original.encodeTuple()
         var offset = 1
-        let decoded = try Bytes.decodeTuple(from: encoded, at: &offset)
+        let decoded = try ByteString.decodeTuple(from: encoded, at: &offset)
         #expect(decoded == original)
     }
 
@@ -251,7 +252,7 @@ struct TupleTests {
     }
 
     @Test func tupleMultiType() throws {
-        let uuid = UUID()
+        let uuid = Foundation.UUID()
         let tuple = Tuple(
             "test",
             Int64(-100),
@@ -267,7 +268,7 @@ struct TupleTests {
         #expect(elements[1] as? Int64 == -100)
         #expect(elements[2] as? Double == 3.14)
         #expect(elements[3] as? Bool == true)
-        #expect(elements[4] as? UUID == uuid)
+        #expect(elements[4] as? Foundation.UUID == uuid)
         #expect(elements[5] is TupleNil)
     }
 
@@ -394,7 +395,7 @@ struct TupleTests {
             72057594037927935, 72057594037927936,
             .max - 1, .max
         ]
-        var previousPacked: Bytes?
+        var previousPacked: ByteString?
         for value in values {
             let packed = Tuple(value).pack()
             if let prev = previousPacked {
@@ -408,7 +409,7 @@ struct TupleTests {
 
     @Test func integerOrdering() throws {
         let values: [Int64] = [-1000, -100, -1, 0, 1, 100, 1000]
-        var previousPacked: Bytes?
+        var previousPacked: ByteString?
         for value in values {
             let packed = Tuple(value).pack()
             if let prev = previousPacked {
@@ -420,7 +421,7 @@ struct TupleTests {
 
     @Test func stringOrdering() throws {
         let values = ["a", "aa", "ab", "b", "ba"]
-        var previousPacked: Bytes?
+        var previousPacked: ByteString?
         for value in values {
             let packed = Tuple(value).pack()
             if let prev = previousPacked {
@@ -432,7 +433,7 @@ struct TupleTests {
 
     @Test func doubleOrdering() throws {
         let values: [Double] = [-.infinity, -100.0, -1.0, 0.0, 1.0, 100.0, .infinity]
-        var previousPacked: Bytes?
+        var previousPacked: ByteString?
         for value in values {
             let packed = Tuple(value).pack()
             if let prev = previousPacked {

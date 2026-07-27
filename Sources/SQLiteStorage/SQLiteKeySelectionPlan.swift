@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 
 /// SQLite query plan for resolving one FoundationDB-compatible key selector.
@@ -30,7 +31,7 @@ struct SQLiteKeySelectionPlan: Sendable {
         }
     }
 
-    let key: Bytes
+    let key: ByteString
     let comparison: Comparison
     let order: Order
     let offset: Int64

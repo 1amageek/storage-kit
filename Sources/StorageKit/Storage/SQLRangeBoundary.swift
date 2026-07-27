@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// A KeySelector resolved into a SQL-expressible range boundary.
 ///
 /// SQL backends (SQLite, PostgreSQL) cannot express FDB KeySelector offsets
@@ -37,10 +38,10 @@
 /// and are rejected with `StorageError(.invalidOperation)`.
 package enum SQLRangeBoundary: Sendable, Hashable {
     /// `key {op} $key` — the selector key is compared directly.
-    case direct(op: String, key: Bytes)
+    case direct(op: String, key: ByteString)
     /// `key {op} COALESCE((SELECT max(key) FROM t WHERE key {subqueryOp} $key), <empty>)`
     /// — the selector is resolved to a concrete key by a scalar subquery first.
-    case resolvedSubquery(op: String, subqueryOp: String, key: Bytes)
+    case resolvedSubquery(op: String, subqueryOp: String, key: ByteString)
 
     /// Resolve a begin selector to a SQL boundary.
     ///

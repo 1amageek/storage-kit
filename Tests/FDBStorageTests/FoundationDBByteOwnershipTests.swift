@@ -1,3 +1,4 @@
+import DatabaseTypes
 import FoundationDB
 import StorageKit
 import Synchronization
@@ -14,8 +15,8 @@ struct FoundationDBByteOwnershipTests {
         let valueOwner = BorrowCountingStorageBytesOwner(
             bytes: [0xB0, 0x40, 0x50, 0x60, 0x70, 0xB1]
         )
-        let key = Bytes(retaining: keyOwner)[1..<4]
-        let value = Bytes(retaining: valueOwner)[1..<5]
+        let key = ByteString(retaining: keyOwner)[1..<4]
+        let value = ByteString(retaining: valueOwner)[1..<5]
         let expectedKeyAddress = try byteAddress(of: key)
         let expectedValueAddress = try byteAddress(of: value)
         let backend = RecordingTransaction()
@@ -55,7 +56,7 @@ struct FoundationDBByteOwnershipTests {
         let inputOwner = BorrowCountingStorageBytesOwner(
             bytes: [0xA0, 0x01, 0x02, 0xA1]
         )
-        let inputKey = Bytes(retaining: inputOwner)[1..<3]
+        let inputKey = ByteString(retaining: inputOwner)[1..<3]
         let expectedInputAddress = try byteAddress(of: inputKey)
         let backend = RecordingTransaction(pointValue: outputBytes)
         outputOwner = nil
@@ -93,8 +94,8 @@ struct FoundationDBByteOwnershipTests {
         let endOwner = BorrowCountingStorageBytesOwner(
             bytes: [0xB0, 0x30, 0x40, 0xB1]
         )
-        let begin = Bytes(retaining: beginOwner)[1..<3]
-        let end = Bytes(retaining: endOwner)[1..<3]
+        let begin = ByteString(retaining: beginOwner)[1..<3]
+        let end = ByteString(retaining: endOwner)[1..<3]
         let expectedBeginAddress = try byteAddress(of: begin)
         let expectedEndAddress = try byteAddress(of: end)
 
@@ -153,7 +154,7 @@ struct FoundationDBByteOwnershipTests {
         try await iterator?.finish()
         iterator = nil
         row = nil
-        returnedRow = (Bytes(), Bytes())
+        returnedRow = (ByteString(), ByteString())
     }
 
     @Test("Oversized StorageKit inputs fail before borrowing or dispatch")
@@ -168,7 +169,7 @@ struct FoundationDBByteOwnershipTests {
         )
 
         do {
-            try transaction.clear(key: Bytes(retaining: owner))
+            try transaction.clear(key: ByteString(retaining: owner))
             Issue.record("Oversized key unexpectedly reached FoundationDB")
         } catch let error as StorageError {
             #expect(error.code == .backendContractViolation)
@@ -408,7 +409,7 @@ private final class RecordingTransaction: TransactionProtocol, Sendable {
     }
 }
 
-private final class BorrowCountingStorageBytesOwner: BytesOwner, Sendable {
+private final class BorrowCountingStorageBytesOwner: ByteStringOwner, Sendable {
     private let bytes: [UInt8]
     private let state = Mutex(0)
 
@@ -462,7 +463,7 @@ private final class ByteReleaseRecorder: Sendable {
     }
 }
 
-private final class OversizedBorrowCountingStorageBytesOwner: BytesOwner, Sendable {
+private final class OversizedBorrowCountingStorageBytesOwner: ByteStringOwner, Sendable {
     let count: Int
     private let state = Mutex(0)
 
@@ -480,7 +481,7 @@ private final class OversizedBorrowCountingStorageBytesOwner: BytesOwner, Sendab
     }
 }
 
-private func byteAddress(of bytes: Bytes) throws -> UInt {
+private func byteAddress(of bytes: ByteString) throws -> UInt {
     try bytes.withUnsafeBytes {
         try #require($0.baseAddress.map(UInt.init(bitPattern:)))
     }

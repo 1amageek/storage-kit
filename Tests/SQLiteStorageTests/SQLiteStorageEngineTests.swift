@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import StorageKit
@@ -260,10 +261,10 @@ struct SQLiteStorageEngineTests {
 
     private func collectRange(
         _ tx: some TransactionAccess,
-        begin: Bytes, end: Bytes
-    ) async throws -> [(key: Bytes, value: Bytes)] {
+        begin: ByteString, end: ByteString
+    ) async throws -> [(key: ByteString, value: ByteString)] {
         let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
-        var result: [(key: Bytes, value: Bytes)] = []
+        var result: [(key: ByteString, value: ByteString)] = []
         for try await (key, value) in seq { result.append((key: key, value: value)) }
         return result
     }

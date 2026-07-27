@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Synchronization
 
@@ -141,9 +142,9 @@ public final class SQLiteStorageTransaction:
     // MARK: - Read
 
     public func getValue(
-        for key: Bytes,
+        for key: ByteString,
         snapshot: Bool
-    ) async throws -> Bytes? {
+    ) async throws -> ByteString? {
         let writes = try takeWrites(operation: .read)
         do {
             try await ensureBackendStarted()
@@ -161,7 +162,7 @@ public final class SQLiteStorageTransaction:
     public func getKey(
         selector: KeySelector,
         snapshot: Bool
-    ) async throws -> Bytes? {
+    ) async throws -> ByteString? {
         let plan: SQLiteKeySelectionPlan
         do {
             plan = try SQLiteKeySelectionPlan(selector: selector)
@@ -247,7 +248,7 @@ public final class SQLiteStorageTransaction:
     func nextRange(
         registrationIdentifier: UInt64,
         cursorIdentifier: UInt64
-    ) async throws -> (Bytes, Bytes)? {
+    ) async throws -> (ByteString, ByteString)? {
         try state.withLock { state in
             try Self.validateReadable(state, operation: .rangeRead)
             guard state.activeRangeRegistrations.contains(
@@ -288,7 +289,7 @@ public final class SQLiteStorageTransaction:
 
     // MARK: - Write
 
-    public func setValue(_ value: Bytes, for key: Bytes) throws {
+    public func setValue(_ value: ByteString, for key: ByteString) throws {
         try appendAdmittedWrite(operation: .write) {
             try mutationByteMeter.recordSet(key: key, value: value)
         } makeWrite: {
@@ -296,7 +297,7 @@ public final class SQLiteStorageTransaction:
         }
     }
 
-    public func clear(key: Bytes) throws {
+    public func clear(key: ByteString) throws {
         try appendAdmittedWrite(operation: .delete) {
             try mutationByteMeter.recordClear(key: key)
         } makeWrite: {
@@ -304,7 +305,7 @@ public final class SQLiteStorageTransaction:
         }
     }
 
-    public func clearRange(beginKey: Bytes, endKey: Bytes) throws {
+    public func clearRange(beginKey: ByteString, endKey: ByteString) throws {
         try appendAdmittedWrite(operation: .deleteRange) {
             try mutationByteMeter.recordClearRange(
                 beginKey: beginKey,
@@ -316,8 +317,8 @@ public final class SQLiteStorageTransaction:
     }
 
     public func atomicOp(
-        key: Bytes,
-        param: Bytes,
+        key: ByteString,
+        param: ByteString,
         mutationType: MutationType
     ) throws {
         try appendAdmittedWrite(operation: .write) {

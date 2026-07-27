@@ -1,3 +1,5 @@
+import DatabaseTypes
+
 /// Half-open key range used for Durable Object read conflict tracking.
 public struct CloudflareDurableObjectConflictRange: Sendable, Hashable {
     public let begin: CloudflareDurableObjectBytes?
@@ -12,9 +14,17 @@ public struct CloudflareDurableObjectConflictRange: Sendable, Hashable {
     }
 
     public static func singleKey(_ key: CloudflareDurableObjectBytes) -> CloudflareDurableObjectConflictRange {
-        CloudflareDurableObjectConflictRange(
+        let end = ByteString.copying(
+            count: key.rawValue.count + 1
+        ) { destination in
+            key.rawValue.withUnsafeBytes { source in
+                destination.copyMemory(from: source)
+            }
+            destination[key.rawValue.count] = 0
+        }
+        return CloudflareDurableObjectConflictRange(
             begin: key,
-            end: CloudflareDurableObjectBytes(key.rawValue + [0x00])
+            end: CloudflareDurableObjectBytes(end)
         )
     }
 

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Testing
 @testable import SQLiteStorage
@@ -292,14 +293,14 @@ struct SQLiteLazyRangeCursorTests {
 
     private func consumeExactlyOne(
         _ range: SQLiteRangeResult
-    ) async throws -> (Bytes, Bytes)? {
+    ) async throws -> (ByteString, ByteString)? {
         var iterator = range.makeAsyncIterator()
         return try await iterator.next()
     }
 
     private func advanceOne(
         _ iterator: SQLiteRangeResult.Iterator
-    ) async throws -> (Bytes, Bytes)? {
+    ) async throws -> (ByteString, ByteString)? {
         var iterator = iterator
         return try await iterator.next()
     }

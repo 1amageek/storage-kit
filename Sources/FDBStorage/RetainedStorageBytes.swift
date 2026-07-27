@@ -1,3 +1,4 @@
+import DatabaseTypes
 import FoundationDB
 import StorageKit
 
@@ -6,9 +7,9 @@ import StorageKit
 struct RetainedStorageBytes:
         FDB.ByteInput,
         FDB.ByteStringOwner {
-    let bytes: Bytes
+    let bytes: ByteString
 
-    init(_ bytes: Bytes) {
+    init(_ bytes: ByteString) {
         self.bytes = bytes
     }
 

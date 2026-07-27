@@ -27,6 +27,10 @@ let package = Package(
     ],
     dependencies: [
         .package(
+            url: "https://github.com/1amageek/database-types.git",
+            from: "26.0726.0"
+        ),
+        .package(
             url: "https://github.com/1amageek/fdb-swift-bindings.git",
             from: "0.2.0"
         ),
@@ -35,17 +39,21 @@ let package = Package(
     targets: [
         .target(
             name: "StorageKitEmbeddedCore",
-            dependencies: []
+            dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
+            ]
         ),
         .target(
             name: "StorageKit",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKitEmbeddedCore",
             ]
         ),
         .target(
             name: "FDBStorage",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
                 .product(
                     name: "FoundationDB",
@@ -56,12 +64,14 @@ let package = Package(
         .target(
             name: "SQLiteStorage",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
             ]
         ),
         .target(
             name: "PostgreSQLStorage",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
                 .product(
                     name: "PostgresNIO",
@@ -72,6 +82,7 @@ let package = Package(
         .target(
             name: "CloudflareDurableObjectStorage",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
                 "StorageKitEmbeddedCore",
                 "CloudflareDurableObjectStorageEmbedded",
@@ -80,6 +91,7 @@ let package = Package(
         .target(
             name: "CloudflareDurableObjectStorageTesting",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
                 "StorageKit",
             ]
@@ -87,6 +99,7 @@ let package = Package(
         .target(
             name: "CloudflareDurableObjectStorageHTTP",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
                 "StorageKit",
                 "StorageKitEmbeddedCore",
@@ -95,12 +108,14 @@ let package = Package(
         .target(
             name: "CloudflareDurableObjectStorageEmbedded",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKitEmbeddedCore",
             ]
         ),
         .target(
             name: "CloudflareDurableObjectStorageHostTransport",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
                 "StorageKitEmbeddedCore",
             ],
@@ -111,28 +126,39 @@ let package = Package(
         .testTarget(
             name: "StorageKitTests",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
                 "StorageKitEmbeddedCore",
             ]
         ),
         .testTarget(
             name: "FDBStorageTests",
-            dependencies: ["FDBStorage"],
+            dependencies: [
+                "FDBStorage",
+                .product(name: "DatabaseTypes", package: "database-types"),
+            ],
             linkerSettings: [
                 .unsafeFlags(["-L/usr/local/lib", "-Xlinker", "-rpath", "-Xlinker", "/usr/local/lib"]),
             ]
         ),
         .testTarget(
             name: "SQLiteStorageTests",
-            dependencies: ["SQLiteStorage"]
+            dependencies: [
+                "SQLiteStorage",
+                .product(name: "DatabaseTypes", package: "database-types"),
+            ]
         ),
         .testTarget(
             name: "PostgreSQLStorageTests",
-            dependencies: ["PostgreSQLStorage"]
+            dependencies: [
+                "PostgreSQLStorage",
+                .product(name: "DatabaseTypes", package: "database-types"),
+            ]
         ),
         .testTarget(
             name: "CloudflareDurableObjectStorageTests",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
                 "CloudflareDurableObjectStorageTesting",
                 "CloudflareDurableObjectStorageEmbedded",
@@ -142,6 +168,7 @@ let package = Package(
         .testTarget(
             name: "CloudflareDurableObjectStorageEmbeddedTests",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorageEmbedded",
                 "StorageKitEmbeddedCore",
             ],
@@ -152,6 +179,7 @@ let package = Package(
         .testTarget(
             name: "CloudflareDurableObjectStorageHostTransportTests",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorageHostTransport",
                 "StorageKitEmbeddedCore",
             ]
@@ -159,6 +187,7 @@ let package = Package(
         .testTarget(
             name: "CloudflareDurableObjectStorageHTTPTests",
             dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorageHTTP",
                 "StorageKitEmbeddedCore",
             ]

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorageEmbedded
 import StorageKit
 import StorageKitEmbeddedCore
@@ -19,7 +20,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
             .read(
                 CloudflareDurableObjectEmbeddedReadRequest(
                     scope: try embeddedScope(request.scope, operation: .read),
-                    key: request.key.rawValue.embeddedBytes,
+                    key: request.key.rawValue,
                     snapshot: request.snapshot,
                     expectedReadVersion: request.expectedReadVersion
                 )
@@ -31,7 +32,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         }
         return CloudflareDurableObjectReadResponse(
             value: readResponse.value.map {
-                CloudflareDurableObjectBytes(Bytes($0))
+                CloudflareDurableObjectBytes($0)
             },
             currentCommitVersion: readResponse.currentCommitVersion
         )
@@ -54,7 +55,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                     reverse: request.reverse,
                     snapshot: request.snapshot,
                     expectedReadVersion: request.expectedReadVersion,
-                    cursorKey: request.cursorKey?.rawValue.embeddedBytes
+                    cursorKey: request.cursorKey?.rawValue
                 )
             ),
             operation: .rangeRead
@@ -65,8 +66,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         return CloudflareDurableObjectRangeResponse(
             rows: rangeResponse.rows.map {
                 CloudflareDurableObjectKeyValue(
-                    key: CloudflareDurableObjectBytes(Bytes($0.key)),
-                    value: CloudflareDurableObjectBytes(Bytes($0.value))
+                    key: CloudflareDurableObjectBytes($0.key),
+                    value: CloudflareDurableObjectBytes($0.value)
                 )
             },
             hasMore: rangeResponse.hasMore,
@@ -127,8 +128,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                         request.scope,
                         operation: .rangeRead
                     ),
-                    begin: request.begin.rawValue.embeddedBytes,
-                    end: request.end.rawValue.embeddedBytes,
+                    begin: request.begin.rawValue,
+                    end: request.end.rawValue,
                     expectedReadVersion: request.expectedReadVersion
                 )
             ),
@@ -153,8 +154,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                         request.scope,
                         operation: .rangeRead
                     ),
-                    begin: request.begin.rawValue.embeddedBytes,
-                    end: request.end.rawValue.embeddedBytes,
+                    begin: request.begin.rawValue,
+                    end: request.end.rawValue,
                     chunkSize: request.chunkSize,
                     expectedReadVersion: request.expectedReadVersion
                 )
@@ -166,7 +167,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         }
         return CloudflareDurableObjectRangeSplitPointsResponse(
             splitPoints: splitResponse.splitPoints.map {
-                CloudflareDurableObjectBytes(Bytes($0))
+                CloudflareDurableObjectBytes($0)
             },
             currentCommitVersion: splitResponse.currentCommitVersion
         )
@@ -176,7 +177,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         _ request: CloudflareDurableObjectEmbeddedRequest,
         operation: StorageOperation
     ) async throws -> CloudflareDurableObjectEmbeddedResponse {
-        let requestBytes: EmbeddedBytes
+        let requestBytes: ByteString
         do {
             requestBytes = try CloudflareDurableObjectStorageWireCodec.encode(request)
         } catch {
@@ -189,7 +190,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
             )
         }
 
-        let responseBytes: EmbeddedBytes
+        let responseBytes: ByteString
         do {
             responseBytes = try await transport.send(requestBytes)
         } catch is CancellationError {
@@ -268,7 +269,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     ) throws -> EmbeddedKeySelector {
         _ = operation
         return EmbeddedKeySelector(
-            key: selector.key.embeddedBytes,
+            key: selector.key,
             orEqual: selector.orEqual,
             offset: selector.offset
         )
@@ -298,20 +299,20 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         switch mutation {
         case .set(let key, let value):
             return .set(
-                key: key.rawValue.embeddedBytes,
-                value: value.rawValue.embeddedBytes
+                key: key.rawValue,
+                value: value.rawValue
             )
         case .clear(let key):
-            return .clear(key: key.rawValue.embeddedBytes)
+            return .clear(key: key.rawValue)
         case .clearRange(let begin, let end):
             return .clearRange(
-                begin: begin.rawValue.embeddedBytes,
-                end: end.rawValue.embeddedBytes
+                begin: begin.rawValue,
+                end: end.rawValue
             )
         case .atomic(let key, let param, let mutationType):
             return .atomic(
-                key: key.rawValue.embeddedBytes,
-                param: param.rawValue.embeddedBytes,
+                key: key.rawValue,
+                param: param.rawValue,
                 mutationType: try embeddedMutationType(mutationType, operation: operation)
             )
         }
@@ -347,8 +348,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         _ range: CloudflareDurableObjectConflictRange
     ) -> EmbeddedKeyRange {
         EmbeddedKeyRange(
-            begin: range.begin.map { $0.rawValue.embeddedBytes },
-            end: range.end.map { $0.rawValue.embeddedBytes }
+            begin: range.begin.map { $0.rawValue },
+            end: range.end.map { $0.rawValue }
         )
     }
 
@@ -357,10 +358,10 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     ) -> CloudflareDurableObjectConflictRange {
         CloudflareDurableObjectConflictRange(
             begin: range.begin.map {
-                CloudflareDurableObjectBytes(Bytes($0))
+                CloudflareDurableObjectBytes($0)
             },
             end: range.end.map {
-                CloudflareDurableObjectBytes(Bytes($0))
+                CloudflareDurableObjectBytes($0)
             }
         )
     }

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorage
 import CloudflareDurableObjectStorageEmbedded
 import StorageKitEmbeddedCore
@@ -10,7 +11,7 @@ actor SuspendingCloudflareDurableObjectStorageTransport: CloudflareDurableObject
     private var commitStarted = false
     private var commitStartWaiters: [CheckedContinuation<Void, Never>] = []
 
-    func send(_ requestBytes: EmbeddedBytes) async throws -> EmbeddedBytes {
+    func send(_ requestBytes: ByteString) async throws -> ByteString {
         let request = try CloudflareDurableObjectStorageWireCodec.decodeRequest(requestBytes)
         switch request {
         case .readiness:

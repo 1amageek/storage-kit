@@ -1,6 +1,7 @@
+import DatabaseTypes
 /// Backend-native range sequence with explicit asynchronous cleanup.
 public protocol TransactionRangeResult: AsyncSequence, Sendable
-where Element == (Bytes, Bytes), AsyncIterator: TransactionRangeIterator {}
+where Element == (ByteString, ByteString), AsyncIterator: TransactionRangeIterator {}
 
 extension TransactionRangeResult {
     /// Consumes the range and always awaits backend cleanup.
@@ -9,7 +10,7 @@ extension TransactionRangeResult {
     /// consumers must therefore use this scoped operation instead of a bare
     /// `for await` loop whenever iteration can throw or stop before exhaustion.
     public func consumeRows(
-        _ body: (Bytes, Bytes) async throws -> Void
+        _ body: (ByteString, ByteString) async throws -> Void
     ) async throws {
         var iterator = makeAsyncIterator()
         do {

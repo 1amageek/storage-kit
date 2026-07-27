@@ -1,8 +1,9 @@
+import DatabaseTypes
 import NIOCore
 import StorageKit
 
 /// Retains PostgreSQL result bytes and lends their readable region without copying.
-struct PostgreSQLResultBytesOwner: BytesOwner {
+struct PostgreSQLResultBytesOwner: ByteStringOwner {
     let buffer: ByteBuffer
 
     var count: Int {

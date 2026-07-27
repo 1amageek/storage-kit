@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Synchronization
 
@@ -51,7 +52,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         self.transactionDomain = transactionDomain
     }
 
-    public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
+    public func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString? {
         try validateKey(key)
         let (phase, mutations, observedReadVersion) = state.withLock {
             ($0.phase, $0.mutations, $0.observedReadVersion)
@@ -130,7 +131,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
     }
 
-    public func setValue(_ value: Bytes, for key: Bytes) throws {
+    public func setValue(_ value: ByteString, for key: ByteString) throws {
         try validateKey(key)
         try validateValue(value)
         try state.withLock { state in
@@ -148,7 +149,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
     }
 
-    public func clear(key: Bytes) throws {
+    public func clear(key: ByteString) throws {
         try validateKey(key)
         try state.withLock { state in
             try prepareMutation(state: &state)
@@ -159,7 +160,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
     }
 
-    public func clearRange(beginKey: Bytes, endKey: Bytes) throws {
+    public func clearRange(beginKey: ByteString, endKey: ByteString) throws {
         try validateBoundary(beginKey)
         try validateBoundary(endKey)
         guard CloudflareDurableObjectByteOrdering.compare(
@@ -189,8 +190,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     public func atomicOp(
-        key: Bytes,
-        param: Bytes,
+        key: ByteString,
+        param: ByteString,
         mutationType: MutationType
     ) throws {
         switch mutationType {
@@ -515,7 +516,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     public func setOption(
-        to value: Bytes?,
+        to value: ByteString?,
         forOption option: TransactionOption
     ) throws {
         guard value == nil else {
@@ -544,8 +545,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     public func addConflictRange(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         type: ConflictRangeType
     ) throws {
         try validateBoundary(beginKey)
@@ -583,8 +584,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     public func getEstimatedRangeSizeBytes(
-        beginKey: Bytes,
-        endKey: Bytes
+        beginKey: ByteString,
+        endKey: ByteString
     ) async throws -> Int {
         try validateOrderedRange(
             beginKey: beginKey,
@@ -632,10 +633,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     public func getRangeSplitPoints(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         chunkSize: Int
-    ) async throws -> [Bytes] {
+    ) async throws -> [ByteString] {
         try validateOrderedRange(
             beginKey: beginKey,
             endKey: endKey,
@@ -721,10 +722,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     private func value(
-        for key: Bytes,
-        committed: Bytes?,
+        for key: ByteString,
+        committed: ByteString?,
         applying mutations: [CloudflareDurableObjectMutation]
-    ) throws -> Bytes? {
+    ) throws -> ByteString? {
         var value = committed
         for mutation in mutations {
             switch mutation {
@@ -808,7 +809,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
     }
 
-    private func validateKey(_ key: Bytes) throws {
+    private func validateKey(_ key: ByteString) throws {
         guard key.count <= limits.maxKeyBytes else {
             throw StorageError(
                 code: .invalidOperation,
@@ -819,7 +820,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
     }
 
-    private func validateValue(_ value: Bytes) throws {
+    private func validateValue(_ value: ByteString) throws {
         try validateBytes(
             value,
             maximum: limits.maxValueBytes,
@@ -828,7 +829,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     private func validateBytes(
-        _ bytes: Bytes,
+        _ bytes: ByteString,
         maximum: Int,
         message: String
     ) throws {
@@ -843,7 +844,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     private func validateBoundary(
-        _ boundary: Bytes,
+        _ boundary: ByteString,
         operation: StorageOperation = .write
     ) throws {
         guard boundary.count <= limits.maxBoundaryBytes else {
@@ -857,8 +858,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     private func validateOrderedRange(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         message: String
     ) throws {
         try validateBoundary(beginKey, operation: .rangeRead)
@@ -877,9 +878,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     private func validateSplitPoints(
-        _ points: [Bytes],
-        beginKey: Bytes,
-        endKey: Bytes
+        _ points: [ByteString],
+        beginKey: ByteString,
+        endKey: ByteString
     ) throws {
         let expectedMinimumCount = beginKey == endKey ? 1 : 2
         guard points.count >= expectedMinimumCount,

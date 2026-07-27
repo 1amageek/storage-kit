@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Read and mutation access to one storage transaction.
 ///
 /// Has API-compatible signatures with FDB's TransactionProtocol.
@@ -41,14 +42,14 @@ public protocol TransactionAccess: Sendable {
     /// - Parameters:
     ///   - key: The key to retrieve.
     ///   - snapshot: If true, performs a snapshot read (FDB: does not add to conflict range).
-    func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes?
+    func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString?
 
     /// Get the key at the position specified by a KeySelector.
     ///
     /// - Parameters:
     ///   - selector: The key selection criteria.
     ///   - snapshot: If true, performs a snapshot read.
-    func getKey(selector: KeySelector, snapshot: Bool) async throws -> Bytes?
+    func getKey(selector: KeySelector, snapshot: Bool) async throws -> ByteString?
 
     /// Range scan (lazily evaluated).
     ///
@@ -71,17 +72,17 @@ public protocol TransactionAccess: Sendable {
     // MARK: - Write
 
     /// Set a value for a key (overwrites existing value).
-    func setValue(_ value: Bytes, for key: Bytes) throws
+    func setValue(_ value: ByteString, for key: ByteString) throws
 
     /// Delete a key.
-    func clear(key: Bytes) throws
+    func clear(key: ByteString) throws
 
     /// Delete all keys within a range.
     ///
     /// - Parameters:
     ///   - beginKey: Start key (inclusive).
     ///   - endKey: End key (exclusive).
-    func clearRange(beginKey: Bytes, endKey: Bytes) throws
+    func clearRange(beginKey: ByteString, endKey: ByteString) throws
 
     // MARK: - Atomic Operations
 
@@ -91,7 +92,7 @@ public protocol TransactionAccess: Sendable {
     ///   - key: The target key.
     ///   - param: Operation parameter (operation-dependent byte array).
     ///   - mutationType: The type of mutation operation.
-    func atomicOp(key: Bytes, param: Bytes, mutationType: MutationType) throws
+    func atomicOp(key: ByteString, param: ByteString, mutationType: MutationType) throws
 
     // MARK: - Version Management
 
@@ -107,7 +108,7 @@ public protocol TransactionAccess: Sendable {
     func setOption(forOption option: TransactionOption) throws
 
     /// Set a transaction option (byte value).
-    func setOption(to value: Bytes?, forOption option: TransactionOption) throws
+    func setOption(to value: ByteString?, forOption option: TransactionOption) throws
 
     /// Set a transaction option (integer value).
     func setOption(to value: Int, forOption option: TransactionOption) throws
@@ -120,20 +121,20 @@ public protocol TransactionAccess: Sendable {
     ///   - beginKey: Start key (inclusive).
     ///   - endKey: End key (exclusive).
     ///   - type: read or write.
-    func addConflictRange(beginKey: Bytes, endKey: Bytes, type: ConflictRangeType) throws
+    func addConflictRange(beginKey: ByteString, endKey: ByteString, type: ConflictRangeType) throws
 
     // MARK: - Statistics
 
     /// Get the byte-size metric for a key range in the transaction view.
     /// Pending mutations are included.
-    func getEstimatedRangeSizeBytes(beginKey: Bytes, endKey: Bytes) async throws -> Int
+    func getEstimatedRangeSizeBytes(beginKey: ByteString, endKey: ByteString) async throws -> Int
 
     /// Get split points for the transaction view, including pending mutations.
     func getRangeSplitPoints(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         chunkSize: Int
-    ) async throws -> [Bytes]
+    ) async throws -> [ByteString]
 
     // MARK: - Versionstamp
 
@@ -183,7 +184,7 @@ extension TransactionAccess {
     /// Note: All Transaction conformers MUST implement `getValue(for:snapshot:)` directly.
     /// This extension only provides a default argument — it does NOT provide an implementation.
     /// Relying on this extension as a protocol witness would cause infinite recursion.
-    public func getValue(for key: Bytes, snapshot: Bool = false) async throws -> Bytes? {
+    public func getValue(for key: ByteString, snapshot: Bool = false) async throws -> ByteString? {
         try await getValue(for: key, snapshot: snapshot)
     }
 
@@ -204,9 +205,9 @@ extension TransactionAccess {
         )
     }
 
-    /// Bytes-based getRange convenience (converts to KeySelector internally).
+    /// ByteString-based getRange convenience (converts to KeySelector internally).
     public func getRange(
-        begin: Bytes, end: Bytes,
+        begin: ByteString, end: ByteString,
         limit: Int = 0, reverse: Bool = false,
         snapshot: Bool = false, streamingMode: StreamingMode = .wantAll
     ) -> RangeResult {
@@ -228,8 +229,8 @@ extension TransactionAccess {
         from begin: KeySelector, to end: KeySelector,
         limit: Int = 0, reverse: Bool = false,
         snapshot: Bool = false, streamingMode: StreamingMode = .wantAll
-    ) async throws -> [(Bytes, Bytes)] {
-        var result: [(Bytes, Bytes)] = []
+    ) async throws -> [(ByteString, ByteString)] {
+        var result: [(ByteString, ByteString)] = []
         try await forEachInRange(
             from: begin, to: end,
             limit: limit, reverse: reverse,
@@ -240,12 +241,12 @@ extension TransactionAccess {
         return result
     }
 
-    /// Bytes-based collectRange convenience (converts to KeySelector internally).
+    /// ByteString-based collectRange convenience (converts to KeySelector internally).
     public func collectRange(
-        begin: Bytes, end: Bytes,
+        begin: ByteString, end: ByteString,
         limit: Int = 0, reverse: Bool = false,
         snapshot: Bool = false, streamingMode: StreamingMode = .wantAll
-    ) async throws -> [(Bytes, Bytes)] {
+    ) async throws -> [(ByteString, ByteString)] {
         try await collectRange(
             from: .firstGreaterOrEqual(begin),
             to: .firstGreaterOrEqual(end),
@@ -259,12 +260,12 @@ extension TransactionAccess {
     /// Performs type-safe range iteration via transaction access.
     ///
     /// Within a protocol extension, Self is a concrete type, so the associated type RangeResult's
-    /// Element is resolved as (Bytes, Bytes).
+    /// Element is resolved as (ByteString, ByteString).
     public func forEachInRange(
         from begin: KeySelector, to end: KeySelector,
         limit: Int = 0, reverse: Bool = false,
         snapshot: Bool = false, streamingMode: StreamingMode = .wantAll,
-        body: (Bytes, Bytes) async throws -> Void
+        body: (ByteString, ByteString) async throws -> Void
     ) async throws {
         let rows = getRange(
             from: begin, to: end,
@@ -278,7 +279,7 @@ extension TransactionAccess {
 
     /// FDB compatible: set option with a string value.
     public func setOption(to value: String, forOption option: TransactionOption) throws {
-        try setOption(to: Bytes(value.utf8), forOption: option)
+        try setOption(to: ByteString(Array(value.utf8)), forOption: option)
     }
 }
 
@@ -292,7 +293,7 @@ extension TransactionAccess {
 
     /// Default: implements getKey with adjacent selectors, without assuming a
     /// maximum sentinel key for the backend keyspace.
-    public func getKey(selector: KeySelector, snapshot: Bool = false) async throws -> Bytes? {
+    public func getKey(selector: KeySelector, snapshot: Bool = false) async throws -> ByteString? {
         let (nextOffset, overflow) = selector.offset.addingReportingOverflow(1)
         guard !overflow else {
             throw StorageError(
@@ -301,7 +302,7 @@ extension TransactionAccess {
                 message: "KeySelector offset cannot be advanced"
             )
         }
-        var result: Bytes?
+        var result: ByteString?
         try await forEachInRange(
             from: selector,
             to: KeySelector(
@@ -344,7 +345,7 @@ extension TransactionAccess {
     }
 
     /// Default: options must be implemented explicitly by a backend.
-    public func setOption(to value: Bytes?, forOption option: TransactionOption) throws {
+    public func setOption(to value: ByteString?, forOption option: TransactionOption) throws {
         throw StorageError.unsupportedOperation(
             "This storage backend does not support byte-valued transaction options",
             operation: .execute
@@ -361,8 +362,8 @@ extension TransactionAccess {
 
     /// Default: conflict tracking must be implemented explicitly by a backend.
     public func addConflictRange(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         type: ConflictRangeType
     ) throws {
         throw StorageError.unsupportedOperation(
@@ -375,8 +376,8 @@ extension TransactionAccess {
     /// the transaction view. Backends may use a native implementation when no
     /// pending mutations can change the result.
     public func getEstimatedRangeSizeBytes(
-        beginKey: Bytes,
-        endKey: Bytes
+        beginKey: ByteString,
+        endKey: ByteString
     ) async throws -> Int {
         guard compareBytes(beginKey, endKey) <= 0 else {
             throw StorageError(
@@ -398,10 +399,10 @@ extension TransactionAccess {
     /// Default: returns ordered chunk boundaries, including `beginKey` and
     /// `endKey`, whose exact stored byte count is approximately `chunkSize`.
     public func getRangeSplitPoints(
-        beginKey: Bytes,
-        endKey: Bytes,
+        beginKey: ByteString,
+        endKey: ByteString,
         chunkSize: Int
-    ) async throws -> [Bytes] {
+    ) async throws -> [ByteString] {
         guard compareBytes(beginKey, endKey) <= 0 else {
             throw StorageError(
                 code: .invalidOperation,

@@ -1,16 +1,17 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 /// Exact stored-byte count request for one committed key range.
 public struct CloudflareDurableObjectEmbeddedRangeSizeRequest: Sendable, Hashable {
     public let scope: CloudflareDurableObjectEmbeddedScope
-    public let begin: EmbeddedBytes
-    public let end: EmbeddedBytes
+    public let begin: ByteString
+    public let end: ByteString
     public let expectedReadVersion: Int64?
 
     public init(
         scope: CloudflareDurableObjectEmbeddedScope,
-        begin: EmbeddedBytes,
-        end: EmbeddedBytes,
+        begin: ByteString,
+        end: ByteString,
         expectedReadVersion: Int64? = nil
     ) {
         self.scope = scope
@@ -58,8 +59,8 @@ public struct CloudflareDurableObjectEmbeddedRangeSizeRequest: Sendable, Hashabl
     }
 
     static func validate(
-        begin: EmbeddedBytes,
-        end: EmbeddedBytes
+        begin: ByteString,
+        end: ByteString
     ) throws(CloudflareDurableObjectEmbeddedError) {
         guard EmbeddedByteOrdering.compare(begin, end) <= 0 else {
             throw .wire(.invalidRangeBoundaries)

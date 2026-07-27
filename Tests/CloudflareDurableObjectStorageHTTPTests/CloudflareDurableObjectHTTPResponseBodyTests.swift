@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if !os(WASI)
 import Foundation
 import StorageKitEmbeddedCore
@@ -17,17 +18,14 @@ struct CloudflareDurableObjectHTTPResponseBodyTests {
         #expect(accepted)
         let bytes = body.bytes()
 
-        guard case .owner = bytes.sharedStorage else {
-            Issue.record("Expected owner-backed response bytes")
-            return
-        }
         #expect(try address(of: bytes) == address(of: data))
+        #expect(bytes.retainedByteCount == data.count)
         #expect(bytes.count == data.count)
         #expect(bytes.first == 0xa5)
     }
 
     @Test("multiple chunks consolidate directly into one final allocation")
-    func multipleChunksUseOneFinalArray() {
+    func multipleChunksUseOneFinalArray() throws {
         var body = CloudflareDurableObjectHTTPResponseBody()
 
         let acceptedFirst = body.append(Data([1, 2]), maximumBytes: 5)
@@ -36,11 +34,9 @@ struct CloudflareDurableObjectHTTPResponseBodyTests {
         #expect(acceptedSecond)
         let bytes = body.bytes()
 
-        guard case .array(let storage, let range) = bytes.sharedStorage else {
-            Issue.record("Expected one consolidated array allocation")
-            return
-        }
-        #expect(range == storage.indices)
+        let detached = bytes.detached()
+        #expect(bytes.retainedByteCount == bytes.count)
+        #expect(try address(of: bytes) == address(of: detached))
         #expect(bytes == [1, 2, 3, 4, 5])
     }
 
@@ -57,7 +53,7 @@ struct CloudflareDurableObjectHTTPResponseBodyTests {
         #expect(body.bytes() == [1, 2])
     }
 
-    private func address(of bytes: EmbeddedBytes) throws -> UInt {
+    private func address(of bytes: ByteString) throws -> UInt {
         try #require(bytes.withUnsafeBytes { buffer in
             buffer.baseAddress.map { UInt(bitPattern: $0) }
         })

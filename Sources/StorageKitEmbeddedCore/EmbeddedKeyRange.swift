@@ -1,15 +1,22 @@
+import DatabaseTypes
 /// Half-open key range used for embedded read/write conflict tracking.
 public struct EmbeddedKeyRange: Sendable, Hashable {
-    public let begin: EmbeddedBytes?
-    public let end: EmbeddedBytes?
+    public let begin: ByteString?
+    public let end: ByteString?
 
-    public init(begin: EmbeddedBytes?, end: EmbeddedBytes?) {
+    public init(begin: ByteString?, end: ByteString?) {
         self.begin = begin
         self.end = end
     }
 
-    public static func singleKey(_ key: EmbeddedBytes) -> EmbeddedKeyRange {
-        EmbeddedKeyRange(begin: key, end: key.appending(0x00))
+    public static func singleKey(_ key: ByteString) -> EmbeddedKeyRange {
+        let end = ByteString.copying(count: key.count + 1) { destination in
+            key.withUnsafeBytes { source in
+                destination.copyMemory(from: source)
+            }
+            destination[key.count] = 0
+        }
+        return EmbeddedKeyRange(begin: key, end: end)
     }
 
     public func encode(into writer: inout EmbeddedWireWriter) throws(EmbeddedWireError) {

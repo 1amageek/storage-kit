@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorage
 import StorageKit
 import StorageKitEmbeddedCore
@@ -13,7 +14,7 @@ final class ConfiguredFailureCloudflareDurableObjectStorageTransport: Cloudflare
         self.error = error
     }
 
-    func send(_ requestBytes: EmbeddedBytes) async throws -> EmbeddedBytes {
+    func send(_ requestBytes: ByteString) async throws -> ByteString {
         _ = requestBytes
         throw error
     }

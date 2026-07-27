@@ -1,3 +1,4 @@
+import DatabaseTypes
 import FoundationDB
 import StorageKit
 import Synchronization
@@ -217,7 +218,7 @@ struct FDBStorageTransactionFootprintTests {
         )
 
         async let readValue = transaction.getValue(
-            for: Bytes([0x01]),
+            for: ByteString([0x01]),
             snapshot: false
         )
         try await gate.waitUntilEntered()
@@ -248,7 +249,7 @@ struct FDBStorageTransactionFootprintTests {
 
         let readTask = Task {
             try await transaction.getValue(
-                for: Bytes([0x01]),
+                for: ByteString([0x01]),
                 snapshot: false
             )
         }
@@ -284,8 +285,8 @@ struct FDBStorageTransactionFootprintTests {
             transactionDomain: StorageTransactionDomain()
         )
         let rows = transaction.getRange(
-            from: .firstGreaterOrEqual(Bytes([0x00])),
-            to: .firstGreaterOrEqual(Bytes([0xff])),
+            from: .firstGreaterOrEqual(ByteString([0x00])),
+            to: .firstGreaterOrEqual(ByteString([0xff])),
             limit: 1,
             reverse: false,
             snapshot: false,
@@ -564,7 +565,7 @@ struct FDBStorageTransactionFootprintTests {
         var iterator = rows.makeAsyncIterator()
 
         let first = try await iterator.next()
-        #expect(first?.0 == Bytes([0x01]))
+        #expect(first?.0 == ByteString([0x01]))
         try await transaction.cancel()
 
         do {
@@ -739,8 +740,8 @@ struct FDBStorageTransactionFootprintTests {
         from transaction: FDBStorageTransaction
     ) -> FDBStorageRangeResult {
         transaction.getRange(
-            from: .firstGreaterOrEqual(Bytes([0x00])),
-            to: .firstGreaterOrEqual(Bytes([0xff])),
+            from: .firstGreaterOrEqual(ByteString([0x00])),
+            to: .firstGreaterOrEqual(ByteString([0xff])),
             limit: 0,
             reverse: false,
             snapshot: false,

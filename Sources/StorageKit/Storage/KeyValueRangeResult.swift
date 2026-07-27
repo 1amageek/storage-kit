@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Array-backed AsyncSequence for range scan results.
 ///
 /// Used by the in-memory backend, whose transaction view already exists as an
@@ -6,12 +7,12 @@
 /// Supports deferred error propagation: if constructed with an error,
 /// the error is thrown on the first `next()` call.
 public struct KeyValueRangeResult: TransactionRangeResult {
-    public typealias Element = (Bytes, Bytes)
+    public typealias Element = (ByteString, ByteString)
 
-    private let results: [(key: Bytes, value: Bytes)]
+    private let results: [(key: ByteString, value: ByteString)]
     private let error: (any Error)?
 
-    public init(_ results: [(key: Bytes, value: Bytes)]) {
+    public init(_ results: [(key: ByteString, value: ByteString)]) {
         self.results = results
         self.error = nil
     }
@@ -26,16 +27,16 @@ public struct KeyValueRangeResult: TransactionRangeResult {
     }
 
     public struct Iterator: TransactionRangeIterator, Sendable {
-        private var results: [(key: Bytes, value: Bytes)]?
+        private var results: [(key: ByteString, value: ByteString)]?
         private var error: (any Error)?
         private var index: Int = 0
 
-        init(results: [(key: Bytes, value: Bytes)], error: (any Error)?) {
+        init(results: [(key: ByteString, value: ByteString)], error: (any Error)?) {
             self.results = results
             self.error = error
         }
 
-        public mutating func next() async throws -> (Bytes, Bytes)? {
+        public mutating func next() async throws -> (ByteString, ByteString)? {
             if let error {
                 self.error = nil
                 results = nil

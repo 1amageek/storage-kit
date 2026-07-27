@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 /// Minimal Embedded Swift runtime marker for Cloudflare Durable Object storage.
@@ -6,7 +7,7 @@ public enum CloudflareDurableObjectStorageWireCodec {
 
     public static func encode(
         _ request: CloudflareDurableObjectEmbeddedRequest
-    ) throws(CloudflareDurableObjectEmbeddedError) -> EmbeddedBytes {
+    ) throws(CloudflareDurableObjectEmbeddedError) -> ByteString {
         try CloudflareDurableObjectStorageWireValidator.validate(request)
         let bytes = try EmbeddedWireWriter.encode {
             (writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) in
@@ -18,7 +19,7 @@ public enum CloudflareDurableObjectStorageWireCodec {
     }
 
     public static func decodeRequest(
-        _ bytes: EmbeddedBytes
+        _ bytes: ByteString
     ) throws(CloudflareDurableObjectEmbeddedError) -> CloudflareDurableObjectEmbeddedRequest {
         try CloudflareDurableObjectStorageWireValidator.validateFrameBytes(bytes)
         var reader = EmbeddedWireReader(bytes)
@@ -33,7 +34,7 @@ public enum CloudflareDurableObjectStorageWireCodec {
 
     public static func encode(
         _ response: CloudflareDurableObjectEmbeddedResponse
-    ) throws(CloudflareDurableObjectEmbeddedError) -> EmbeddedBytes {
+    ) throws(CloudflareDurableObjectEmbeddedError) -> ByteString {
         try CloudflareDurableObjectStorageWireValidator.validate(response)
         let bytes = try EmbeddedWireWriter.encode {
             (writer: inout EmbeddedWireWriter) throws(CloudflareDurableObjectEmbeddedError) in
@@ -45,7 +46,7 @@ public enum CloudflareDurableObjectStorageWireCodec {
     }
 
     public static func decodeResponse(
-        _ bytes: EmbeddedBytes
+        _ bytes: ByteString
     ) throws(CloudflareDurableObjectEmbeddedError) -> CloudflareDurableObjectEmbeddedResponse {
         try CloudflareDurableObjectStorageWireValidator.validateFrameBytes(bytes)
         var reader = EmbeddedWireReader(bytes)
@@ -61,13 +62,13 @@ public enum CloudflareDurableObjectStorageWireCodec {
     public static func decodeRequest(
         _ bytes: [UInt8]
     ) throws(CloudflareDurableObjectEmbeddedError) -> CloudflareDurableObjectEmbeddedRequest {
-        try decodeRequest(EmbeddedBytes(bytes))
+        try decodeRequest(ByteString(bytes))
     }
 
     public static func decodeResponse(
         _ bytes: [UInt8]
     ) throws(CloudflareDurableObjectEmbeddedError) -> CloudflareDurableObjectEmbeddedResponse {
-        try decodeResponse(EmbeddedBytes(bytes))
+        try decodeResponse(ByteString(bytes))
     }
 
     public static func validateMutationRoundTrip(

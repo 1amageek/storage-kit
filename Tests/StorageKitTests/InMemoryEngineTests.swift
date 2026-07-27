@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import StorageKit
@@ -212,10 +213,10 @@ struct InMemoryEngineTests {
 
     private func collectRange(
         _ tx: some TransactionAccess,
-        begin: Bytes, end: Bytes
-    ) async throws -> [(key: Bytes, value: Bytes)] {
+        begin: ByteString, end: ByteString
+    ) async throws -> [(key: ByteString, value: ByteString)] {
         let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
-        var result: [(key: Bytes, value: Bytes)] = []
+        var result: [(key: ByteString, value: ByteString)] = []
         for try await (key, value) in seq { result.append((key: key, value: value)) }
         return result
     }
@@ -851,7 +852,7 @@ struct InMemoryEngineTests {
 
         try await engine.withTransaction { tx in
             for i: UInt16 in 0..<500 {
-                let key = withUnsafeBytes(of: i.bigEndian) { Bytes($0) }
+                let key = withUnsafeBytes(of: i.bigEndian) { ByteString(Array($0)) }
                 try tx.setValue(key, for: key)
             }
         }
@@ -860,7 +861,7 @@ struct InMemoryEngineTests {
             let results = try await tx.collectRange(
                 begin: [0x00, 0x00], end: [0xFF, 0xFF]
             )
-            var prevKey: Bytes?
+            var prevKey: ByteString?
             for (key, _) in results {
                 if let prev = prevKey {
                     // Verify ascending order via compareBytes
@@ -911,8 +912,8 @@ struct InMemoryEngineTests {
 
     private func readValue(
         _ engine: InMemoryEngine,
-        key: Bytes
-    ) async throws -> Bytes? {
+        key: ByteString
+    ) async throws -> ByteString? {
         let transaction = try engine.createTransaction()
         let value = try await transaction.getValue(for: key, snapshot: true)
         try await transaction.commit()

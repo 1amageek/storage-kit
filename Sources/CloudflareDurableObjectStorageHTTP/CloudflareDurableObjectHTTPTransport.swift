@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -61,8 +62,8 @@ public struct CloudflareDurableObjectHTTPTransport: CloudflareDurableObjectStora
     }
 
     public func send(
-        _ requestBytes: EmbeddedBytes
-    ) async throws -> EmbeddedBytes {
+        _ requestBytes: ByteString
+    ) async throws -> ByteString {
         guard requestBytes.count <= maximumRequestBytes else {
             throw CloudflareDurableObjectHTTPTransportError.requestTooLarge(
                 actual: requestBytes.count,

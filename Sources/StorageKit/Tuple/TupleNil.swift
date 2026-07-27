@@ -1,3 +1,4 @@
+import DatabaseTypes
 /// Type representing a null value within a Tuple.
 ///
 /// In the FDB Tuple Layer, null is encoded as a single byte with type code 0x00.
@@ -8,7 +9,7 @@ public struct TupleNil: TupleElement, Sendable {
         sink.writeByte(TupleTypeCode.null.rawValue)
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> TupleNil {
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> TupleNil {
         TupleNil()
     }
 

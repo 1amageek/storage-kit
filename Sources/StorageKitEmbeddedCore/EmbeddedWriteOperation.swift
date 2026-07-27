@@ -1,11 +1,12 @@
+import DatabaseTypes
 /// Embedded write operation using StorageKit atomic mutation semantics.
 public enum EmbeddedWriteOperation: Sendable, Hashable {
-    case set(key: EmbeddedBytes, value: EmbeddedBytes)
-    case clear(key: EmbeddedBytes)
-    case clearRange(begin: EmbeddedBytes, end: EmbeddedBytes)
+    case set(key: ByteString, value: ByteString)
+    case clear(key: ByteString)
+    case clearRange(begin: ByteString, end: ByteString)
     case atomic(
-        key: EmbeddedBytes,
-        param: EmbeddedBytes,
+        key: ByteString,
+        param: ByteString,
         mutationType: EmbeddedMutationType
     )
 

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import PostgresNIO
 import NIOCore
@@ -95,10 +96,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     private enum WriteOp: Sendable {
-        case set(key: Bytes, value: Bytes)
-        case clear(key: Bytes)
-        case clearRange(begin: Bytes, end: Bytes)
-        case atomic(key: Bytes, param: Bytes, mutationType: MutationType)
+        case set(key: ByteString, value: ByteString)
+        case clear(key: ByteString)
+        case clearRange(begin: ByteString, end: ByteString)
+        case atomic(key: ByteString, param: ByteString, mutationType: MutationType)
     }
 
     private enum ConnectionOutcome {
@@ -494,7 +495,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
     // MARK: - Read
 
-    public func getValue(for key: Bytes, snapshot: Bool) async throws -> Bytes? {
+    public func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString? {
         let writeBuffer = try state.withLock { state in
             switch state.lifecycle {
             case .open:
@@ -508,8 +509,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         // mutations until an operation that determines the base value is found.
         // Atomics depend on the preceding value, so they replay in forward order
         // on top of the determined base (or the database value).
-        var collectedAtomics: [(param: Bytes, mutationType: MutationType)] = []
-        var base: Bytes?
+        var collectedAtomics: [(param: ByteString, mutationType: MutationType)] = []
+        var base: ByteString?
         var baseDetermined = false
 
         scan: for op in writeBuffer.reversed() {
@@ -549,14 +550,14 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         return value
     }
 
-    private func fetchBaseValue(key: Bytes, snapshot: Bool) async throws -> Bytes? {
+    private func fetchBaseValue(key: ByteString, snapshot: Bool) async throws -> ByteString? {
         if let parent {
             return try await parent.getValue(for: key, snapshot: snapshot)
         }
         return try await fetchValueFromDatabase(key: key)
     }
 
-    private func fetchValueFromDatabase(key: Bytes) async throws -> Bytes? {
+    private func fetchValueFromDatabase(key: ByteString) async throws -> ByteString? {
         do {
             let connection = try await ensureConnection()
             var bindings = PostgresBindings()
@@ -564,7 +565,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             let sql = "SELECT value FROM \(tableName) WHERE key = $1"
             let rows = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
             for try await (value) in rows.decode(ByteBuffer.self) {
-                return Bytes(retaining: PostgreSQLResultBytesOwner(buffer: value))
+                return ByteString(retaining: PostgreSQLResultBytesOwner(buffer: value))
             }
             return nil
         } catch {
@@ -651,10 +652,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     /// rows, so memory stays O(`batchSize`) however large the range is.
     func fetchRangeBatch(
         plan: RangeScanPlan,
-        after lastKey: Bytes?,
+        after lastKey: ByteString?,
         remaining: Int,
         flushFirst: Bool
-    ) async throws -> [(Bytes, Bytes)] {
+    ) async throws -> [(ByteString, ByteString)] {
         do {
             let connection = try await ensureConnection()
             if flushFirst {
@@ -663,8 +664,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             let batchLimit = plan.limit > 0 ? min(plan.batchSize, remaining) : plan.batchSize
             guard batchLimit > 0 else { return [] }
 
-            var bindValues: [Bytes] = []
-            func placeholder(for key: Bytes) -> String {
+            var bindValues: [ByteString] = []
+            func placeholder(for key: ByteString) -> String {
                 bindValues.append(key)
                 return "$\(bindValues.count)"
             }
@@ -687,12 +688,12 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 bindings.append(ByteBuffer(bytes: value), context: .default)
             }
             let rows = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
-            var results: [(Bytes, Bytes)] = []
+            var results: [(ByteString, ByteString)] = []
             for try await (keyBuffer, valueBuffer) in rows.decode((ByteBuffer, ByteBuffer).self) {
                 results.append(
                     (
-                        Bytes(retaining: PostgreSQLResultBytesOwner(buffer: keyBuffer)),
-                        Bytes(retaining: PostgreSQLResultBytesOwner(buffer: valueBuffer))
+                        ByteString(retaining: PostgreSQLResultBytesOwner(buffer: keyBuffer)),
+                        ByteString(retaining: PostgreSQLResultBytesOwner(buffer: valueBuffer))
                     )
                 )
             }
@@ -710,7 +711,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     private static func boundaryClause(
         _ boundary: SQLRangeBoundary,
         tableName: String,
-        placeholder: (Bytes) -> String
+        placeholder: (ByteString) -> String
     ) -> String {
         switch boundary {
         case .direct(let op, let key):
@@ -724,7 +725,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
     // MARK: - Write
 
-    public func setValue(_ value: Bytes, for key: Bytes) throws {
+    public func setValue(_ value: ByteString, for key: ByteString) throws {
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .write)
             try mutationByteMeter.recordSet(
@@ -735,7 +736,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    public func clear(key: Bytes) throws {
+    public func clear(key: ByteString) throws {
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .delete)
             try mutationByteMeter.recordClear(key: key)
@@ -743,7 +744,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    public func clearRange(beginKey: Bytes, endKey: Bytes) throws {
+    public func clearRange(beginKey: ByteString, endKey: ByteString) throws {
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .deleteRange)
             try mutationByteMeter.recordClearRange(
@@ -755,8 +756,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     public func atomicOp(
-        key: Bytes,
-        param: Bytes,
+        key: ByteString,
+        param: ByteString,
         mutationType: MutationType
     ) throws {
         try state.withLock { state in
@@ -1283,7 +1284,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         while index < ops.count {
             switch ops[index] {
             case .set:
-                var pairs: [(Bytes, Bytes)] = []
+                var pairs: [(ByteString, ByteString)] = []
                 while index < ops.count, case .set(let key, let value) = ops[index] {
                     pairs.append((key, value))
                     index += 1
@@ -1291,7 +1292,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 try await upsertBatch(connection: connection, pairs: pairs)
 
             case .clear:
-                var keys: [Bytes] = []
+                var keys: [ByteString] = []
                 while index < ops.count, case .clear(let key) = ops[index] {
                     keys.append(key)
                     index += 1
@@ -1314,14 +1315,14 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    private func upsertBatch(connection: PostgresConnection, pairs: [(Bytes, Bytes)]) async throws {
+    private func upsertBatch(connection: PostgresConnection, pairs: [(ByteString, ByteString)]) async throws {
         guard !pairs.isEmpty else { return }
 
         // Deduplicate within the batch (last write wins, first-seen order). A
         // single INSERT ... VALUES that names the same key twice would fail with
         // "ON CONFLICT DO UPDATE command cannot affect row a second time".
-        var indexByKey: [Bytes: Int] = [:]
-        var deduped: [(key: Bytes, value: Bytes)] = []
+        var indexByKey: [ByteString: Int] = [:]
+        var deduped: [(key: ByteString, value: ByteString)] = []
         for (key, value) in pairs {
             if let existing = indexByKey[key] {
                 deduped[existing].value = value
@@ -1350,7 +1351,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    private func deleteBatch(connection: PostgresConnection, keys: [Bytes]) async throws {
+    private func deleteBatch(connection: PostgresConnection, keys: [ByteString]) async throws {
         guard !keys.isEmpty else { return }
         var start = 0
         while start < keys.count {
@@ -1369,7 +1370,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    private func deleteRange(connection: PostgresConnection, begin: Bytes, end: Bytes) async throws {
+    private func deleteRange(connection: PostgresConnection, begin: ByteString, end: ByteString) async throws {
         var bindings = PostgresBindings()
         bindings.append(ByteBuffer(bytes: begin), context: .default)
         bindings.append(ByteBuffer(bytes: end), context: .default)
@@ -1384,7 +1385,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     /// lock; `FOR UPDATE` still protects existing rows.
     private func executeAtomicOp(
         connection: PostgresConnection,
-        key: Bytes, param: Bytes, mutationType: MutationType
+        key: ByteString, param: ByteString, mutationType: MutationType
     ) async throws {
         try await lockAtomicKey(connection: connection, key: key)
 
@@ -1395,9 +1396,9 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             PostgresQuery(unsafeSQL: selectSQL, binds: selectBindings),
             logger: logger
         )
-        var current: Bytes?
+        var current: ByteString?
         for try await (value) in rows.decode(ByteBuffer.self) {
-            current = Bytes(retaining: PostgreSQLResultBytesOwner(buffer: value))
+            current = ByteString(retaining: PostgreSQLResultBytesOwner(buffer: value))
         }
 
         // Versionstamp mutations throw here (unsupported by non-FDB backends).
@@ -1411,7 +1412,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    private func lockAtomicKey(connection: PostgresConnection, key: Bytes) async throws {
+    private func lockAtomicKey(connection: PostgresConnection, key: ByteString) async throws {
         var bindings = PostgresBindings()
         bindings.append(Self.advisoryLockID(for: key), context: .default)
         try await connection.query(
@@ -1420,7 +1421,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         )
     }
 
-    static func advisoryLockID(for key: Bytes) -> Int64 {
+    static func advisoryLockID(for key: ByteString) -> Int64 {
         var hash: UInt64 = 0xcbf29ce484222325
         for byte in key {
             hash ^= UInt64(byte)

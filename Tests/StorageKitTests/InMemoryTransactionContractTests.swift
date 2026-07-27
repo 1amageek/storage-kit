@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import StorageKit
@@ -102,7 +103,7 @@ struct InMemoryTransactionContractTests {
         let tx = try engine.createTransaction()
 
         do {
-            try tx.setOption(to: [0x01, 0x02] as Bytes?, forOption: .accessSystemKeys)
+            try tx.setOption(to: [0x01, 0x02] as ByteString?, forOption: .accessSystemKeys)
             Issue.record("Expected unsupportedOperation")
         } catch let error as StorageError {
             #expect(error.code == .unsupportedOperation)
@@ -272,7 +273,7 @@ struct InMemoryTransactionContractTests {
         await Task.yield()
         try await tx.commit()
         let versionstamp = try await awaitingVersionstamp.value
-        #expect(versionstamp.bytes == Bytes(repeating: 0, count: 10))
+        #expect(versionstamp.bytes == ByteString([UInt8](repeating: 0, count: 10)))
     }
 
     @Test func versionstampRequestFailsWhenTransactionIsCancelled() async throws {
@@ -435,7 +436,7 @@ struct InMemoryTransactionContractTests {
         }
 
         let tx = try engine.createTransaction()
-        var keys: [Bytes] = []
+        var keys: [ByteString] = []
         try await tx.forEachInRange(
             from: .firstGreaterOrEqual([0x01]),
             to: .firstGreaterOrEqual([0x04])

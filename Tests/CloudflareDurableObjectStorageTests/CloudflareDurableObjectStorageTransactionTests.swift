@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import StorageKit
 import StorageKitEmbeddedCore
@@ -7,6 +8,28 @@ import CloudflareDurableObjectStorageTesting
 
 @Suite("Cloudflare Durable Object Storage Transaction Tests")
 struct CloudflareDurableObjectStorageTransactionTests {
+    @Test func nonzeroIndexKeyViewsPreserveRangeOrdering() async throws {
+        let engine = try await makeEngine()
+        let keySource: ByteString = [0xAA, 0x10, 0xBB]
+        let beginSource: ByteString = [0xAA, 0x0F]
+        let endSource: ByteString = [0xAA, 0x11]
+        let key = keySource[1..<2]
+        let begin = beginSource[1..<2]
+        let end = endSource[1..<2]
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([0x42], for: key)
+        }
+
+        let rows = try await engine.withTransaction { transaction in
+            try await transaction.collectRange(begin: begin, end: end)
+        }
+
+        #expect(rows.count == 1)
+        #expect(rows.first?.0 == key)
+        #expect(rows.first?.1 == [0x42])
+    }
+
     @Test func committedWriteIsVisibleToFreshTransaction() async throws {
         let engine = try await makeEngine()
 
@@ -312,18 +335,18 @@ struct CloudflareDurableObjectStorageTransactionTests {
 
         try await tx.commit()
 
-        let stamp: Bytes = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
+        let stamp: ByteString = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
         #expect(try await pendingVersionstamp.value.bytes == stamp)
 
         let read = try engine.createTransaction()
         #expect(
             try await read.getValue(
-                for: [0x10] + stamp + [0x11]
+                for: ByteString([0x10] + stamp.copyBytes() + [0x11])
             ) == [0x41]
         )
         #expect(
             try await read.getValue(for: [0x20])
-                == [0x21] + stamp + [0x22]
+                == ByteString([0x21] + stamp.copyBytes() + [0x22])
         )
     }
 
@@ -382,7 +405,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
         let engine = try await makeEngine()
         let transaction = try engine.createTransaction()
         let releaseRecorder = TransactionReleaseRecorder()
-        var frame: Bytes? = makeTransactionOwnedBytes(
+        var frame: ByteString? = makeTransactionOwnedBytes(
             [0x00, 0x10, 0x20, 0x30],
             releaseRecorder: releaseRecorder
         )
@@ -400,7 +423,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
         let engine = try await makeEngine()
         let transaction = try engine.createTransaction()
         let releaseRecorder = TransactionReleaseRecorder()
-        var frame: Bytes? = makeTransactionOwnedBytes(
+        var frame: ByteString? = makeTransactionOwnedBytes(
             [0x00, 0x10, 0x20, 0x30],
             releaseRecorder: releaseRecorder
         )
@@ -516,19 +539,21 @@ struct CloudflareDurableObjectStorageTransactionTests {
     }
 
     private func versionstampOperand(
-        prefix: Bytes,
-        suffix: Bytes
-    ) -> Bytes {
+        prefix: ByteString,
+        suffix: ByteString
+    ) -> ByteString {
         let offset = UInt32(prefix.count)
-        return prefix
+        return ByteString(
+            prefix.copyBytes()
             + Array(repeating: 0xFF, count: 10)
-            + suffix
+            + suffix.copyBytes()
             + [
                 UInt8(truncatingIfNeeded: offset),
                 UInt8(truncatingIfNeeded: offset >> 8),
                 UInt8(truncatingIfNeeded: offset >> 16),
                 UInt8(truncatingIfNeeded: offset >> 24),
             ]
+        )
     }
 
     @Test func writeDuringCommitIsRejectedByTransactionLifecycle() async throws {
@@ -723,7 +748,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
             try tx.setValue([7], for: [0x07])
         }
 
-        let cases: [(KeySelector, KeySelector, [Bytes])] = [
+        let cases: [(KeySelector, KeySelector, [ByteString])] = [
             (
                 .firstGreaterOrEqual([0x03]),
                 .firstGreaterOrEqual([0x07]),
@@ -839,30 +864,57 @@ struct CloudflareDurableObjectStorageTransactionTests {
 private func makeTransactionOwnedBytes(
     _ bytes: [UInt8],
     releaseRecorder: TransactionReleaseRecorder
-) -> Bytes {
-    let pointer = UnsafeMutableRawPointer.allocate(
-        byteCount: bytes.count,
-        alignment: MemoryLayout<UInt8>.alignment
+) -> ByteString {
+    ByteString(
+        retaining: TransactionOwnedByteAllocation(
+            bytes: bytes,
+            releaseRecorder: releaseRecorder
+        )
     )
-    bytes.withUnsafeBytes { source in
-        if let sourceAddress = source.baseAddress {
-            pointer.copyMemory(
-                from: sourceAddress,
-                byteCount: source.count
-            )
-        }
-    }
-    let allocation = EmbeddedByteAllocation(
-        unsafeAddress: UInt(bitPattern: pointer),
-        count: bytes.count,
-        deallocator: { address, _ in
-            if let pointer = UnsafeMutableRawPointer(bitPattern: address) {
-                pointer.deallocate()
+}
+
+private final class TransactionOwnedByteAllocation: ByteStringOwner {
+    let count: Int
+
+    private let address: UInt
+    private let releaseRecorder: TransactionReleaseRecorder
+
+    init(
+        bytes: [UInt8],
+        releaseRecorder: TransactionReleaseRecorder
+    ) {
+        let pointer = UnsafeMutableRawPointer.allocate(
+            byteCount: bytes.count,
+            alignment: MemoryLayout<UInt8>.alignment
+        )
+        bytes.withUnsafeBytes { source in
+            if let sourceAddress = source.baseAddress {
+                pointer.copyMemory(
+                    from: sourceAddress,
+                    byteCount: source.count
+                )
             }
-            releaseRecorder.recordRelease()
         }
-    )
-    return Bytes(EmbeddedBytes(allocation: allocation))
+        self.address = UInt(bitPattern: pointer)
+        self.count = bytes.count
+        self.releaseRecorder = releaseRecorder
+    }
+
+    deinit {
+        UnsafeMutableRawPointer(bitPattern: address)?.deallocate()
+        releaseRecorder.recordRelease()
+    }
+
+    func borrowBytes(
+        _ body: (UnsafeRawBufferPointer) throws -> Void
+    ) rethrows {
+        try body(
+            UnsafeRawBufferPointer(
+                start: UnsafeRawPointer(bitPattern: address),
+                count: count
+            )
+        )
+    }
 }
 
 private final class TransactionReleaseRecorder: Sendable {

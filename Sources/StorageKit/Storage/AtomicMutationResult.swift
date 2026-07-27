@@ -1,9 +1,10 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 /// Result of applying an atomic mutation to an existing value.
 public enum AtomicMutationResult: Sendable, Equatable {
     /// Store the given bytes as the new value.
-    case set(Bytes)
+    case set(ByteString)
     /// Remove the key.
     case clear
     /// Leave the existing value untouched.
@@ -37,15 +38,15 @@ extension MutationType {
     ///   - param: The mutation parameter.
     /// - Returns: The mutation outcome.
     /// - Throws: `StorageError(.invalidOperation)` for versionstamp mutations.
-    public func apply(to existing: Bytes?, param: Bytes) throws -> AtomicMutationResult {
+    public func apply(to existing: ByteString?, param: ByteString) throws -> AtomicMutationResult {
         do {
             let result = try embeddedMutationType.apply(
-                to: existing?.embeddedBytes,
-                param: param.embeddedBytes
+                to: existing,
+                param: param
             )
             switch result {
             case .set(let bytes):
-                return .set(Bytes(bytes))
+                return .set(bytes)
             case .clear:
                 return .clear
             case .unchanged:

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 @testable import StorageKit
 
@@ -7,7 +8,7 @@ struct TransactionVersionstampCompletionTests {
     func everyWaiterObservesTheCommittedVersionstamp() async throws {
         let completion = TransactionVersionstampCompletion()
         let expected = try TransactionVersionstamp(
-            bytes: Bytes(repeating: 7, count: TransactionVersionstamp.byteCount)
+            bytes: ByteString([UInt8](repeating: 7, count: TransactionVersionstamp.byteCount))
         )
         let waiters = (0..<16).map { _ in
             Task {
@@ -45,7 +46,7 @@ struct TransactionVersionstampCompletionTests {
     func firstResolutionWins() async throws {
         let completion = TransactionVersionstampCompletion()
         let expected = try TransactionVersionstamp(
-            bytes: Bytes(repeating: 3, count: TransactionVersionstamp.byteCount)
+            bytes: ByteString([UInt8](repeating: 3, count: TransactionVersionstamp.byteCount))
         )
         let ignored = StorageError(
             code: .transactionCancelled,

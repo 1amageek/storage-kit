@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorage
 import CloudflareDurableObjectStorageEmbedded
 import StorageKitEmbeddedCore
@@ -8,7 +9,7 @@ struct MismatchedOperationCloudflareDurableObjectStorageTransport:
         .synchronous
     }
 
-    func send(_ requestBytes: EmbeddedBytes) async throws -> EmbeddedBytes {
+    func send(_ requestBytes: ByteString) async throws -> ByteString {
         _ = requestBytes
         return try CloudflareDurableObjectStorageWireCodec.encode(
             .readiness(

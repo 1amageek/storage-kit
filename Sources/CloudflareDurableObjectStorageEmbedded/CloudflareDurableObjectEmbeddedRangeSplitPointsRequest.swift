@@ -1,17 +1,18 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 /// Server-side chunk-boundary request for one committed key range.
 public struct CloudflareDurableObjectEmbeddedRangeSplitPointsRequest: Sendable, Hashable {
     public let scope: CloudflareDurableObjectEmbeddedScope
-    public let begin: EmbeddedBytes
-    public let end: EmbeddedBytes
+    public let begin: ByteString
+    public let end: ByteString
     public let chunkSize: Int64
     public let expectedReadVersion: Int64?
 
     public init(
         scope: CloudflareDurableObjectEmbeddedScope,
-        begin: EmbeddedBytes,
-        end: EmbeddedBytes,
+        begin: ByteString,
+        end: ByteString,
         chunkSize: Int64,
         expectedReadVersion: Int64? = nil
     ) {

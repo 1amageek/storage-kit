@@ -1,12 +1,13 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 /// Ordered chunk boundaries, including the requested begin and end keys.
 public struct CloudflareDurableObjectEmbeddedRangeSplitPointsResponse: Sendable, Hashable {
-    public let splitPoints: [EmbeddedBytes]
+    public let splitPoints: [ByteString]
     public let currentCommitVersion: Int64
 
     public init(
-        splitPoints: [EmbeddedBytes],
+        splitPoints: [ByteString],
         currentCommitVersion: Int64
     ) {
         self.splitPoints = splitPoints
@@ -42,7 +43,7 @@ public struct CloudflareDurableObjectEmbeddedRangeSplitPointsResponse: Sendable,
             from: &reader,
             maximum: EmbeddedLimits.cloudflareDurableObject.maxSplitPoints
         )
-        var points: [EmbeddedBytes] = []
+        var points: [ByteString] = []
         points.reserveCapacity(count)
         for _ in 0..<count {
             points.append(
@@ -64,7 +65,7 @@ public struct CloudflareDurableObjectEmbeddedRangeSplitPointsResponse: Sendable,
     }
 
     static func validate(
-        _ points: [EmbeddedBytes]
+        _ points: [ByteString]
     ) throws(CloudflareDurableObjectEmbeddedError) {
         guard !points.isEmpty else {
             throw .wire(.invalidSplitPoints)

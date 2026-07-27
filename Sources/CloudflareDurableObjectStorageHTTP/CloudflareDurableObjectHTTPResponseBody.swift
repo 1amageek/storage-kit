@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if !os(WASI)
 import Foundation
 import StorageKitEmbeddedCore
@@ -19,18 +20,18 @@ struct CloudflareDurableObjectHTTPResponseBody: Sendable {
         return true
     }
 
-    func bytes() -> EmbeddedBytes {
+    func bytes() -> ByteString {
         switch chunks.count {
         case 0:
             return []
         case 1:
-            return EmbeddedBytes(
+            return ByteString(
                 retaining: CloudflareDurableObjectHTTPResponseBytesOwner(
                     data: chunks[0]
                 )
             )
         default:
-            return EmbeddedBytes.copying(count: byteCount) { destination in
+            return ByteString.copying(count: byteCount) { destination in
                 var offset = 0
                 for chunk in chunks {
                     chunk.withUnsafeBytes { source in

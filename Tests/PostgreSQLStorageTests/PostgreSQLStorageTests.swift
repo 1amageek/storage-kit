@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 import Foundation
 @testable import PostgreSQLStorage
@@ -36,12 +37,12 @@ struct PostgreSQLStorageTests {
 
     private func collectRange(
         _ tx: some TransactionAccess,
-        begin: Bytes, end: Bytes,
+        begin: ByteString, end: ByteString,
         limit: Int = 0,
         reverse: Bool = false
-    ) async throws -> [(key: Bytes, value: Bytes)] {
+    ) async throws -> [(key: ByteString, value: ByteString)] {
         let seq = tx.getRange(begin: begin, end: end, limit: limit, reverse: reverse)
-        var result: [(key: Bytes, value: Bytes)] = []
+        var result: [(key: ByteString, value: ByteString)] = []
         for try await (key, value) in seq { result.append((key: key, value: value)) }
         return result
     }
@@ -54,8 +55,8 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = [0x01, 0x02, 0x03]
-        let value: Bytes = [0xAA, 0xBB, 0xCC]
+        let key: ByteString = [0x01, 0x02, 0x03]
+        let value: ByteString = [0xAA, 0xBB, 0xCC]
 
         try await engine.withTransaction { tx in
             try tx.setValue(value, for: key)
@@ -71,8 +72,8 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = [0x10]
-        let value: Bytes = [0x20]
+        let key: ByteString = [0x10]
+        let value: ByteString = [0x20]
 
         try await engine.withTransaction { tx in
             try tx.setValue(value, for: key)
@@ -103,7 +104,7 @@ struct PostgreSQLStorageTests {
             try tx.clearRange(beginKey: [0x02], endKey: [0x04])
         }
 
-        let results = try await engine.withTransaction { tx -> [Bytes?] in
+        let results = try await engine.withTransaction { tx -> [ByteString?] in
             let r1 = try await tx.getValue(for: [0x01])
             let r2 = try await tx.getValue(for: [0x02])
             let r3 = try await tx.getValue(for: [0x03])
@@ -127,7 +128,7 @@ struct PostgreSQLStorageTests {
             try tx.setValue([40], for: [0x28])
         }
 
-        let results = try await engine.withTransaction { tx -> [(Bytes, Bytes)] in
+        let results = try await engine.withTransaction { tx -> [(ByteString, ByteString)] in
             try await tx.collectRange(
                 begin: [0x0A], end: [0x28]
             )
@@ -151,7 +152,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x01])
             try tx.clear(key: [0x01])
             return try await tx.getValue(for: [0x01])
@@ -163,7 +164,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x01])
             try tx.clear(key: [0x01])
             try tx.setValue([2], for: [0x01])
@@ -176,7 +177,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x02])
             try tx.clearRange(beginKey: [0x01], endKey: [0x05])
             return try await tx.getValue(for: [0x02])
@@ -188,7 +189,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.clearRange(beginKey: [0x01], endKey: [0x05])
             try tx.setValue([99], for: [0x03])
             return try await tx.getValue(for: [0x03])
@@ -200,7 +201,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x01])
             try tx.setValue([2], for: [0x01])
             try tx.setValue([3], for: [0x01])
@@ -213,7 +214,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x02])
             try tx.clearRange(beginKey: [0x01], endKey: [0x05])
             try tx.setValue([2], for: [0x02])
@@ -231,7 +232,7 @@ struct PostgreSQLStorageTests {
             try tx.setValue([10], for: [0x01])
         }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([20], for: [0x01])
             return try await tx.getValue(for: [0x01])
         }
@@ -246,7 +247,7 @@ struct PostgreSQLStorageTests {
             try tx.setValue([10], for: [0x01])
         }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.clear(key: [0x01])
             return try await tx.getValue(for: [0x01])
         }
@@ -261,7 +262,7 @@ struct PostgreSQLStorageTests {
             try tx.setValue([10], for: [0x01])
         }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([99], for: [0xFF]) // different key
             // [0x01] not in buffer → falls through to PostgreSQL
             return try await tx.getValue(for: [0x01])
@@ -280,7 +281,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x02])
             try tx.clearRange(beginKey: [0x02], endKey: [0x05])
             return try await tx.getValue(for: [0x02])
@@ -292,7 +293,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x05])
             try tx.clearRange(beginKey: [0x02], endKey: [0x05])
             return try await tx.getValue(for: [0x05])
@@ -304,7 +305,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x04])
             try tx.clearRange(beginKey: [0x02], endKey: [0x05])
             return try await tx.getValue(for: [0x04])
@@ -316,7 +317,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x01])
             try tx.clearRange(beginKey: [0x02], endKey: [0x05])
             return try await tx.getValue(for: [0x01])
@@ -328,7 +329,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let results = try await engine.withTransaction { tx -> (Bytes?, Bytes?) in
+        let results = try await engine.withTransaction { tx -> (ByteString?, ByteString?) in
             try tx.setValue([1], for: [0x01, 0xFF])
             try tx.setValue([2], for: [0x02, 0x00])
             try tx.clearRange(beginKey: [0x02, 0x00], endKey: [0x03, 0x00])
@@ -540,7 +541,7 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([0xFF], for: [0x42])
             return try await tx.getValue(for: [0x42])
         }
@@ -555,7 +556,7 @@ struct PostgreSQLStorageTests {
             try tx.setValue([1], for: [0x50])
         }
 
-        let result = try await engine.withTransaction { tx -> Bytes? in
+        let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.clear(key: [0x50])
             return try await tx.getValue(for: [0x50])
         }
@@ -753,7 +754,7 @@ struct PostgreSQLStorageTests {
             try tx.setValue([3], for: [0x01, 0x00])
         }
 
-        let results = try await engine.withTransaction { tx -> [(Bytes, Bytes)] in
+        let results = try await engine.withTransaction { tx -> [(ByteString, ByteString)] in
             try await tx.collectRange(
                 begin: [0x00], end: [0x02]
             )
@@ -906,7 +907,7 @@ struct PostgreSQLStorageTests {
             }
         }
 
-        let results = try await engine.withTransaction { tx -> (Bytes?, Bytes?, Bytes?) in
+        let results = try await engine.withTransaction { tx -> (ByteString?, ByteString?, ByteString?) in
             let v1 = try await tx.getValue(for: [0x01])
             let v2 = try await tx.getValue(for: [0x02])
             let v3 = try await tx.getValue(for: [0x03])
@@ -1103,7 +1104,7 @@ struct PostgreSQLStorageTests {
         // atomicOp(.add) on non-existent key: should create entry
         // Param = 5 as little-endian Int64
         var addend: Int64 = 5
-        let param = withUnsafeBytes(of: &addend) { Bytes($0) }
+        let param = withUnsafeBytes(of: &addend) { ByteString(Array($0)) }
 
         try await engine.withTransaction { tx in
             try tx.atomicOp(key: [0x01], param: param, mutationType: .add)
@@ -1126,7 +1127,7 @@ struct PostgreSQLStorageTests {
 
         // Set initial value = 10 as little-endian Int64
         var initial: Int64 = 10
-        let initialBytes = withUnsafeBytes(of: &initial) { Bytes($0) }
+        let initialBytes = withUnsafeBytes(of: &initial) { ByteString(Array($0)) }
 
         try await engine.withTransaction { tx in
             try tx.setValue(initialBytes, for: [0x01])
@@ -1134,7 +1135,7 @@ struct PostgreSQLStorageTests {
 
         // Add 7
         var addend: Int64 = 7
-        let param = withUnsafeBytes(of: &addend) { Bytes($0) }
+        let param = withUnsafeBytes(of: &addend) { ByteString(Array($0)) }
 
         try await engine.withTransaction { tx in
             try tx.atomicOp(key: [0x01], param: param, mutationType: .add)
@@ -1157,7 +1158,7 @@ struct PostgreSQLStorageTests {
         // Multiple sequential adds
         for i: Int64 in 1...5 {
             var addend = i
-            let param = withUnsafeBytes(of: &addend) { Bytes($0) }
+            let param = withUnsafeBytes(of: &addend) { ByteString(Array($0)) }
             try await engine.withTransaction { tx in
                 try tx.atomicOp(key: [0x01], param: param, mutationType: .add)
             }
@@ -1263,8 +1264,8 @@ struct PostgreSQLStorageTests {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let key: Bytes = [0x01]
-        let value: Bytes = Bytes(repeating: 0xAB, count: 100_000)
+        let key: ByteString = [0x01]
+        let value: ByteString = ByteString([UInt8](repeating: 0xAB, count: 100_000))
 
         try await engine.withTransaction { tx in
             try tx.setValue(value, for: key)
@@ -1285,8 +1286,7 @@ struct PostgreSQLStorageTests {
         let prefix: UInt8 = 0x50
         try await engine.withTransaction { tx in
             for i in 0..<count {
-                var key: Bytes = [prefix]
-                key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
+                let key = indexedKey(prefix: prefix, index: i)
                 try tx.setValue([UInt8(i % 256)], for: key)
             }
         }
@@ -1306,8 +1306,7 @@ struct PostgreSQLStorageTests {
 
         try await engine.withTransaction { tx in
             for i in 0..<count {
-                var key: Bytes = [prefix]
-                key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
+                let key = indexedKey(prefix: prefix, index: i)
                 try tx.setValue([UInt8(i % 256)], for: key)
             }
         }
@@ -1329,16 +1328,14 @@ struct PostgreSQLStorageTests {
 
         try await engine.withTransaction { tx in
             for i in 0..<count {
-                var key: Bytes = [prefix]
-                key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
+                let key = indexedKey(prefix: prefix, index: i)
                 try tx.setValue([UInt8(i % 256)], for: key)
             }
         }
 
         try await engine.withTransaction { tx in
             for i in 0..<count {
-                var key: Bytes = [prefix]
-                key.append(contentsOf: withUnsafeBytes(of: UInt32(i).bigEndian) { Array($0) })
+                let key = indexedKey(prefix: prefix, index: i)
                 try tx.clear(key: key)
             }
         }
@@ -1347,6 +1344,13 @@ struct PostgreSQLStorageTests {
             try await collectRange(tx, begin: [prefix, 0x00], end: [prefix + 1])
         }
         #expect(range.isEmpty)
+    }
+
+    private func indexedKey(prefix: UInt8, index: Int) -> ByteString {
+        let indexBytes = withUnsafeBytes(of: UInt32(index).bigEndian) {
+            Array($0)
+        }
+        return ByteString([prefix] + indexBytes)
     }
 }
 } // extension SerializedPostgreSQLStorageTests

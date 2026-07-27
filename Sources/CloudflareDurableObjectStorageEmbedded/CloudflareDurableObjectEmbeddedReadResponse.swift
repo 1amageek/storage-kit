@@ -1,10 +1,11 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 public struct CloudflareDurableObjectEmbeddedReadResponse: Sendable, Hashable {
-    public let value: EmbeddedBytes?
+    public let value: ByteString?
     public let currentCommitVersion: Int64
 
-    public init(value: EmbeddedBytes?, currentCommitVersion: Int64) {
+    public init(value: ByteString?, currentCommitVersion: Int64) {
         self.value = value
         self.currentCommitVersion = currentCommitVersion
     }

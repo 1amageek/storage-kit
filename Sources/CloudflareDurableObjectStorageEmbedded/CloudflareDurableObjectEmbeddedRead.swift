@@ -1,14 +1,15 @@
+import DatabaseTypes
 import StorageKitEmbeddedCore
 
 public struct CloudflareDurableObjectEmbeddedReadRequest: Sendable, Hashable {
     public let scope: CloudflareDurableObjectEmbeddedScope
-    public let key: EmbeddedBytes
+    public let key: ByteString
     public let snapshot: Bool
     public let expectedReadVersion: Int64?
 
     public init(
         scope: CloudflareDurableObjectEmbeddedScope,
-        key: EmbeddedBytes,
+        key: ByteString,
         snapshot: Bool,
         expectedReadVersion: Int64? = nil
     ) {

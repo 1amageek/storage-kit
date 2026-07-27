@@ -1,3 +1,4 @@
+import DatabaseTypes
 #if canImport(FoundationEssentials)
 import FoundationEssentials
 #else
@@ -21,7 +22,7 @@ extension String: TupleElement {
         sink.writeByte(0x00)
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> String {
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> String {
         let raw = try decodeNullTerminated(from: bytes, at: &offset)
         guard let str = String(bytes: raw, encoding: .utf8) else {
             throw TupleError.invalidUTF8
@@ -30,9 +31,9 @@ extension String: TupleElement {
     }
 }
 
-// MARK: - Bytes
+// MARK: - ByteString
 
-extension Bytes: TupleElement {
+extension ByteString: TupleElement {
     /// Null-terminated encoding with 0x00 escaped as 0x00 0xFF (same algorithm as String).
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(TupleTypeCode.bytes.rawValue)
@@ -62,9 +63,9 @@ extension Bytes: TupleElement {
     }
 
     public static func decodeTuple(
-        from bytes: Bytes,
+        from bytes: ByteString,
         at offset: inout Int
-    ) throws -> Bytes {
+    ) throws -> ByteString {
         try decodeNullTerminated(from: bytes, at: &offset)
     }
 }
@@ -73,16 +74,16 @@ extension Bytes: TupleElement {
 ///
 /// - 0x00 followed by 0xFF: escaped 0x00 (a null byte contained in the data).
 /// - 0x00 not followed by 0xFF: terminator.
-package func decodeNullTerminated(from bytes: Bytes, at offset: inout Int) throws -> Bytes {
+package func decodeNullTerminated(from bytes: ByteString, at offset: inout Int) throws -> ByteString {
     let start = offset
     var cursor = offset
     var decodedCount = 0
     var containsEscape = false
-    while cursor < bytes.count {
+    while cursor < bytes.endIndex {
         let byte = bytes[cursor]
         cursor += 1
         if byte == 0x00 {
-            if cursor < bytes.count && bytes[cursor] == 0xFF {
+            if cursor < bytes.endIndex && bytes[cursor] == 0xFF {
                 containsEscape = true
                 decodedCount += 1
                 cursor += 1
@@ -92,7 +93,7 @@ package func decodeNullTerminated(from bytes: Bytes, at offset: inout Int) throw
                 guard containsEscape else {
                     return bytes[start..<end]
                 }
-                return Bytes.copying(count: decodedCount) { output in
+                return ByteString.copying(count: decodedCount) { output in
                     var source = start
                     var destination = 0
                     while source < end {

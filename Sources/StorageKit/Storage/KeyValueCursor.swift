@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Synchronization
 
 /// Type-erased, zero-copy cursor used at a transaction-access boundary.
@@ -6,7 +7,7 @@ import Synchronization
 /// suspension points. Key and value buffers are returned unchanged; this type
 /// erases only control flow and never materializes payload bytes.
 public struct KeyValueCursor: Sendable {
-    public typealias Element = (Bytes, Bytes)
+    public typealias Element = (ByteString, ByteString)
 
     private let state: any KeyValueCursorState
 

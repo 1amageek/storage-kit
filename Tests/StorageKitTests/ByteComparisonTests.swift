@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Testing
 @testable import StorageKit
 
@@ -16,8 +17,8 @@ struct ByteComparisonTests {
     }
 
     @Test func emptyArraysAreEqual() {
-        let a: Bytes = []
-        let b: Bytes = []
+        let a: ByteString = []
+        let b: ByteString = []
         #expect(compareBytes(a, b) == 0)
     }
 

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Testing
 @testable import CloudflareDurableObjectStorage
@@ -59,14 +60,17 @@ struct CloudflareDurableObjectStorageWireClientTests {
 
         try await transaction.commit()
 
-        let stamp: Bytes = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
+        let stamp: ByteString = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
         #expect(try await pendingVersionstamp.value.bytes == stamp)
         let read = try engine.createTransaction()
         #expect(
-            try await read.getValue(for: [0x10] + stamp + [0x11]) == [0x41]
+            try await read.getValue(
+                for: ByteString([0x10] + stamp.copyBytes() + [0x11])
+            ) == [0x41]
         )
         #expect(
-            try await read.getValue(for: [0x20]) == [0x21] + stamp + [0x22]
+            try await read.getValue(for: [0x20])
+                == ByteString([0x21] + stamp.copyBytes() + [0x22])
         )
     }
 
@@ -170,18 +174,20 @@ struct CloudflareDurableObjectStorageWireClientTests {
     }
 
     private func versionstampOperand(
-        prefix: Bytes,
-        suffix: Bytes
-    ) -> Bytes {
+        prefix: ByteString,
+        suffix: ByteString
+    ) -> ByteString {
         let offset = UInt32(prefix.count)
-        return prefix
+        return ByteString(
+            prefix.copyBytes()
             + Array(repeating: 0xFF, count: 10)
-            + suffix
+            + suffix.copyBytes()
             + [
                 UInt8(truncatingIfNeeded: offset),
                 UInt8(truncatingIfNeeded: offset >> 8),
                 UInt8(truncatingIfNeeded: offset >> 16),
                 UInt8(truncatingIfNeeded: offset >> 24),
             ]
+        )
     }
 }

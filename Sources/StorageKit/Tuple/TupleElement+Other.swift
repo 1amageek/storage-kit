@@ -1,7 +1,10 @@
+import DatabaseTypes
 #if canImport(FoundationEssentials)
 import FoundationEssentials
+typealias FoundationUUID = FoundationEssentials.UUID
 #else
 import Foundation
+typealias FoundationUUID = Foundation.UUID
 #endif
 
 // MARK: - Bool
@@ -15,8 +18,10 @@ extension Bool: TupleElement {
         )
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Bool {
-        guard offset > 0 else { throw TupleError.unexpectedEndOfData }
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Bool {
+        guard offset > bytes.startIndex else {
+            throw TupleError.unexpectedEndOfData
+        }
         let typeCode = bytes[offset - 1]
         switch typeCode {
         case TupleTypeCode.boolTrue.rawValue:
@@ -31,7 +36,7 @@ extension Bool: TupleElement {
 
 // MARK: - UUID
 
-extension UUID: TupleElement {
+extension FoundationUUID: TupleElement {
     /// Type code 0x30 + 16 bytes (canonical byte order).
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         let u = self.uuid
@@ -54,9 +59,9 @@ extension UUID: TupleElement {
         sink.writeByte(u.15)
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> UUID {
-        guard offset + 16 <= bytes.count else { throw TupleError.unexpectedEndOfData }
-        let uuid = UUID(uuid: (
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Self {
+        guard offset + 16 <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
+        let uuid = Self(uuid: (
             bytes[offset],    bytes[offset+1],  bytes[offset+2],  bytes[offset+3],
             bytes[offset+4],  bytes[offset+5],  bytes[offset+6],  bytes[offset+7],
             bytes[offset+8],  bytes[offset+9],  bytes[offset+10], bytes[offset+11],
@@ -75,7 +80,7 @@ extension Date: TupleElement {
         timeIntervalSince1970.encodeTuple(to: &sink)
     }
 
-    public static func decodeTuple(from bytes: Bytes, at offset: inout Int) throws -> Date {
+    public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> Date {
         let interval = try Double.decodeTuple(from: bytes, at: &offset)
         return Date(timeIntervalSince1970: interval)
     }

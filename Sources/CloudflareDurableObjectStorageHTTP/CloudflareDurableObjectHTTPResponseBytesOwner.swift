@@ -1,8 +1,9 @@
+import DatabaseTypes
 #if !os(WASI)
 import Foundation
 import StorageKitEmbeddedCore
 
-struct CloudflareDurableObjectHTTPResponseBytesOwner: EmbeddedByteOwner {
+struct CloudflareDurableObjectHTTPResponseBytesOwner: ByteStringOwner {
     let data: Data
 
     var count: Int {

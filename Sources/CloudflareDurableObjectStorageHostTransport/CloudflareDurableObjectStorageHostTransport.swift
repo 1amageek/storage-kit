@@ -1,3 +1,4 @@
+import DatabaseTypes
 import CloudflareDurableObjectStorage
 import StorageKitEmbeddedCore
 
@@ -41,8 +42,8 @@ public struct CloudflareDurableObjectStorageHostTransport:
     }
 
     public func send(
-        _ requestBytes: EmbeddedBytes
-    ) async throws -> EmbeddedBytes {
+        _ requestBytes: ByteString
+    ) async throws -> ByteString {
         guard requestBytes.count <= maximumRequestBytes else {
             throw StorageHostTransportError.requestTooLarge(
                 actual: requestBytes.count,

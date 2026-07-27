@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Synchronization
 
@@ -22,35 +23,35 @@ final class SQLiteConnectionHandle: Sendable {
         }
     }
 
-    func insertOrReplace(key: Bytes, value: Bytes) throws {
+    func insertOrReplace(key: ByteString, value: ByteString) throws {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
             try connection.insertOrReplace(key: key, value: value)
         }
     }
 
-    func get(key: Bytes) throws -> Bytes? {
+    func get(key: ByteString) throws -> ByteString? {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
             return try connection.get(key: key)
         }
     }
 
-    func getKey(plan: SQLiteKeySelectionPlan) throws -> Bytes? {
+    func getKey(plan: SQLiteKeySelectionPlan) throws -> ByteString? {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
             return try connection.getKey(plan: plan)
         }
     }
 
-    func delete(key: Bytes) throws {
+    func delete(key: ByteString) throws {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
             try connection.delete(key: key)
         }
     }
 
-    func deleteRange(begin: Bytes, end: Bytes) throws {
+    func deleteRange(begin: ByteString, end: ByteString) throws {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
             try connection.deleteRange(begin: begin, end: end)
@@ -78,7 +79,7 @@ final class SQLiteConnectionHandle: Sendable {
 
     func nextRangeCursor(
         identifier: UInt64
-    ) throws -> (key: Bytes, value: Bytes)? {
+    ) throws -> (key: ByteString, value: ByteString)? {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
             return try connection.nextRangeCursor(identifier: identifier)

@@ -1,3 +1,4 @@
+import DatabaseTypes
 import StorageKit
 import Testing
 @testable import SQLiteStorage
@@ -23,8 +24,8 @@ struct SQLiteConnectionOwnershipTests {
         defer { connection.close() }
         try connection.initialize()
 
-        let expectedKey: Bytes = [0x10, 0x20, 0x30]
-        let expectedValue: Bytes = [0x40, 0x50, 0x60]
+        let expectedKey: ByteString = [0x10, 0x20, 0x30]
+        let expectedValue: ByteString = [0x40, 0x50, 0x60]
         let keyOwner = SQLiteBorrowInvalidatingBytesOwner(
             expectedKey.copyBytes()
         )
@@ -33,8 +34,8 @@ struct SQLiteConnectionOwnershipTests {
         )
 
         try connection.insertOrReplace(
-            key: Bytes(retaining: keyOwner),
-            value: Bytes(retaining: valueOwner)
+            key: ByteString(retaining: keyOwner),
+            value: ByteString(retaining: valueOwner)
         )
 
         #expect(keyOwner.borrowCount == 1)

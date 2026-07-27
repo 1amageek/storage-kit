@@ -1,10 +1,11 @@
+import DatabaseTypes
 /// The 10-byte version assigned to a committed transaction.
 public struct TransactionVersionstamp: Sendable, Hashable {
     public static let byteCount = 10
 
-    public let bytes: Bytes
+    public let bytes: ByteString
 
-    public init(bytes: Bytes) throws {
+    public init(bytes: ByteString) throws {
         guard bytes.count == Self.byteCount else {
             throw StorageError(
                 code: .backendContractViolation,
