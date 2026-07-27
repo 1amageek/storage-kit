@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   readBoundedRequestBytes,
-  StorageKitPayloadTooLargeError,
-} from "../src/StorageKitHostLimits.js";
+  TestStoragePayloadTooLargeError,
+} from "./fixtures/TestStorageRequestLimits.js";
 
 test("bounded request reader cancels the stream after exceeding the limit", async () => {
   let canceled = false;
@@ -22,7 +22,7 @@ test("bounded request reader cancels the stream after exceeding the limit", asyn
       headers: new Headers(),
       body: stream,
     }, 3),
-    StorageKitPayloadTooLargeError
+    TestStoragePayloadTooLargeError
   );
   assert.equal(canceled, true);
 });

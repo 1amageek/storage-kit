@@ -1,39 +1,39 @@
 const bearerPrefix = "Bearer ";
 
-export class StorageKitRequestAuthorizer {
+export class TestStorageRequestAuthorizer {
   constructor(secret) {
     this.secret = normalizedSecret(secret);
   }
 
   async authorize(request) {
     if (this.secret === null) {
-      return StorageKitAuthorizationResult.misconfigured();
+      return TestStorageAuthorization.misconfigured();
     }
 
     const authorization = request.headers.get("authorization");
     if (authorization === null || !authorization.startsWith(bearerPrefix)) {
-      return StorageKitAuthorizationResult.unauthorized();
+      return TestStorageAuthorization.unauthorized();
     }
 
     const token = authorization.slice(bearerPrefix.length);
     if (token.length === 0) {
-      return StorageKitAuthorizationResult.unauthorized();
+      return TestStorageAuthorization.unauthorized();
     }
 
     const authorized = await constantTimeStringEqual(token, this.secret);
     return authorized
-      ? StorageKitAuthorizationResult.authorized()
-      : StorageKitAuthorizationResult.unauthorized();
+      ? TestStorageAuthorization.authorized()
+      : TestStorageAuthorization.unauthorized();
   }
 }
 
-export class StorageKitAuthorizationResult {
+export class TestStorageAuthorization {
   static authorized() {
-    return new StorageKitAuthorizationResult(true, null);
+    return new TestStorageAuthorization(true, null);
   }
 
   static unauthorized() {
-    return new StorageKitAuthorizationResult(false, new Response("Unauthorized", {
+    return new TestStorageAuthorization(false, new Response("Unauthorized", {
       status: 401,
       headers: {
         "www-authenticate": "Bearer",
@@ -42,7 +42,7 @@ export class StorageKitAuthorizationResult {
   }
 
   static misconfigured() {
-    return new StorageKitAuthorizationResult(false, new Response("StorageKit access token is not configured", {
+    return new TestStorageAuthorization(false, new Response("StorageKit access token is not configured", {
       status: 503,
     }));
   }

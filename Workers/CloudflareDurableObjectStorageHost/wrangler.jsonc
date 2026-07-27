@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "storage-kit-cloudflare-durable-object-storage-host",
-  "main": "src/CloudflareDurableObjectStorageWorker.js",
+  "main": "test/fixtures/TestStorageWorker.js",
   "compatibility_date": "2026-06-27",
   "compatibility_flags": [
     "nodejs_compat"
@@ -19,7 +19,7 @@
     "bindings": [
       {
         "name": "STORAGEKIT_DURABLE_OBJECT",
-        "class_name": "CloudflareDurableObjectStorageHost"
+        "class_name": "TestStorageDurableObject"
       }
     ]
   },
@@ -27,7 +27,7 @@
     {
       "tag": "v1",
       "new_sqlite_classes": [
-        "CloudflareDurableObjectStorageHost"
+        "TestStorageDurableObject"
       ]
     }
   ]

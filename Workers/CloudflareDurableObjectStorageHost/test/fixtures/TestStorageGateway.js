@@ -5,25 +5,25 @@ import {
   payloadTooLargeResponse,
   readBoundedRequestBytes,
   rejectOversizedContentLength,
-  storageKitMaxRequestBytes,
-  StorageKitInvalidContentLengthError,
-  StorageKitHostConfigurationError,
+  testStorageRequestByteLimit,
+  TestStorageInvalidContentLengthError,
+  TestStorageConfigurationError,
   unsupportedMediaTypeResponse,
-  StorageKitPayloadTooLargeError,
-} from "./StorageKitHostLimits.js";
-import { StorageKitRequestAuthorizer } from "./StorageKitRequestAuthorizer.js";
-import { nameForScope } from "./StorageKitScope.js";
-import { statusCode } from "./StorageKitWireConstants.js";
-import { StorageKitWireCodec } from "./StorageKitWireCodec.js";
+  TestStoragePayloadTooLargeError,
+} from "./TestStorageRequestLimits.js";
+import { TestStorageRequestAuthorizer } from "./TestStorageRequestAuthorizer.js";
+import { nameForScope } from "../../src/StorageKitScope.js";
+import { statusCode } from "../../src/StorageKitWireConstants.js";
+import { StorageKitWireCodec } from "../../src/StorageKitWireCodec.js";
 
 const durableObjectBindingName = "STORAGEKIT_DURABLE_OBJECT";
 
-export async function handleStorageKitHTTPRequest(request, env) {
+export async function handleTestStorageRequest(request, env) {
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405 });
   }
 
-  const authorization = await new StorageKitRequestAuthorizer(
+  const authorization = await new TestStorageRequestAuthorizer(
     env?.STORAGEKIT_ACCESS_TOKEN
   ).authorize(request);
   if (!authorization.allowed) {
@@ -35,9 +35,9 @@ export async function handleStorageKitHTTPRequest(request, env) {
 
   let limit;
   try {
-    limit = storageKitMaxRequestBytes(env);
+    limit = testStorageRequestByteLimit(env);
   } catch (error) {
-    if (error instanceof StorageKitHostConfigurationError) {
+    if (error instanceof TestStorageConfigurationError) {
       return hostConfigurationErrorResponse(error);
     }
     throw error;
@@ -51,10 +51,10 @@ export async function handleStorageKitHTTPRequest(request, env) {
   try {
     requestBytes = await readBoundedRequestBytes(request, limit);
   } catch (error) {
-    if (error instanceof StorageKitPayloadTooLargeError) {
+    if (error instanceof TestStoragePayloadTooLargeError) {
       return payloadTooLargeResponse(error.limit);
     }
-    if (error instanceof StorageKitInvalidContentLengthError) {
+    if (error instanceof TestStorageInvalidContentLengthError) {
       return invalidContentLengthResponse();
     }
     throw error;
@@ -94,7 +94,7 @@ export async function handleStorageKitHTTPRequest(request, env) {
 }
 
 export default {
-  fetch: handleStorageKitHTTPRequest,
+  fetch: handleTestStorageRequest,
 };
 
 function storageWireResponse(bytes) {

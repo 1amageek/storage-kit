@@ -19,28 +19,17 @@ const keySelectorKind = Object.freeze({
 
 const host = process.env.STORAGEKIT_SMOKE_HOST ?? "127.0.0.1";
 const port = Number(process.env.STORAGEKIT_SMOKE_PORT ?? "18787");
-const endpoint = process.env.STORAGEKIT_SMOKE_ENDPOINT ?? `http://${host}:${port}`;
+const endpoint = `http://${host}:${port}`;
 const readyTimeoutMilliseconds = 30_000;
 const packageDirectory = fileURLToPath(new URL("..", import.meta.url));
 const devVarsPath = fileURLToPath(new URL("../.dev.vars", import.meta.url));
 const smokeRunID = `${process.pid}-${Date.now()}`;
-const shouldStartWorker = process.env.STORAGEKIT_SMOKE_ENDPOINT === undefined && !process.argv.includes("--remote");
 const accessToken = process.env.STORAGEKIT_ACCESS_TOKEN ?? "local-storage-kit-smoke-token";
-
-if (!shouldStartWorker && !process.env.STORAGEKIT_SMOKE_ENDPOINT) {
-  throw new Error("STORAGEKIT_SMOKE_ENDPOINT is required for remote smoke mode");
-}
-
-if (!shouldStartWorker && process.env.STORAGEKIT_ACCESS_TOKEN === undefined) {
-  throw new Error("STORAGEKIT_ACCESS_TOKEN is required for remote smoke mode");
-}
 
 let worker = null;
 try {
-  if (shouldStartWorker) {
-    writeDevVars();
-    worker = startWorker();
-  }
+  writeDevVars();
+  worker = startWorker();
   await waitForWorker();
   await smokeHttpGuards();
   await smokeReadiness();
@@ -57,9 +46,7 @@ try {
   if (worker !== null) {
     await stopWorker(worker);
   }
-  if (shouldStartWorker) {
-    removeDevVars();
-  }
+  removeDevVars();
 }
 
 function startWorker() {

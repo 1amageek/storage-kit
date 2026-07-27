@@ -10,14 +10,11 @@
     }
   },
   "scripts": {
-    "test": "node --test",
-    "smoke:e2e": "node scripts/smoke-e2e.mjs",
+    "test": "node --test test/*.test.js",
+    "smoke:local": "node scripts/smoke-e2e.mjs",
     "smoke:local:persistence": "node scripts/smoke-local-persistence.mjs",
-    "smoke:remote": "node scripts/smoke-e2e.mjs --remote",
-    "smoke:remote:persistence": "node scripts/smoke-persistence.mjs",
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "deploy:dry-run": "wrangler deploy --dry-run"
+    "fixture:dev": "wrangler dev",
+    "fixture:validate": "wrangler deploy --dry-run"
   },
   "devDependencies": {
     "wrangler": "4.114.0"

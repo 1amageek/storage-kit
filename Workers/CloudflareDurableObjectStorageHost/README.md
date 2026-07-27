@@ -1,28 +1,31 @@
-# Cloudflare Durable Object Storage Host
+# Cloudflare Durable Object SQLite Host
 
-This Worker exposes `StorageKit Wire v1` on top of Durable
-Object SQLite.
+This package exports the reusable JavaScript host that executes
+`StorageKit Wire v1` against Durable Object SQLite. It does not own a public
+Worker, authentication policy, or application routing.
 
 ```mermaid
 flowchart LR
-  Client["StorageKit Wire client"] --> Worker["Worker fetch"]
-  Worker --> Auth["Bearer authorization"]
-  Auth --> Limit["bounded request body"]
-  Limit --> Route["databaseID / tenantID / workspaceID routing"]
-  Route --> DO["Durable Object"]
-  DO --> SQLite["ctx.storage.sql"]
+  ApplicationDO["Application-owned Durable Object"] --> Host["StorageKitDurableObjectHost"]
+  Host --> Wire["bounded StorageKit Wire decode"]
+  Wire --> SQLite["ctx.storage.sql"]
+
+  Fixture["test/fixtures Worker"] -. "local verification only" .-> ApplicationDO
 ```
 
 ## Runtime Boundary
 
-The full database runtime consumes this storage service through StorageKit Wire.
-JavaScript owns Cloudflare request routing, limits, authorization, and Durable
-Object SQLite host operations; database semantics remain in the Swift runtime.
+The full database runtime consumes this storage host through StorageKit Wire.
+The application owns its Worker routes, authorization boundary, Durable Object
+binding, and lifecycle. This package owns bounded storage-wire dispatch and
+Durable Object SQLite operations. Database semantics remain in the Swift
+runtime.
 
 ## Scope Routing
 
-Requests are decoded before routing and are assigned to one Durable Object by
-the request scope.
+`StorageKitScope.nameForScope` deterministically maps a scope to a Durable
+Object name. An application-owned router may use this operation when it chooses
+to expose StorageKit Wire over HTTP.
 
 | Scope field | Purpose |
 |---|---|
@@ -33,9 +36,10 @@ the request scope.
 The Durable Object name is deterministic for the same scope, so all writes for
 one logical database partition are serialized by the same Durable Object.
 
-## Authorization And Limits
+## Test Fixture
 
-Every public Worker request must include:
+`test/fixtures` contains a private Worker used by unit and local Wrangler smoke
+tests. Its HTTP contract is:
 
 | Requirement | Value |
 |---|---|
@@ -43,15 +47,9 @@ Every public Worker request must include:
 | Authorization | `Bearer <STORAGEKIT_ACCESS_TOKEN>` |
 | Content-Type | `application/octet-stream` |
 
-`STORAGEKIT_ACCESS_TOKEN` is a secret and must be configured before production
-deploy:
-
-```bash
-wrangler secret put STORAGEKIT_ACCESS_TOKEN
-```
-
-`STORAGEKIT_MAX_REQUEST_BYTES` controls the maximum accepted StorageKit Wire request
-size. The default configured value is `4194304`.
+The fixture uses `STORAGEKIT_ACCESS_TOKEN` and
+`STORAGEKIT_MAX_REQUEST_BYTES`. These variables and the fixture's bearer-token
+policy are test concerns, not exported production API.
 
 ## Storage Semantics
 
@@ -68,24 +66,11 @@ size. The default configured value is `4194304`.
 ```bash
 npm install
 npm test
-npm run smoke:e2e
+npm run smoke:local
 npm run smoke:local:persistence
-npm run deploy:dry-run
-npm run deploy
+npm run fixture:validate
 ```
 
-Remote smoke tests require the deployed Worker URL and access token:
-
-```bash
-STORAGEKIT_REMOTE_URL="https://example.workers.dev" \
-STORAGEKIT_ACCESS_TOKEN="..." \
-npm run smoke:remote
-```
-
-Persistence smoke tests use the same remote configuration:
-
-```bash
-STORAGEKIT_REMOTE_URL="https://example.workers.dev" \
-STORAGEKIT_ACCESS_TOKEN="..." \
-npm run smoke:remote:persistence
-```
+`wrangler.jsonc` points to the fixture solely so the tests exercise real local
+Durable Object SQLite. Production deployment configuration belongs to the
+application that imports this host.

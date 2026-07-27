@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import worker from "../src/StorageKitHTTPGateway.js";
+import worker from "./fixtures/TestStorageGateway.js";
 import { nameForScope } from "../src/StorageKitScope.js";
 import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
 import { operation, statusCode } from "../src/StorageKitWireConstants.js";
 
 const accessToken = "storage-kit-test-token";
 
-test("worker routes StorageKit Wire requests to the Durable Object name derived from scope", async () => {
+test("fixture routes StorageKit Wire requests to the Durable Object name derived from scope", async () => {
   const scope = {
     databaseID: "main",
     tenantID: "tenant-a",
@@ -57,7 +57,7 @@ test("worker routes StorageKit Wire requests to the Durable Object name derived 
   assert.equal(decodedResponse.operation, operation.readiness);
 });
 
-test("worker returns a typed failure when routing cannot decode scope", async () => {
+test("fixture returns a typed failure when routing cannot decode scope", async () => {
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
     headers: authorizedHeaders(),
@@ -78,7 +78,7 @@ test("worker returns a typed failure when routing cannot decode scope", async ()
   assert.equal(decodedResponse.status, statusCode.invalidOperation);
 });
 
-test("worker rejects removed operation 7 before Durable Object routing", async () => {
+test("fixture rejects removed operation 7 before Durable Object routing", async () => {
   let routed = false;
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
@@ -106,7 +106,7 @@ test("worker rejects removed operation 7 before Durable Object routing", async (
   assert.equal(routed, false);
 });
 
-test("worker decodes only routing scope before Durable Object dispatch", async () => {
+test("fixture decodes only routing scope before Durable Object dispatch", async () => {
   const validPrefix = StorageKitWireCodec.encodeRequest({
     operation: operation.readiness,
     scope: {
@@ -147,7 +147,7 @@ test("worker decodes only routing scope before Durable Object dispatch", async (
   assert.equal(forwarded, true);
 });
 
-test("worker returns a typed failure when the Durable Object binding is absent", async () => {
+test("fixture returns a typed failure when the Durable Object binding is absent", async () => {
   const requestBytes = StorageKitWireCodec.encodeRequest({
     operation: operation.readiness,
     scope: {
@@ -169,7 +169,7 @@ test("worker returns a typed failure when the Durable Object binding is absent",
   assert.equal(decodedResponse.status, statusCode.resourceUnavailable);
 });
 
-test("worker fails closed without a configured access token", async () => {
+test("fixture fails closed without a configured access token", async () => {
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
     body: new Uint8Array(),
@@ -178,7 +178,7 @@ test("worker fails closed without a configured access token", async () => {
   assert.equal(response.status, 503);
 });
 
-test("worker rejects missing or mismatched bearer token", async () => {
+test("fixture rejects missing or mismatched bearer token", async () => {
   const missing = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
     body: new Uint8Array(),
@@ -199,7 +199,7 @@ test("worker rejects missing or mismatched bearer token", async () => {
   assert.equal(mismatched.status, 401);
 });
 
-test("worker rejects oversized payloads before routing", async () => {
+test("fixture rejects oversized payloads before routing", async () => {
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
     headers: authorizedHeaders({
@@ -222,7 +222,7 @@ test("worker rejects oversized payloads before routing", async () => {
   assert.equal(response.status, 413);
 });
 
-test("worker requires the StorageKit Wire media type", async () => {
+test("fixture requires the StorageKit Wire media type", async () => {
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
     headers: {
@@ -237,7 +237,7 @@ test("worker requires the StorageKit Wire media type", async () => {
   assert.equal(response.status, 415);
 });
 
-test("worker fails closed for an invalid request-size configuration", async () => {
+test("fixture fails closed for an invalid request-size configuration", async () => {
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
     headers: authorizedHeaders(),

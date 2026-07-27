@@ -1,39 +1,39 @@
-import { storageKitWireLimits } from "./StorageKitWireLimits.js";
+import { storageKitWireLimits } from "../../src/StorageKitWireLimits.js";
 
-export const defaultStorageKitMaxRequestBytes = 4 * 1024 * 1024;
+export const defaultTestStorageRequestByteLimit = 4 * 1024 * 1024;
 
-export class StorageKitPayloadTooLargeError extends Error {
+export class TestStoragePayloadTooLargeError extends Error {
   constructor(limit) {
     super(`StorageKit wire request exceeds ${limit} bytes`);
-    this.name = "StorageKitPayloadTooLargeError";
+    this.name = "TestStoragePayloadTooLargeError";
     this.limit = limit;
   }
 }
 
-export class StorageKitInvalidContentLengthError extends Error {
+export class TestStorageInvalidContentLengthError extends Error {
   constructor() {
     super("Invalid Content-Length");
-    this.name = "StorageKitInvalidContentLengthError";
+    this.name = "TestStorageInvalidContentLengthError";
   }
 }
 
-export class StorageKitHostConfigurationError extends Error {
+export class TestStorageConfigurationError extends Error {
   constructor(message) {
     super(message);
-    this.name = "StorageKitHostConfigurationError";
+    this.name = "TestStorageConfigurationError";
   }
 }
 
-export function storageKitMaxRequestBytes(env) {
+export function testStorageRequestByteLimit(env) {
   const configured = env?.STORAGEKIT_MAX_REQUEST_BYTES;
   if (configured === undefined || configured === null || configured === "") {
-    return defaultStorageKitMaxRequestBytes;
+    return defaultTestStorageRequestByteLimit;
   }
   const value = Number(configured);
   if (!Number.isInteger(value)
       || value <= 0
       || value > storageKitWireLimits.maxFrameBytes) {
-    throw new StorageKitHostConfigurationError(
+    throw new TestStorageConfigurationError(
       `STORAGEKIT_MAX_REQUEST_BYTES must be an integer from 1 through ${storageKitWireLimits.maxFrameBytes}`
     );
   }
@@ -45,7 +45,7 @@ export function rejectOversizedContentLength(request, limit) {
   if (contentLength === null) {
     return null;
   }
-  if (contentLength instanceof StorageKitInvalidContentLengthError) {
+  if (contentLength instanceof TestStorageInvalidContentLengthError) {
     return invalidContentLengthResponse();
   }
   return contentLength > limit ? payloadTooLargeResponse(limit) : null;
@@ -53,11 +53,11 @@ export function rejectOversizedContentLength(request, limit) {
 
 export async function readBoundedRequestBytes(request, limit) {
   const contentLength = parseContentLength(request);
-  if (contentLength instanceof StorageKitInvalidContentLengthError) {
+  if (contentLength instanceof TestStorageInvalidContentLengthError) {
     throw contentLength;
   }
   if (contentLength !== null && contentLength > limit) {
-    throw new StorageKitPayloadTooLargeError(limit);
+    throw new TestStoragePayloadTooLargeError(limit);
   }
   if (request.body === null) {
     return new Uint8Array();
@@ -76,7 +76,7 @@ export async function readBoundedRequestBytes(request, limit) {
       total += chunk.byteLength;
       if (total > limit) {
         await cancelReader(reader);
-        throw new StorageKitPayloadTooLargeError(limit);
+        throw new TestStoragePayloadTooLargeError(limit);
       }
       chunks.push(chunk);
     }
@@ -134,7 +134,7 @@ function parseContentLength(request) {
   }
   const value = Number(header);
   if (!Number.isInteger(value) || value < 0) {
-    return new StorageKitInvalidContentLengthError();
+    return new TestStorageInvalidContentLengthError();
   }
   return value;
 }

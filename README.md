@@ -105,10 +105,12 @@ The Cloudflare backend is split by runtime boundary:
 | `CloudflareDurableObjectStorageHTTP` | URLSession transport for native clients |
 | `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch` transport for a WASI reactor |
 
-The Worker implementation lives in
-`Workers/CloudflareDurableObjectStorageHost`. It routes one canonical storage
-scope to one Durable Object and persists keys, metadata, and conflict history in
-Durable Object SQLite.
+The reusable JavaScript host lives in
+`Workers/CloudflareDurableObjectStorageHost`. An application-owned Durable
+Object creates this host with `ctx.storage.sql`; the host persists keys,
+metadata, and conflict history in Durable Object SQLite. HTTP routing,
+authorization, Worker lifecycle, and deployment remain application concerns.
+The Worker under `test/fixtures` exists only for real local SQLite validation.
 
 StorageKit Wire v1 is a bounded binary storage protocol. It is intentionally
 separate from database-framework's DatabaseWire query protocol. See

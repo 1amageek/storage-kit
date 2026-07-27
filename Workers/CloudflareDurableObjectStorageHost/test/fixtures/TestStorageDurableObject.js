@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
-import { StorageKitDurableObjectHost } from "./StorageKitDurableObjectHost.js";
+import { StorageKitDurableObjectHost } from "../../src/StorageKitDurableObjectHost.js";
 
-export class CloudflareDurableObjectStorageHost extends DurableObject {
+export class TestStorageDurableObject extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.ctx = ctx;

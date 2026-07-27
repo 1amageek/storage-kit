@@ -8,8 +8,9 @@ Durable Objects.
 - The canonical protocol is `StorageKit Wire v1`.
 - There is no compatibility or version-negotiation path.
 - The Durable Object SQLite implementation is the Cloudflare storage adapter.
-- TypeScript owns byte transport, bounded decoding, Durable Object routing, and
-  SQLite host operations.
+- The application owns Durable Object routing and lifecycle.
+- The reusable TypeScript host owns bounded StorageKit Wire dispatch and SQLite
+  host operations.
 - Database query, graph, schema, index, and transaction policy remain in Swift.
 
 ## Architectural Boundary
@@ -17,8 +18,8 @@ Durable Objects.
 ```mermaid
 flowchart LR
     Native["Native Swift client"] --> HTTP["CloudflareDurableObjectStorageHTTP"]
-    HTTP --> Router["Authenticated Worker router"]
-    Router --> DO["Storage Durable Object"]
+    HTTP --> Router["Application-owned authenticated route"]
+    Router --> DO["Application Durable Object"]
 
     Reactor["Full database-framework WASI reactor"] --> HostTransport["CloudflareDurableObjectStorageHostTransport"]
     HostTransport --> Import["storage_host.dispatch"]
@@ -28,8 +29,9 @@ flowchart LR
     Store --> SQLite["Durable Object SQLite"]
 ```
 
-The public Worker and the WASI import are transport adapters over the same
-StorageKit Wire and SQLite semantics. The storage protocol is separate from
+Application-owned HTTP routes and the WASI import are transport adapters over
+the same StorageKit Wire and SQLite semantics. StorageKit provides a local test
+fixture, not a deployable public Worker. The storage protocol is separate from
 DatabaseWire:
 
 | Protocol | Responsibility |
@@ -210,8 +212,8 @@ The hard limits are protocol invariants, not deployment suggestions:
 | Retained conflict entries | 65,536 |
 | Retained conflict bytes | 32 MiB |
 
-The public Worker may configure a smaller request limit. Configuration cannot
-raise the hard 16 MiB frame limit.
+An application adapter may configure a smaller request limit. Configuration
+cannot raise the hard 16 MiB frame limit.
 
 The Swift encoder performs an exact preflight size calculation before
 allocation. The JavaScript writer uses a bounded growing `Uint8Array`.
@@ -352,21 +354,22 @@ valid value fails explicitly rather than allocating an oversized response.
 
 ## Transport Adapters
 
-### Public HTTP
+### Application-Owned HTTP
 
-The standalone Worker accepts authenticated `POST application/octet-stream`
-requests. It:
+An application may expose authenticated `POST application/octet-stream`
+requests. Its adapter must:
 
-1. verifies the bearer token;
-2. rejects an oversized body while streaming;
-3. decodes only enough to derive and validate the scope;
-4. invokes the Durable Object's `execute(Uint8Array)` RPC through the namespace
+1. verify the bearer token;
+2. reject an oversized body while streaming;
+3. decode only enough to derive and validate the scope;
+4. invoke the Durable Object's `execute(Uint8Array)` RPC through the namespace
    binding;
-5. forwards the unchanged v1 frame.
+5. forward the unchanged v1 frame.
 
-Public HTTP is an adapter for native clients and administrative tooling. The
-Calendar Worker-to-database path must use a Durable Object binding and typed RPC,
-not the public endpoint.
+HTTP is an optional adapter for native clients and administrative tooling. The
+Calendar Worker-to-database path uses a Durable Object binding and typed RPC,
+not a public storage endpoint. StorageKit's fixture implements the listed HTTP
+requirements only to exercise the contract against local Durable Object SQLite.
 
 ### WASI Host Import
 
@@ -431,7 +434,8 @@ Phase completion requires:
   and unknown commit outcome;
 - scope persistence and mismatch rejection;
 - cold initialization and migration serialization;
-- real Durable Object SQLite smoke tests before deployment.
+- real local Durable Object SQLite smoke tests through the private fixture;
+- application-level deployment tests owned by the consuming runtime.
 
 ## Decision Record
 
