@@ -1,6 +1,15 @@
 {
-  "originHash" : "93560a1ee47a9f3958a575c21347950b026e287b3ec8be48f70d08cf336f633c",
+  "originHash" : "f4f413a1268559dad11adc73a1df6cf75868903f2465ac4611eb1b9da13527a2",
   "pins" : [
+    {
+      "identity" : "fdb-swift-bindings",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/fdb-swift-bindings.git",
+      "state" : {
+        "revision" : "6f50619071f4ee2d127527a746a9ec4dc7422177",
+        "version" : "0.2.0"
+      }
+    },
     {
       "identity" : "postgres-nio",
       "kind" : "remoteSourceControl",

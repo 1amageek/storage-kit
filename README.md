@@ -22,7 +22,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/storage-kit.git", branch: "main"),
+    .package(url: "https://github.com/1amageek/storage-kit.git", from: "26.0727.0"),
 ]
 ```
 
