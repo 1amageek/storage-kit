@@ -223,7 +223,7 @@ methods that exist only to throw unsupported-operation errors.
 ### Physical Compaction
 
 Physical storage maintenance is an optional transaction capability. Native
-`SQLiteStorage` exposes `DatabaseStorageCompactionTransaction`; Cloudflare
+`SQLiteStorage` exposes `StorageCompactionTransaction`; Cloudflare
 Durable Object SQLite does not, because the public platform does not expose the
 required vacuum PRAGMAs. Capability absence is reported as unsupported and is
 never treated as a successful no-op.

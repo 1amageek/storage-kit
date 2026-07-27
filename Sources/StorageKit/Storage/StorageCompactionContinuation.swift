@@ -3,8 +3,8 @@ import DatabaseTypes
 ///
 /// The producing backend owns the wire format and must validate it before doing work.
 /// Continuations are intentionally bytes rather than a backend-specific public model so
-/// they can pass through DatabaseWire without giving higher layers storage semantics.
-public struct DatabaseStorageCompactionContinuation: Sendable, Hashable {
+/// callers can persist and transport them without learning backend semantics.
+public struct StorageCompactionContinuation: Sendable, Hashable {
     public let bytes: ByteString
 
     public init(bytes: ByteString) {

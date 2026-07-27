@@ -15,9 +15,9 @@ struct SQLiteStorageCompactionTests {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
         defer { engine.shutdown() }
 
-        #expect(!((engine as Any) is any DatabaseStorageCompactionTransaction))
+        #expect(!((engine as Any) is any StorageCompactionTransaction))
         let transaction = try engine.createTransaction()
-        #expect((transaction as Any) is any DatabaseStorageCompactionTransaction)
+        #expect((transaction as Any) is any StorageCompactionTransaction)
         try await transaction.cancel()
     }
 
@@ -53,7 +53,7 @@ struct SQLiteStorageCompactionTests {
         #expect(result.workUnitsConsumed == 1)
         #expect(result.remainingWorkUnits > 0)
         #expect(result.continuation?.bytes == [
-            0x44, 0x42, 0x53, 0x43,
+            0x53, 0x43, 0x4D, 0x50,
             0x01, 0x01, 0x01, 0x00,
         ])
 
@@ -145,14 +145,14 @@ struct SQLiteStorageCompactionTests {
 
         try await engine.withTransaction { _ in
             let nested = try engine.createTransaction()
-            let compaction: any DatabaseStorageCompactionTransaction = nested
+            let compaction: any StorageCompactionTransaction = nested
             do {
                 _ = try await compaction.stageCompactionSlice(
                     maximumWorkUnits: 1,
                     continuation: nil
                 )
                 Issue.record("Expected nested transaction rejection")
-            } catch let error as DatabaseStorageCompactionError {
+            } catch let error as StorageCompactionError {
                 #expect(error == .nestedTransaction)
             }
             try await nested.cancel()
@@ -173,7 +173,7 @@ struct SQLiteStorageCompactionTests {
         do {
             try await engine.withTransaction { transaction in
                 try transaction.setValue([0x01], for: markerKey)
-                guard let compaction = transaction as? any DatabaseStorageCompactionTransaction else {
+                guard let compaction = transaction as? any StorageCompactionTransaction else {
                     throw InjectedCompactionFailure.capabilityMissing
                 }
                 let result = try await compaction.stageCompactionSlice(
@@ -202,7 +202,7 @@ struct SQLiteStorageCompactionTests {
     @Test func rejectsMalformedContinuation() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
         defer { engine.shutdown() }
-        let continuation = DatabaseStorageCompactionContinuation(bytes: [0x00])
+        let continuation = StorageCompactionContinuation(bytes: [0x00])
 
         do {
             _ = try await compact(
@@ -219,8 +219,8 @@ struct SQLiteStorageCompactionTests {
     @Test func rejectsUnknownContinuationVersion() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
         defer { engine.shutdown() }
-        let continuation = DatabaseStorageCompactionContinuation(bytes: [
-            0x44, 0x42, 0x53, 0x43,
+        let continuation = StorageCompactionContinuation(bytes: [
+            0x53, 0x43, 0x4D, 0x50,
             0x02, 0x01, 0x01, 0x00,
         ])
 
@@ -239,8 +239,8 @@ struct SQLiteStorageCompactionTests {
     @Test func rejectsContinuationForAnotherBackend() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
         defer { engine.shutdown() }
-        let continuation = DatabaseStorageCompactionContinuation(bytes: [
-            0x44, 0x42, 0x53, 0x43,
+        let continuation = StorageCompactionContinuation(bytes: [
+            0x53, 0x43, 0x4D, 0x50,
             0x01, 0x7F, 0x01, 0x00,
         ])
 
@@ -282,11 +282,11 @@ struct SQLiteStorageCompactionTests {
     private func compact(
         engine: SQLiteStorageEngine,
         maximumWorkUnits: UInt64,
-        continuation: DatabaseStorageCompactionContinuation?
-    ) async throws(DatabaseStorageCompactionError) -> DatabaseStorageCompactionResult {
+        continuation: StorageCompactionContinuation?
+    ) async throws(StorageCompactionError) -> StorageCompactionResult {
         do {
             return try await engine.withTransaction { transaction in
-                guard let compaction = transaction as? any DatabaseStorageCompactionTransaction else {
+                guard let compaction = transaction as? any StorageCompactionTransaction else {
                     throw InjectedCompactionFailure.capabilityMissing
                 }
                 return try await compaction.stageCompactionSlice(
@@ -294,7 +294,7 @@ struct SQLiteStorageCompactionTests {
                     continuation: continuation
                 )
             }
-        } catch let error as DatabaseStorageCompactionError {
+        } catch let error as StorageCompactionError {
             throw error
         } catch {
             throw .backendFailure(description: String(describing: error))

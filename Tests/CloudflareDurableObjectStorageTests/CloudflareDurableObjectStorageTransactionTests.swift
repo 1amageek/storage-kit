@@ -844,7 +844,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
         let engine = try await makeEngine()
         let transaction = try engine.createTransaction()
         #expect(
-            !((transaction as Any) is any DatabaseStorageCompactionTransaction)
+            !((transaction as Any) is any StorageCompactionTransaction)
         )
         try await transaction.cancel()
     }

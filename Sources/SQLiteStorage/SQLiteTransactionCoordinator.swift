@@ -168,7 +168,7 @@ actor SQLiteTransactionCoordinator {
 
         let autoVacuumMode = try connection.pragmaInt64("auto_vacuum")
         guard autoVacuumMode == 2 else {
-            throw DatabaseStorageCompactionError.unsupportedConfiguration(
+            throw StorageCompactionError.unsupportedConfiguration(
                 feature: "sqlite.auto_vacuum.incremental",
                 actualValue: autoVacuumMode
             )

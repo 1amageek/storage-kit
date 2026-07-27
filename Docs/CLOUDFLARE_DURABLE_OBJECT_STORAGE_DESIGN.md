@@ -147,7 +147,7 @@ unassigned; both Swift and JavaScript reject it before storage dispatch.
 ## Physical Maintenance Capability
 
 Native `SQLiteStorage` exposes bounded incremental compaction by conforming its
-top-level transaction to `DatabaseStorageCompactionTransaction`. Cloudflare
+top-level transaction to `StorageCompactionTransaction`. Cloudflare
 Durable Object SQLite does not expose this capability.
 
 Cloudflare's public SQL storage API supports ordinary SQL and a restricted set
@@ -155,7 +155,7 @@ of SQLite features. The runtime allowlist does not expose `auto_vacuum`,
 `freelist_count`, or `incremental_vacuum`, so a Durable Object cannot implement
 the physical guarantees required by the compaction protocol. The Cloudflare
 transaction therefore does not conform to
-`DatabaseStorageCompactionTransaction`, and no compaction operation exists in
+`StorageCompactionTransaction`, and no compaction operation exists in
 StorageKit Wire v1.
 
 Callers must discover the transaction capability before starting physical

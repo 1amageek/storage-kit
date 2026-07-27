@@ -1,5 +1,5 @@
 /// Typed failures produced by the storage compaction capability.
-public enum DatabaseStorageCompactionError: Error, Sendable, Hashable {
+public enum StorageCompactionError: Error, Sendable, Hashable {
     case invalidMaximumWorkUnits(actual: UInt64, maximum: UInt64)
     case nestedTransaction
     case invalidContinuation

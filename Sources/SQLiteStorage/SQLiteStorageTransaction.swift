@@ -9,7 +9,7 @@ import Synchronization
 /// children suspend their parent until strict-LIFO `commit()` or `cancel()`.
 public final class SQLiteStorageTransaction:
     Transaction,
-    DatabaseStorageCompactionTransaction,
+    StorageCompactionTransaction,
     Sendable {
     public static let maximumCompactionWorkUnitsPerSlice: UInt64 = 4_096
 
@@ -337,8 +337,8 @@ public final class SQLiteStorageTransaction:
 
     // MARK: - Physical Maintenance
 
-    public var compactionLimits: DatabaseStorageCompactionLimits {
-        DatabaseStorageCompactionLimits(
+    public var compactionLimits: StorageCompactionLimits {
+        StorageCompactionLimits(
             maximumWorkUnitsPerSlice:
                 Self.maximumCompactionWorkUnitsPerSlice
         )
@@ -346,20 +346,20 @@ public final class SQLiteStorageTransaction:
 
     public func stageCompactionSlice(
         maximumWorkUnits: UInt64,
-        continuation: DatabaseStorageCompactionContinuation?
-    ) async throws -> DatabaseStorageCompactionResult {
+        continuation: StorageCompactionContinuation?
+    ) async throws -> StorageCompactionResult {
         let maximum = Self.maximumCompactionWorkUnitsPerSlice
         guard maximumWorkUnits > 0, maximumWorkUnits <= maximum else {
-            throw DatabaseStorageCompactionError.invalidMaximumWorkUnits(
+            throw StorageCompactionError.invalidMaximumWorkUnits(
                 actual: maximumWorkUnits,
                 maximum: maximum
             )
         }
         guard parent == nil else {
-            throw DatabaseStorageCompactionError.nestedTransaction
+            throw StorageCompactionError.nestedTransaction
         }
         if let continuation {
-            try SQLiteIncrementalCompactionContinuationCodec.validate(
+            try SQLiteIncrementalCompactionToken.validate(
                 continuation
             )
         }
@@ -374,25 +374,25 @@ public final class SQLiteStorageTransaction:
                 maximumWorkUnits: maximumWorkUnits
             )
             guard metrics.freePagesAfter <= metrics.freePagesBefore else {
-                throw DatabaseStorageCompactionError.backendFailure(
+                throw StorageCompactionError.backendFailure(
                     description:
                         "SQLite freelist grew during a transaction-scoped compaction slice"
                 )
             }
             let consumed = metrics.freePagesBefore - metrics.freePagesAfter
             if metrics.freePagesBefore > 0, consumed == 0 {
-                throw DatabaseStorageCompactionError.backendMadeNoProgress(
+                throw StorageCompactionError.backendMadeNoProgress(
                     remainingWorkUnits: metrics.freePagesAfter
                 )
             }
-            return DatabaseStorageCompactionResult(
+            return StorageCompactionResult(
                 workUnitsConsumed: consumed,
                 remainingWorkUnits: metrics.freePagesAfter,
                 continuation: metrics.freePagesAfter == 0
                     ? nil
-                    : SQLiteIncrementalCompactionContinuationCodec.current
+                    : SQLiteIncrementalCompactionToken.current
             )
-        } catch let error as DatabaseStorageCompactionError {
+        } catch let error as StorageCompactionError {
             throw error
         } catch {
             throw recordFailure(error, operation: .execute)
