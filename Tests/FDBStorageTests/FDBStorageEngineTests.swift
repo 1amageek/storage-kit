@@ -9,7 +9,7 @@ import FoundationDB
 /// ```
 /// sudo launchctl load /Library/LaunchDaemons/com.apple.foundationdb.fdbmonitor.plist
 /// ```
-@Suite("FDBStorageEngine Tests")
+@Suite("FDBStorageEngine Tests", .serialized)
 struct FDBStorageEngineTests {
 
     private func makeEngine() async throws -> FDBStorageEngine {
