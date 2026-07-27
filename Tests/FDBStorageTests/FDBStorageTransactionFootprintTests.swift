@@ -890,8 +890,8 @@ private enum FoundationDBFootprintDeadlineError: Error {
 }
 
 private func rangeRow(
-    key: FDB.ByteString,
-    value: FDB.ByteString
+    key: ByteString,
+    value: ByteString
 ) -> FDB.KeyValue {
     FDB.KeyValue(key: key, value: value)
 }
@@ -969,7 +969,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
     func getValue<Key: FDB.ByteInput>(
         for key: Key,
         snapshot: Bool
-    ) async throws -> FDB.ByteString? {
+    ) async throws -> ByteString? {
         if let valueReadGate {
             await valueReadGate.suspendOperation()
         }
@@ -998,7 +998,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
     func getKey(
         selector: FDB.KeySelector,
         snapshot: Bool
-    ) async throws -> FDB.ByteString {
+    ) async throws -> ByteString {
         []
     }
 
@@ -1073,7 +1073,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
         beginKey: Begin,
         endKey: End,
         chunkSize: Int64
-    ) async throws -> [FDB.ByteString] {
+    ) async throws -> [ByteString] {
         []
     }
 

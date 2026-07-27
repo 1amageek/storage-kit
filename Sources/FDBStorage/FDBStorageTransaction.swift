@@ -156,11 +156,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     // MARK: - Type Conversion
 
     private func toFDB(_ ks: KeySelector) -> FDB.KeySelector {
-        let key = FDB.ByteString(
-            retaining: RetainedStorageBytes(ks.key)
-        )
         return FDB.KeySelector(
-            key: key,
+            key: ks.key,
             orEqual: ks.orEqual,
             offset: ks.offset
         )
@@ -212,12 +209,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         defer { finishOperation() }
         do {
             let value = try await fdbTransaction.getValue(
-                for: RetainedStorageBytes(key),
+                for: key,
                 snapshot: snapshot
             )
-            return value.map {
-                ByteString(retaining: ResultBytesOwner($0))
-            }
+            return value
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as FDBError {
@@ -1033,8 +1028,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
         do {
             let estimate = try await fdbTransaction.getEstimatedRangeSizeBytes(
-                beginKey: RetainedStorageBytes(beginKey),
-                endKey: RetainedStorageBytes(endKey)
+                beginKey: beginKey,
+                endKey: endKey
             )
             guard let result = Int(exactly: estimate) else {
                 throw StorageError(
@@ -1099,9 +1094,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             do {
                 let versionstamp = try await pendingVersionstamp.value
                 return try TransactionVersionstamp(
-                    bytes: ByteString(
-                        retaining: ResultBytesOwner(versionstamp.bytes)
-                    )
+                    bytes: versionstamp.bytes
                 )
             } catch is CancellationError {
                 throw CancellationError()

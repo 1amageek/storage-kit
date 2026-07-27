@@ -262,10 +262,7 @@ private actor RangeIterationState {
             lease.pause()
             source = .sequence(iterator, transaction, lease)
             completion.resolve(.success(()))
-            return (
-                ByteString(retaining: ResultBytesOwner(element.key)),
-                ByteString(retaining: ResultBytesOwner(element.value))
-            )
+            return (element.key, element.value)
         } catch is CancellationError {
             lease.release()
             source = .finished
