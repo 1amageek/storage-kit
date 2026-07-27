@@ -279,7 +279,7 @@ extension TransactionAccess {
 
     /// FDB compatible: set option with a string value.
     public func setOption(to value: String, forOption option: TransactionOption) throws {
-        try setOption(to: ByteString(Array(value.utf8)), forOption: option)
+        try setOption(to: ByteString(utf8: value), forOption: option)
     }
 }
 

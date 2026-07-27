@@ -12,7 +12,7 @@ StorageKit provides a single `Transaction` protocol that works identically acros
 - **FDB-compatible semantics** — Lexicographic key ordering, range scans, `KeySelector`, Tuple Layer, Subspace, and namespace resolution
 - **Zero-copy design** — `getRange` returns backend-native `AsyncSequence` types without intermediate wrappers
 - **Swift 6.4 concurrency** — Full `Sendable` conformance, `Mutex` for synchronization, no `@unchecked Sendable`
-- **Nested transactions** — SQLite backend detects nested `withTransaction` calls via `@TaskLocal` and reuses the existing transaction
+- **Nested transactions** — SQLite backend detects nested calls via `@TaskLocal` and creates strictly ordered savepoint-backed child transactions
 - **Foundation-free Cloudflare protocol** — bounded StorageKit Wire v1 values, encoding, and decoding for Native, WASM, and Embedded Swift
 - **Durable Object transactions** — SQLite persistence, pinned reads, selector-aware conflicts, bounded pagination, and atomic commit
 
@@ -22,7 +22,8 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/storage-kit.git", from: "26.0727.0"),
+    .package(url: "https://github.com/1amageek/database-types.git", from: "26.0727.5"),
+    .package(url: "https://github.com/1amageek/storage-kit.git", from: "26.0727.2"),
 ]
 ```
 
@@ -32,6 +33,7 @@ Then add the targets you need:
 .target(
     name: "YourApp",
     dependencies: [
+        .product(name: "DatabaseTypes", package: "database-types"),
         .product(name: "StorageKit", package: "storage-kit"),
         // Add StorageKitSystemClock when the runtime supplies system clock/sleep.
         .product(name: "StorageKitSystemClock", package: "storage-kit"),
@@ -48,6 +50,7 @@ Then add the targets you need:
 ## Quick Start
 
 ```swift
+import DatabaseTypes
 import StorageKit
 import SQLiteStorage
 
@@ -56,9 +59,10 @@ let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
 // Write and read within a transaction
 try await engine.withTransaction { tx in
-    try tx.setValue([1, 2, 3], for: Array("hello".utf8))
+    let key = ByteString(utf8: "hello")
+    try tx.setValue([1, 2, 3], for: key)
 
-    let value = try await tx.getValue(for: Array("hello".utf8))
+    let value = try await tx.getValue(for: key)
     // value == [1, 2, 3]
 }
 ```
@@ -200,11 +204,14 @@ Encodes multiple typed values into byte arrays where lexicographic order of the 
 
 ```swift
 let tuple = Tuple("users", Int64(42), "profile")
-let packed: Bytes = tuple.pack()
+let packed: ByteString = tuple.pack()
 let unpacked = try Tuple.unpack(from: packed)
 ```
 
-Supported types: `String`, `Int64`, `Int32`, `Int`, `UInt64`, `Float`, `Double`, `Bool`, `Bytes`, `TupleNil`, `Versionstamp`.
+Supported types: `String`, signed and unsigned integers, `Float`, `Double`,
+`Bool`, `ByteString`, `DatabaseTypes.UUID`, nested `Tuple`, `TupleNil`, and
+`Versionstamp`. Foundation `Date` and `UUID` adapters are provided by
+`StorageKitFoundation`.
 
 ### Subspace
 
@@ -286,7 +293,8 @@ never treated as a successful no-op.
 | Type | Module | Purpose |
 |------|--------|---------|
 | `SortedKeyValueStore` | StorageKit | O(log n) sorted array with binary search, used by InMemory backend |
-| `KeyValueRangeResult` | StorageKit | Shared array-backed `AsyncSequence` for InMemory and SQLite range results |
+| `KeyValueRangeResult` | StorageKit | Array-backed reference result for the in-memory backend |
+| `SQLiteRangeResult` | SQLiteStorage | Lazy cursor-backed result with explicit finish and ownership handling |
 | `compareBytes` | StorageKit | `memcmp`-based lexicographic byte comparison (hot path) |
 | `ActiveTransactionScope` | StorageKit | `@TaskLocal` for nested transaction detection in SQLite |
 

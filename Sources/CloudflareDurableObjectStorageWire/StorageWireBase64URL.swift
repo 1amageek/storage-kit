@@ -1,40 +1,38 @@
 import DatabaseTypes
+
 /// Padding-free base64url encoding for storage names and host boundary strings.
 public enum StorageWireBase64URL {
     private static let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".utf8)
 
-    public static func encode<ByteString: RandomAccessCollection>(
-        _ bytes: ByteString
-    ) -> String where ByteString.Element == UInt8, ByteString.Index == Int {
+    public static func encode<Source: Collection>(
+        _ bytes: Source
+    ) -> String where Source.Element == UInt8 {
         if bytes.isEmpty {
             return ""
         }
         var output: [UInt8] = []
         output.reserveCapacity(((bytes.count + 2) / 3) * 4)
 
-        var index = bytes.startIndex
-        while index < bytes.endIndex {
-            let first = bytes[index]
-            let hasSecond = index + 1 < bytes.endIndex
-            let hasThird = index + 2 < bytes.endIndex
-            let second = hasSecond ? bytes[index + 1] : 0
-            let third = hasThird ? bytes[index + 2] : 0
+        var iterator = bytes.makeIterator()
+        while let first = iterator.next() {
+            let second = iterator.next()
+            let third = iterator.next()
 
             output.append(alphabet[Int(first >> 2)])
-            output.append(alphabet[Int(((first & 0x03) << 4) | (second >> 4))])
-            if hasSecond {
-                output.append(alphabet[Int(((second & 0x0f) << 2) | (third >> 6))])
+            output.append(alphabet[Int(
+                ((first & 0x03) << 4) | ((second ?? 0) >> 4)
+            )])
+            if let second {
+                output.append(alphabet[Int(
+                    ((second & 0x0f) << 2) | ((third ?? 0) >> 6)
+                )])
             }
-            if hasThird {
+            if let third {
                 output.append(alphabet[Int(third & 0x3f)])
             }
-            index += 3
         }
 
-        if let value = String(validating: output, as: UTF8.self) {
-            return value
-        }
-        return ""
+        return String(decoding: output, as: UTF8.self)
     }
 
     public static func decode(

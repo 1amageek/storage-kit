@@ -126,7 +126,7 @@ public struct StorageWireScope: Sendable, Hashable {
         guard let value else {
             return "_"
         }
-        return StorageWireBase64URL.encode(Array(value.utf8))
+        return StorageWireBase64URL.encode(value.utf8)
     }
 
     private static func base64URLCount(_ byteCount: Int) -> Int {
