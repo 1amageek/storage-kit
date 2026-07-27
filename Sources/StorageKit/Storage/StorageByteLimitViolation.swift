@@ -1,12 +1,12 @@
 /// Structured metadata for a byte-limit violation at a storage boundary.
-public struct StorageByteLimitViolation: Sendable, Hashable, Codable {
-    public enum Resource: String, Sendable, Hashable, Codable {
+public struct StorageByteLimitViolation: Sendable, Hashable {
+    public enum Resource: String, Sendable, Hashable {
         case commitRequest = "commit_request"
         case key
         case value
     }
 
-    public enum Measurement: String, Sendable, Hashable, Codable {
+    public enum Measurement: String, Sendable, Hashable {
         case exact
         case estimated
     }

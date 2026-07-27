@@ -11,12 +11,15 @@ final class TransactionActivityDrain: Sendable {
 
     func wait() async {
         await withCheckedContinuation { continuation in
-            state.withLock { state in
+            let isResolved = state.withLock { state -> Bool in
                 if state.isResolved {
-                    continuation.resume()
-                } else {
-                    state.waiters.append(continuation)
+                    return true
                 }
+                state.waiters.append(continuation)
+                return false
+            }
+            if isResolved {
+                continuation.resume()
             }
         }
     }

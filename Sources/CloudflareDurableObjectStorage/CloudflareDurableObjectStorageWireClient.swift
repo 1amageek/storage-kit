@@ -90,7 +90,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                 operation: operation,
                 backend: .cloudflareDurableObject,
                 message: "Cloudflare Durable Object StorageKit Wire failed",
-                underlyingDescription: String(describing: error)
+                underlyingDescription: underlyingStorageErrorDescription(error)
             )
         }
 
@@ -110,7 +110,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                     operation: operation,
                     backend: .cloudflareDurableObject,
                     message: "Cloudflare Durable Object storage transport failed",
-                    underlyingDescription: String(describing: error)
+                    underlyingDescription: underlyingStorageErrorDescription(error)
                 ),
                 operation: operation
             )
@@ -147,7 +147,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                     operation: operation,
                     backend: .cloudflareDurableObject,
                     message: "Cloudflare Durable Object StorageKit Wire failed",
-                    underlyingDescription: String(describing: error)
+                    underlyingDescription: underlyingStorageErrorDescription(error)
                 ),
                 operation: operation
             )
@@ -189,7 +189,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                 operation: operation,
                 backend: .cloudflareDurableObject,
                 message: "Cloudflare Durable Object storage transport failed",
-                underlyingDescription: String(describing: error)
+                underlyingDescription: underlyingStorageErrorDescription(error)
             ),
             operation: operation
         )
@@ -247,7 +247,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
             operation: operation,
             backend: .cloudflareDurableObject,
             message: "Cloudflare Durable Object StorageKit Wire failed",
-            underlyingDescription: String(describing: error)
+            underlyingDescription: underlyingStorageErrorDescription(error)
         )
     }
 

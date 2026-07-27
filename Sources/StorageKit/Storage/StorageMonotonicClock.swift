@@ -1,8 +1,8 @@
 /// Monotonic time and cancellable waiting used by storage-backed operations.
 public protocol StorageMonotonicClock: Sendable {
-    var now: ContinuousClock.Instant { get }
+    var now: StorageInstant { get }
 
-    func sleep(until deadline: ContinuousClock.Instant) async throws
+    func sleep(until deadline: StorageInstant) async throws
 }
 
 extension StorageMonotonicClock {

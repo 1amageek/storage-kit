@@ -33,6 +33,10 @@ Then add the targets you need:
     name: "YourApp",
     dependencies: [
         .product(name: "StorageKit", package: "storage-kit"),
+        // Add StorageKitSystemClock when the runtime supplies system clock/sleep.
+        .product(name: "StorageKitSystemClock", package: "storage-kit"),
+        // Add StorageKitFoundation only when Foundation Date/UUID tuple adapters are needed.
+        .product(name: "StorageKitFoundation", package: "storage-kit"),
         // Pick one (or more) backends:
         .product(name: "SQLiteStorage", package: "storage-kit"),
         .product(name: "FDBStorage", package: "storage-kit"),
@@ -85,7 +89,8 @@ let engine = try SQLiteStorageEngine(configuration: .inMemory)
 
 ### FoundationDB
 
-Requires a running FDB cluster. Wraps FDB's native `TransactionProtocol` with automatic retry on conflict.
+Requires a running FDB cluster. Wraps FDB's native `TransactionProtocol` while
+leaving whole-transaction retry policy to the higher database layer.
 
 ```swift
 let engine = try await FDBStorageEngine(configuration: .init())
@@ -98,6 +103,14 @@ exposed to StorageKit. FoundationDB result buffers therefore reach StorageKit as
 borrowed `ByteString` storage without an intermediate byte wrapper or payload
 copy.
 
+```text
+DatabaseTypes.ByteString
+        ↑
+fdb-swift-bindings
+        ↑
+     FDBStorage
+```
+
 ### Cloudflare Durable Object SQLite
 
 The Cloudflare backend is split by runtime boundary:
@@ -108,6 +121,15 @@ The Cloudflare backend is split by runtime boundary:
 | `CloudflareDurableObjectStorage` | `StorageEngine`, transaction state, and typed StorageKit Wire client |
 | `CloudflareDurableObjectStorageHTTP` | URLSession transport for native clients |
 | `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch` transport for a WASI reactor |
+
+`StorageKit` itself is Foundation-free. `StorageKitFoundation` supplies the
+explicit Foundation `Date` and `UUID` Tuple Layer adapters; canonical UUID tuple
+decoding returns `DatabaseTypes.UUID`.
+
+`StorageKit` owns the monotonic clock contract but no operating-system clock.
+`StorageKitSystemClock` is the explicit adapter for runtimes that provide Swift's
+`ContinuousClock`. Embedded runtimes inject their own clock without weakening
+the storage contract.
 
 The storage engine and typed client use the canonical
 `CloudflareDurableObjectStorageWire` request, response, mutation, range, and

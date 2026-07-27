@@ -15,13 +15,13 @@ final class CloudflareDurableObjectTimedCall<Value: Sendable>: Sendable {
     private let state = Mutex(State())
 
     func execute(
-        until deadline: ContinuousClock.Instant,
+        until deadline: StorageInstant,
         clock: any StorageMonotonicClock,
         timeoutError: @escaping @Sendable () -> any Error,
         operation: @escaping @Sendable () async throws -> Value
     ) async throws -> Value {
         try await withTaskCancellationHandler {
-            try Task.checkCancellation()
+            try ensureStorageTaskIsActive()
             return try await withCheckedThrowingContinuation { continuation in
                 let shouldStart = state.withLock { state -> Bool in
                     guard !state.cancellationRequested else {

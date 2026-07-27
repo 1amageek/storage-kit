@@ -73,7 +73,7 @@ private actor TypedKeyValueCursorState<Sequence: TransactionRangeResult>:
     }
 
     func next() async throws -> KeyValueCursor.Element? {
-        try Task.checkCancellation()
+        try ensureStorageTaskIsActive()
 
         var iterator: Sequence.AsyncIterator
         switch state {
@@ -184,13 +184,17 @@ private final class CursorAdvanceBoundary: Sendable {
 
     func requestFinish() async throws {
         let result = await withCheckedContinuation { continuation in
-            state.withLock { state in
+            let completed = state.withLock { state
+                -> Result<Void, CursorBoundaryFailure>? in
                 state.finishRequested = true
                 if let result = state.result {
-                    continuation.resume(returning: result)
-                } else {
-                    state.waiters.append(continuation)
+                    return result
                 }
+                state.waiters.append(continuation)
+                return nil
+            }
+            if let completed {
+                continuation.resume(returning: completed)
             }
         }
         switch result {
@@ -202,7 +206,13 @@ private final class CursorAdvanceBoundary: Sendable {
     }
 
     func resolve(_ result: Result<Void, any Error>) {
-        let normalized = result.mapError(CursorBoundaryFailure.init)
+        let normalized: Result<Void, CursorBoundaryFailure>
+        switch result {
+        case .success:
+            normalized = .success(())
+        case .failure(let error):
+            normalized = .failure(CursorBoundaryFailure(error))
+        }
         let waiters = state.withLock { state in
             precondition(state.result == nil)
             state.result = normalized
@@ -228,12 +238,16 @@ private final class CursorFinishBoundary: Sendable {
 
     func wait() async throws {
         let result = await withCheckedContinuation { continuation in
-            state.withLock { state in
+            let completed = state.withLock { state
+                -> Result<Void, CursorBoundaryFailure>? in
                 if let result = state.result {
-                    continuation.resume(returning: result)
-                } else {
-                    state.waiters.append(continuation)
+                    return result
                 }
+                state.waiters.append(continuation)
+                return nil
+            }
+            if let completed {
+                continuation.resume(returning: completed)
             }
         }
         switch result {
@@ -245,7 +259,13 @@ private final class CursorFinishBoundary: Sendable {
     }
 
     func resolve(_ result: Result<Void, any Error>) {
-        let normalized = result.mapError(CursorBoundaryFailure.init)
+        let normalized: Result<Void, CursorBoundaryFailure>
+        switch result {
+        case .success:
+            normalized = .success(())
+        case .failure(let error):
+            normalized = .failure(CursorBoundaryFailure(error))
+        }
         let waiters = state.withLock { state in
             precondition(state.result == nil)
             state.result = normalized

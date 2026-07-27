@@ -192,6 +192,10 @@ extension UInt64: TupleElement {
 
         let n = Int(typeCode - intZero)
         guard offset + n <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
+        guard n <= MemoryLayout<UInt64>.size else {
+            offset += n
+            throw TupleError.integerOverflow
+        }
         var value: UInt64 = 0
         for i in 0..<n {
             value = (value << 8) | UInt64(bytes[offset + i])

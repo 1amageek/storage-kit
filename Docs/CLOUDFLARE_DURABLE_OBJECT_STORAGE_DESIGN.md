@@ -46,8 +46,11 @@ must never leak into the public database API.
 
 | Product | Dependencies | Responsibility |
 |---|---|---|
+| `StorageKit` | DatabaseTypes | Foundation-free storage contracts, Tuple Layer, transaction state, and in-memory reference backend |
+| `StorageKitSystemClock` | StorageKit | `ContinuousClock` adapter for runtimes that provide the system clock implementation |
+| `StorageKitFoundation` | StorageKit, DatabaseTypesFoundation | Foundation `Date` and `UUID` Tuple Layer adapters |
 | `CloudflareDurableObjectStorageWire` | DatabaseTypes | Foundation-free protocol tags, request/response values, resource limits, bounded encoding, and bounded decoding |
-| `CloudflareDurableObjectStorage` | StorageKit and storage wire | `StorageEngine`, transaction state machine, read-your-writes overlay, and typed StorageKit Wire client |
+| `CloudflareDurableObjectStorage` | StorageKit, StorageKitSystemClock, and storage wire | Standard-WASI `StorageEngine`, transaction state machine, read-your-writes overlay, and typed StorageKit Wire client |
 | `CloudflareDurableObjectStorageHTTP` | Foundation and URLSession | Native HTTP transport only |
 | `CloudflareDurableObjectStorageHostTransport` | Cloudflare storage and storage wire | Synchronous `storage_host.dispatch` transport for a standard WASI reactor |
 
@@ -428,6 +431,9 @@ by the full database-framework reactor.
 
 Phase completion requires:
 
+- an Embedded WASM release build of the Foundation-free `StorageKit` core;
+- an Embedded WASM release build of `CloudflareDurableObjectStorageWire`;
+- a standard WASI release build of `CloudflareDurableObjectStorage` and its host transport;
 - native builds for the Foundation-free wire representation, typed client, HTTP transport, and host
   transport products;
 - a standard WASI build of `CloudflareDurableObjectStorageHostTransport`;

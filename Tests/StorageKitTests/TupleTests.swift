@@ -1,6 +1,8 @@
 import DatabaseTypes
-import Testing
 import Foundation
+import StorageKitFoundation
+import Testing
+
 @testable import StorageKit
 
 @Suite("Tuple Layer Tests")
@@ -36,7 +38,7 @@ struct TupleTests {
     @Test func stringWithNullBytes() throws {
         let original = "hello\0world"
         let encoded = original.encodeTuple()
-        // 0x00 は 0x00 0xFF にエスケープされるべき
+        // A contained 0x00 byte must be escaped as 0x00 0xFF.
         #expect(encoded.contains(where: { $0 == 0xFF }))
         var offset = 1
         let decoded = try String.decodeTuple(from: encoded, at: &offset)
@@ -50,6 +52,23 @@ struct TupleTests {
         var offset = 1
         let decoded = try String.decodeTuple(from: encoded, at: &offset)
         #expect(decoded == original)
+    }
+
+    @Test(
+        "Invalid UTF-8 is rejected",
+        arguments: [
+            ByteString([0x02, 0xC0, 0x80, 0x00]),
+            ByteString([0x02, 0xED, 0xA0, 0x80, 0x00]),
+            ByteString([0x02, 0xF4, 0x90, 0x80, 0x80, 0x00]),
+            ByteString([0x02, 0xE2, 0x82, 0x00]),
+        ]
+    )
+    func invalidUTF8IsRejected(_ encoded: ByteString) {
+        var offset = 1
+
+        #expect(throws: TupleError.self) {
+            _ = try String.decodeTuple(from: encoded, at: &offset)
+        }
     }
 
     // MARK: - ByteString
@@ -151,12 +170,33 @@ struct TupleTests {
     // MARK: - UInt64
 
     @Test func uint64RoundTrip() throws {
-        let values: [UInt64] = [0, 1, 255, 65535, UInt64(Int64.max)]
+        let values: [UInt64] = [
+            0,
+            1,
+            255,
+            65_535,
+            UInt64(Int64.max),
+            UInt64(Int64.max) + 1,
+            .max,
+        ]
         for original in values {
             let encoded = original.encodeTuple()
             var offset = 1
             let decoded = try UInt64.decodeTuple(from: encoded, at: &offset)
             #expect(decoded == original, "Failed for \(original)")
+        }
+    }
+
+    @Test func integerBeyondUInt64RangeIsRejected() {
+        let encoded = ByteString([
+            0x1D,
+            0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ])
+        var offset = 1
+
+        #expect(throws: TupleError.self) {
+            _ = try UInt64.decodeTuple(from: encoded, at: &offset)
         }
     }
 
@@ -212,12 +252,30 @@ struct TupleTests {
     // MARK: - UUID
 
     @Test func uuidRoundTrip() throws {
-        let original = UUID()
+        let original = DatabaseTypes.UUID(
+            high: 0x0011_2233_4455_6677,
+            low: 0x8899_AABB_CCDD_EEFF
+        )
         let encoded = original.encodeTuple()
         #expect(encoded.count == 17) // 1 type code + 16 bytes
         #expect(encoded[0] == 0x30)
         var offset = 1
-        let decoded = try UUID.decodeTuple(from: encoded, at: &offset)
+        let decoded = try DatabaseTypes.UUID.decodeTuple(
+            from: encoded,
+            at: &offset
+        )
+        #expect(decoded == original)
+    }
+
+    @Test func foundationUUIDAdapterRoundTrips() throws {
+        let original = Foundation.UUID()
+        let encoded = original.encodeTuple()
+        var offset = 1
+        let decoded = try Foundation.UUID.decodeTuple(
+            from: encoded,
+            at: &offset
+        )
+
         #expect(decoded == original)
     }
 
@@ -268,7 +326,7 @@ struct TupleTests {
         #expect(elements[1] as? Int64 == -100)
         #expect(elements[2] as? Double == 3.14)
         #expect(elements[3] as? Bool == true)
-        #expect(elements[4] as? Foundation.UUID == uuid)
+        #expect(elements[4] as? DatabaseTypes.UUID == DatabaseTypes.UUID(uuid))
         #expect(elements[5] is TupleNil)
     }
 
@@ -320,7 +378,7 @@ struct TupleTests {
 
     @Test func doublyNestedTupleRoundTrip() throws {
         // Tuple("prefix", Tuple(Tuple("a")), "suffix")
-        // advanceOffset のバグ検出: depth 追跡で 0x05 を誤認する問題
+        // Detects a decoder that mistakes a nested 0x05 byte for a depth change.
         let innermost = Tuple("a")
         let middle = Tuple(innermost)
         let outer = Tuple("prefix", middle, "suffix")
@@ -330,7 +388,7 @@ struct TupleTests {
         #expect(elements[0] as? String == "prefix")
         #expect(elements[2] as? String == "suffix")
 
-        // 中間 Tuple の検証
+        // Validate the intermediate tuple.
         let decodedMiddle = elements[1] as? Tuple
         #expect(decodedMiddle != nil)
         let middleElements = try Tuple.unpack(from: decodedMiddle!.pack())
@@ -355,7 +413,7 @@ struct TupleTests {
     }
 
     @Test func nestedTupleWithNullBytesInString() throws {
-        // 文字列に 0x00 バイトを含むケース
+        // Cover a string containing a 0x00 byte.
         let inner = Tuple("hello\0world")
         let outer = Tuple(inner, "after")
         let packed = outer.pack()
@@ -369,11 +427,11 @@ struct TupleTests {
         #expect(innerElements[0] as? String == "hello\0world")
     }
 
-    // MARK: - FDB バイト互換
+    // MARK: - FDB Byte Compatibility
 
     @Test func int64MinEncoding() throws {
-        // FDB 公式仕様: n=8 は raw two's complement
-        // Int64.min = -9223372036854775808 → [0x0C, 0x80, 0x00, ...]
+        // The FDB specification encodes n=8 as raw two's complement.
+        // Int64.min is encoded as [0x0C, 0x80, 0x00, ...].
         let encoded = Int64.min.encodeTuple()
         #expect(encoded[0] == 0x0C) // type code = 0x14 - 8
         #expect(encoded[1] == 0x80) // MSB of two's complement
@@ -387,10 +445,10 @@ struct TupleTests {
     }
 
     @Test func integerFullRangeOrdering() throws {
-        // Int64.min から Int64.max まで辞書順が正しいことを確認
+        // Verify lexicographic ordering from Int64.min through Int64.max.
         let values: [Int64] = [
             .min, .min + 1,
-            -72057594037927936, -72057594037927935, // n=8/n=7 境界
+            -72057594037927936, -72057594037927935, // n=8/n=7 boundary
             -256, -255, -1, 0, 1, 255, 256,
             72057594037927935, 72057594037927936,
             .max - 1, .max

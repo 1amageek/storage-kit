@@ -33,16 +33,20 @@ public final class TransactionOperationCompletion: Sendable {
 
     public func wait() async throws(StorageError) {
         await withCheckedContinuation { continuation in
-            state.withLock { state in
+            let isResolved = state.withLock { state -> Bool in
                 switch state.resolution {
                 case .pending:
                     state.firstWaiter = Waiter(
                         continuation: continuation,
                         next: state.firstWaiter
                     )
+                    return false
                 case .succeeded, .failed:
-                    continuation.resume()
+                    return true
                 }
+            }
+            if isResolved {
+                continuation.resume()
             }
         }
         try state.withLock { state throws(StorageError) in

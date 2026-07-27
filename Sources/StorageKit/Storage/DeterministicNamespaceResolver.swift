@@ -32,6 +32,11 @@ public struct DeterministicNamespaceResolver: NamespaceResolver, Sendable {
     }
 
     private func subspace(for path: [String]) -> Subspace {
-        Subspace(Tuple(path.map { $0 as any TupleElement }))
+        var elements: [any TupleElement] = []
+        elements.reserveCapacity(path.count)
+        for component in path {
+            elements.append(component)
+        }
+        return Subspace(Tuple(elements))
     }
 }

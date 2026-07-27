@@ -553,7 +553,7 @@ struct SQLiteNestedTransactionTests {
                 Issue.record("Should not yield any elements")
             }
             Issue.record("Expected error to be thrown")
-        } catch let error as StorageError {
+        } catch let error {
             guard error.code == .backendFailure else {
                 Issue.record("Expected backendError, got \(error)")
                 return

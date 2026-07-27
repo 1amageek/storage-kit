@@ -90,7 +90,7 @@ public final class TransactionMutationByteMeter: Sendable {
         guard byteCount >= 0 else {
             throw .exceeded(
                 actual: Int.max,
-                maximum: maximumBytes ?? Int.max
+                maximum: Self.resolvedMaximum(maximumBytes)
             )
         }
         try state.withLock { state throws(TransactionMutationByteLimitError) in
@@ -98,7 +98,7 @@ public final class TransactionMutationByteMeter: Sendable {
             guard !addition.overflow else {
                 throw .exceeded(
                     actual: Int.max,
-                    maximum: state.maximumBytes ?? Int.max
+                    maximum: Self.resolvedMaximum(state.maximumBytes)
                 )
             }
             if let maximumBytes = state.maximumBytes,
@@ -174,7 +174,7 @@ public final class TransactionMutationByteMeter: Sendable {
         _ fifth: Int = 0,
         _ sixth: Int = 0
     ) throws(TransactionMutationByteLimitError) {
-        let maximum = maximumBytes ?? Int.max
+        let maximum = Self.resolvedMaximum(maximumBytes)
         let firstSum = try Self.adding(first, second, maximum: maximum)
         let secondSum = try Self.adding(firstSum, third, maximum: maximum)
         let thirdSum = try Self.adding(secondSum, fourth, maximum: maximum)
@@ -193,5 +193,12 @@ public final class TransactionMutationByteMeter: Sendable {
             throw .exceeded(actual: Int.max, maximum: maximum)
         }
         return addition.partialValue
+    }
+
+    private static func resolvedMaximum(_ maximumBytes: Int?) -> Int {
+        if let maximumBytes {
+            return maximumBytes
+        }
+        return Int.max
     }
 }

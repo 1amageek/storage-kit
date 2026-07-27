@@ -5,7 +5,7 @@ public struct TransactionVersionstamp: Sendable, Hashable {
 
     public let bytes: ByteString
 
-    public init(bytes: ByteString) throws {
+    public init(bytes: ByteString) throws(StorageError) {
         guard bytes.count == Self.byteCount else {
             throw StorageError(
                 code: .backendContractViolation,
@@ -16,7 +16,7 @@ public struct TransactionVersionstamp: Sendable, Hashable {
         self.bytes = bytes
     }
 
-    package init(committedVersion: Int64) throws {
+    package init(committedVersion: Int64) throws(StorageError) {
         guard committedVersion >= 0 else {
             throw StorageError(
                 code: .backendContractViolation,

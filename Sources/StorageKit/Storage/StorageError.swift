@@ -1,11 +1,5 @@
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
-import Foundation
-#endif
-
 /// Storage backend identifier used for diagnostics and error classification.
-public enum StorageBackend: String, Sendable, Hashable, Codable {
+public enum StorageBackend: String, Sendable, Hashable {
     case foundationDB = "foundationdb"
     case sqlite
     case postgreSQL = "postgresql"
@@ -15,7 +9,7 @@ public enum StorageBackend: String, Sendable, Hashable, Codable {
 }
 
 /// Storage operation identifier used for diagnostics and error classification.
-public enum StorageOperation: String, Sendable, Hashable, Codable {
+public enum StorageOperation: String, Sendable, Hashable {
     case open
     case initialize
     case beginTransaction = "begin_transaction"
@@ -34,8 +28,8 @@ public enum StorageOperation: String, Sendable, Hashable, Codable {
 }
 
 /// Structured error type for StorageEngine implementations.
-public struct StorageError: Error, Sendable, LocalizedError, CustomStringConvertible, Hashable {
-    public enum Code: String, Sendable, Hashable, Codable {
+public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
+    public enum Code: String, Sendable, Hashable {
         case transactionConflict = "transaction_conflict"
         case transactionTooOld = "transaction_too_old"
         case transactionFutureVersion = "transaction_future_version"
@@ -107,14 +101,6 @@ public struct StorageError: Error, Sendable, LocalizedError, CustomStringConvert
 
     /// Whether a generic transaction runner may replay the whole transaction.
     public var isRetryable: Bool { retryDisposition == .safe }
-
-    public var errorDescription: String? {
-        description
-    }
-
-    public var failureReason: String? {
-        underlyingDescription
-    }
 
     public var description: String {
         var parts = [

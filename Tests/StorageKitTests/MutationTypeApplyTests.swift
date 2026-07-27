@@ -140,7 +140,7 @@ struct MutationTypeApplyTests {
         do {
             _ = try MutationType.setVersionstampedKey.apply(to: [0x01], param: [0x01])
             Issue.record("Expected setVersionstampedKey to throw")
-        } catch let error as StorageError {
+        } catch let error {
             #expect(error.code == .invalidOperation)
         }
     }
@@ -149,7 +149,7 @@ struct MutationTypeApplyTests {
         do {
             _ = try MutationType.setVersionstampedValue.apply(to: [0x01], param: [0x01])
             Issue.record("Expected setVersionstampedValue to throw")
-        } catch let error as StorageError {
+        } catch let error {
             #expect(error.code == .invalidOperation)
         }
     }

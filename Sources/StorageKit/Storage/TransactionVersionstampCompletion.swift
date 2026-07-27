@@ -43,16 +43,20 @@ package final class TransactionVersionstampCompletion: Sendable {
     package func wait() async throws(StorageError)
         -> TransactionVersionstamp {
         await withCheckedContinuation { continuation in
-            state.withLock { state in
+            let isResolved = state.withLock { state -> Bool in
                 switch state.resolution {
                 case .pending:
                     state.firstWaiter = Waiter(
                         continuation: continuation,
                         next: state.firstWaiter
                     )
+                    return false
                 case .succeeded, .failed:
-                    continuation.resume()
+                    return true
                 }
+            }
+            if isResolved {
+                continuation.resume()
             }
         }
         return try state.withLock { state throws(StorageError) in

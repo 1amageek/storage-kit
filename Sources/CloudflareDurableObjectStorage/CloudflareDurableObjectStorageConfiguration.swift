@@ -1,5 +1,6 @@
 import CloudflareDurableObjectStorageWire
 import StorageKit
+import StorageKitSystemClock
 
 /// Configuration for one Cloudflare Durable Object storage engine.
 public struct CloudflareDurableObjectStorageConfiguration: Sendable {

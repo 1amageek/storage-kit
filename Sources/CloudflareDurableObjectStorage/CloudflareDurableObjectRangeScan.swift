@@ -100,7 +100,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
             try await prepareViewIfNeeded()
 
             while !isUserLimitReached {
-                try Task.checkCancellation()
+                try ensureStorageTaskIsActive()
                 try await ensureHostRowIfNeeded()
                 let hostRow = currentHostRow
                 let localRow = currentLocalRow
@@ -270,7 +270,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         var rows: [(ByteString, ByteString)] = []
         rows.reserveCapacity(keys.count)
         for key in keys {
-            try Task.checkCancellation()
+            try ensureStorageTaskIsActive()
             let committed = try await readCommittedValue(for: key)
             if let value = try value(for: key, committed: committed) {
                 rows.append((key, value))
@@ -308,12 +308,12 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         )
         if selector.offset > 0 {
             for _ in 0..<selector.offset {
-                try Task.checkCancellation()
+                try ensureStorageTaskIsActive()
                 boundary = try await successor(after: boundary)
             }
         } else if selector.offset < 0 {
             for _ in 0..<selector.offset.magnitude {
-                try Task.checkCancellation()
+                try ensureStorageTaskIsActive()
                 boundary = try await predecessor(before: boundary)
             }
         }

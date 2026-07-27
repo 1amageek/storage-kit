@@ -73,7 +73,7 @@ struct StorageErrorTests {
         #expect(error.message == "SQLite open failed")
     }
 
-    @Test func localizedDescription_isStructured() {
+    @Test func description_isStructured() {
         let error = StorageError(
             code: .transactionBusy,
             operation: .beginTransaction,
@@ -82,9 +82,9 @@ struct StorageErrorTests {
             underlyingDescription: "rc=5: database is locked"
         )
 
-        #expect(error.localizedDescription.contains("transaction_busy"))
-        #expect(error.localizedDescription.contains("backend=sqlite"))
-        #expect(error.localizedDescription.contains("operation=begin_transaction"))
-        #expect(error.localizedDescription.contains("SQLite begin failed"))
+        #expect(error.description.contains("transaction_busy"))
+        #expect(error.description.contains("backend=sqlite"))
+        #expect(error.description.contains("operation=begin_transaction"))
+        #expect(error.description.contains("SQLite begin failed"))
     }
 }

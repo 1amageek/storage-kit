@@ -70,7 +70,12 @@ package struct SortedKeyValueStore: Sendable {
 
     /// Extract all keys (for KeySelector resolution).
     var keys: [ByteString] {
-        entries.map(\.key)
+        var keys: [ByteString] = []
+        keys.reserveCapacity(entries.count)
+        for entry in entries {
+            keys.append(entry.key)
+        }
+        return keys
     }
 
     // MARK: - Binary Search

@@ -1,21 +1,25 @@
 import CloudflareDurableObjectStorageWire
 import StorageKit
+import StorageKitSystemClock
 import Testing
 
 @testable import CloudflareDurableObjectStorage
 
 @Suite("Cloudflare Durable Object Storage Timeout Tests")
 struct CloudflareDurableObjectStorageTimeoutTests {
-    private enum ClockFailure: Error {
+    private enum ClockFailure: Error, CustomStringConvertible {
         case unavailable
+
+        var description: String { "Clock unavailable" }
     }
 
     private struct FailingClock: StorageMonotonicClock {
-        var now: ContinuousClock.Instant {
-            ContinuousClock().now
+        var now: StorageInstant {
+            StorageInstant(durationSinceReference: .zero)
         }
 
-        func sleep(until deadline: ContinuousClock.Instant) async throws {
+        func sleep(until deadline: StorageInstant) async throws {
+            _ = deadline
             throw ClockFailure.unavailable
         }
     }

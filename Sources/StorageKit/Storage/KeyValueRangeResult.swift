@@ -8,16 +8,17 @@ import DatabaseTypes
 /// the error is thrown on the first `next()` call.
 public struct KeyValueRangeResult: TransactionRangeResult {
     public typealias Element = (ByteString, ByteString)
+    public typealias Failure = StorageError
 
     private let results: [(key: ByteString, value: ByteString)]
-    private let error: (any Error)?
+    private let error: StorageError?
 
     public init(_ results: [(key: ByteString, value: ByteString)]) {
         self.results = results
         self.error = nil
     }
 
-    public init(error: any Error) {
+    public init(error: StorageError) {
         self.results = []
         self.error = error
     }
@@ -27,16 +28,18 @@ public struct KeyValueRangeResult: TransactionRangeResult {
     }
 
     public struct Iterator: TransactionRangeIterator, Sendable {
+        public typealias Failure = StorageError
+
         private var results: [(key: ByteString, value: ByteString)]?
-        private var error: (any Error)?
+        private var error: StorageError?
         private var index: Int = 0
 
-        init(results: [(key: ByteString, value: ByteString)], error: (any Error)?) {
+        init(results: [(key: ByteString, value: ByteString)], error: StorageError?) {
             self.results = results
             self.error = error
         }
 
-        public mutating func next() async throws -> (ByteString, ByteString)? {
+        public mutating func next() async throws(StorageError) -> (ByteString, ByteString)? {
             if let error {
                 self.error = nil
                 results = nil

@@ -1,9 +1,4 @@
 import DatabaseTypes
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
-import Foundation
-#endif
 
 /// Tuple-based key space prefix management.
 ///
@@ -177,8 +172,6 @@ public struct Subspace: Sendable, Hashable, Equatable {
         } else {
             do {
                 end = try strinc(prefix)
-            } catch TupleError.cannotIncrementKey {
-                end = appending(0xFF, to: prefix)
             } catch {
                 end = appending(0xFF, to: prefix)
             }

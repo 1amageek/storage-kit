@@ -237,10 +237,12 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     // Namespace resolution uses the deterministic default implementation.
 
     public func shutdown() {
-        runTask.withLock { task in
-            task?.cancel()
+        let task = runTask.withLock { task -> Task<Void, Never>? in
+            let runningTask = task
             task = nil
+            return runningTask
         }
+        task?.cancel()
     }
 
     /// Verify that PostgreSQL is reachable and that the configured KV table exists.

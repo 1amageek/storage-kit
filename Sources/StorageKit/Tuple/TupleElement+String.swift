@@ -1,9 +1,4 @@
 import DatabaseTypes
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
-import Foundation
-#endif
 
 // MARK: - String
 
@@ -24,10 +19,79 @@ extension String: TupleElement {
 
     public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> String {
         let raw = try decodeNullTerminated(from: bytes, at: &offset)
-        guard let str = String(bytes: raw, encoding: .utf8) else {
+        guard raw.hasValidUTF8Encoding else {
             throw TupleError.invalidUTF8
         }
-        return str
+        return raw.withUnsafeBytes { source in
+            String(
+                decoding: source.bindMemory(to: UInt8.self),
+                as: UTF8.self
+            )
+        }
+    }
+}
+
+private extension ByteString {
+    var hasValidUTF8Encoding: Bool {
+        withUnsafeBytes { bytes in
+            var index = 0
+            while index < bytes.count {
+                let first = bytes[index]
+                if first <= 0x7f {
+                    index += 1
+                    continue
+                }
+
+                if first >= 0xc2 && first <= 0xdf {
+                    guard index + 1 < bytes.count,
+                          Self.isUTF8Continuation(bytes[index + 1]) else {
+                        return false
+                    }
+                    index += 2
+                    continue
+                }
+
+                if first >= 0xe0 && first <= 0xef {
+                    guard index + 2 < bytes.count else { return false }
+                    let second = bytes[index + 1]
+                    let validSecond = switch first {
+                    case 0xe0: second >= 0xa0 && second <= 0xbf
+                    case 0xed: second >= 0x80 && second <= 0x9f
+                    default: Self.isUTF8Continuation(second)
+                    }
+                    guard validSecond,
+                          Self.isUTF8Continuation(bytes[index + 2]) else {
+                        return false
+                    }
+                    index += 3
+                    continue
+                }
+
+                if first >= 0xf0 && first <= 0xf4 {
+                    guard index + 3 < bytes.count else { return false }
+                    let second = bytes[index + 1]
+                    let validSecond = switch first {
+                    case 0xf0: second >= 0x90 && second <= 0xbf
+                    case 0xf4: second >= 0x80 && second <= 0x8f
+                    default: Self.isUTF8Continuation(second)
+                    }
+                    guard validSecond,
+                          Self.isUTF8Continuation(bytes[index + 2]),
+                          Self.isUTF8Continuation(bytes[index + 3]) else {
+                        return false
+                    }
+                    index += 4
+                    continue
+                }
+
+                return false
+            }
+            return true
+        }
+    }
+
+    static func isUTF8Continuation(_ byte: UInt8) -> Bool {
+        byte >= 0x80 && byte <= 0xbf
     }
 }
 

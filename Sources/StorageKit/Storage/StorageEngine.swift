@@ -34,9 +34,6 @@ public protocol StorageEngine: Sendable {
     /// namespace metadata.
     var namespaceCatalog: (any NamespaceCatalog)? { get }
 
-    /// Monotonic clock used for deadlines, retry backoff, and throttling.
-    var monotonicClock: any StorageMonotonicClock { get }
-
     /// Release resources held by this engine.
     ///
     /// Called when the engine is no longer needed.
@@ -56,10 +53,6 @@ extension StorageEngine {
     }
 
     public var namespaceCatalog: (any NamespaceCatalog)? { nil }
-
-    public var monotonicClock: any StorageMonotonicClock {
-        SystemStorageClock()
-    }
 
     public func shutdown() {}
 

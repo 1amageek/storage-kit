@@ -84,7 +84,12 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
     ///
     /// Layout: [10 bytes transaction version (big-endian)] [2 bytes user version (big-endian)]
     public func toBytes() -> ByteString {
-        let version = transactionVersion ?? Self.incompletePlaceholder
+        let version: ByteString
+        if let transactionVersion {
+            version = transactionVersion
+        } else {
+            version = Self.incompletePlaceholder
+        }
         return ByteString.copying(count: Self.totalSize) { output in
             version.withUnsafeBytes { source in
                 let destination = UnsafeMutableRawBufferPointer(
@@ -129,20 +134,22 @@ public struct Versionstamp: Sendable, Hashable, Equatable, CustomStringConvertib
 
     public var description: String {
         if let tv = transactionVersion {
-            let tvHex = String(
-                unsafeUninitializedCapacity: Self.transactionVersionSize * 2
-            ) { output in
-                tv.withUnsafeBytes { bytes in
-                    for index in bytes.indices {
-                        let byte = bytes[index]
-                        output[index * 2] = Self.hexadecimalCharacter(byte >> 4)
-                        output[index * 2 + 1] = Self.hexadecimalCharacter(
-                            byte & 0x0f
-                        )
-                    }
+            var hexadecimalBytes = [UInt8](
+                repeating: 0,
+                count: Self.transactionVersionSize * 2
+            )
+            tv.withUnsafeBytes { bytes in
+                for index in bytes.indices {
+                    let byte = bytes[index]
+                    hexadecimalBytes[index * 2] = Self.hexadecimalCharacter(
+                        byte >> 4
+                    )
+                    hexadecimalBytes[index * 2 + 1] = Self.hexadecimalCharacter(
+                        byte & 0x0f
+                    )
                 }
-                return Self.transactionVersionSize * 2
             }
+            let tvHex = String(decoding: hexadecimalBytes, as: UTF8.self)
             return "Versionstamp(tr:\(tvHex), user:\(userVersion))"
         }
         return "Versionstamp(incomplete, user:\(userVersion))"
@@ -166,7 +173,11 @@ extension Versionstamp: Comparable {
 extension Versionstamp: TupleElement {
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(TupleTypeCode.versionstamp.rawValue)
-        sink.writeBytes(transactionVersion ?? Self.incompletePlaceholder)
+        if let transactionVersion {
+            sink.writeBytes(transactionVersion)
+        } else {
+            sink.writeBytes(Self.incompletePlaceholder)
+        }
         sink.writeByte(UInt8(truncatingIfNeeded: userVersion >> 8))
         sink.writeByte(UInt8(truncatingIfNeeded: userVersion))
     }

@@ -18,5 +18,5 @@ struct CloudflareDurableObjectTransactionState: Sendable {
     var phase: CloudflareDurableObjectTransactionPhase = .open
     var observedReadVersion: Int64?
     var committedVersion: Int64?
-    var deadline: ContinuousClock.Instant?
+    var deadline: StorageInstant?
 }

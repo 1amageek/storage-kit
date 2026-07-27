@@ -15,7 +15,6 @@ public struct StorageRangeCleanupError: Error, CustomStringConvertible {
     }
 
     public var description: String {
-        "Range iteration failed and iterator cleanup also failed: "
-            + "iteration=\(iterationError), cleanup=\(cleanupError)"
+        "Range iteration failed and iterator cleanup also failed"
     }
 }

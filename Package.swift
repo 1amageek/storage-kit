@@ -6,6 +6,8 @@ let package = Package(
     platforms: [.macOS(.v15), .iOS(.v18)],
     products: [
         .library(name: "StorageKit", targets: ["StorageKit"]),
+        .library(name: "StorageKitSystemClock", targets: ["StorageKitSystemClock"]),
+        .library(name: "StorageKitFoundation", targets: ["StorageKitFoundation"]),
         .library(name: "CloudflareDurableObjectStorageWire", targets: ["CloudflareDurableObjectStorageWire"]),
         .library(name: "FDBStorage", targets: ["FDBStorage"]),
         .library(name: "SQLiteStorage", targets: ["SQLiteStorage"]),
@@ -27,11 +29,11 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/1amageek/database-types.git",
-            from: "26.0726.0"
+            from: "26.0727.0"
         ),
         .package(
             url: "https://github.com/1amageek/fdb-swift-bindings.git",
-            from: "0.3.0"
+            from: "0.3.1"
         ),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
     ],
@@ -46,6 +48,20 @@ let package = Package(
             name: "StorageKit",
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
+            ]
+        ),
+        .target(
+            name: "StorageKitSystemClock",
+            dependencies: [
+                "StorageKit",
+            ]
+        ),
+        .target(
+            name: "StorageKitFoundation",
+            dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
+                .product(name: "DatabaseTypesFoundation", package: "database-types"),
+                "StorageKit",
             ]
         ),
         .target(
@@ -82,6 +98,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
+                "StorageKitSystemClock",
                 "CloudflareDurableObjectStorageWire",
             ]
         ),
@@ -119,6 +136,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
+                "StorageKitFoundation",
             ]
         ),
         .testTarget(
@@ -152,6 +170,7 @@ let package = Package(
                 "CloudflareDurableObjectStorage",
                 "CloudflareDurableObjectStorageTesting",
                 "CloudflareDurableObjectStorageWire",
+                "StorageKitSystemClock",
             ]
         ),
         .testTarget(

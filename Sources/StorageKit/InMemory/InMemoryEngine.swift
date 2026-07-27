@@ -67,8 +67,10 @@ private struct InMemoryConflictRegion: Sendable {
     }
 
     func overlaps(_ other: InMemoryConflictRegion) -> Bool {
-        Self.lowerPrecedesUpper(lower, other.upper)
-            && Self.lowerPrecedesUpper(other.lower, upper)
+        guard Self.lowerPrecedesUpper(lower, other.upper) else {
+            return false
+        }
+        return Self.lowerPrecedesUpper(other.lower, upper)
     }
 
     private static func lowerPrecedesUpper(
@@ -133,9 +135,12 @@ public final class InMemoryEngine: StorageEngine, Sendable {
                 committedWriteHistory.removeAll(keepingCapacity: false)
                 return
             }
-            let firstRequiredIndex = committedWriteHistory.firstIndex {
-                $0.version > minimumSnapshotVersion
-            } ?? committedWriteHistory.endIndex
+            var firstRequiredIndex = committedWriteHistory.startIndex
+            while firstRequiredIndex < committedWriteHistory.endIndex,
+                  committedWriteHistory[firstRequiredIndex].version
+                    <= minimumSnapshotVersion {
+                firstRequiredIndex += 1
+            }
             guard firstRequiredIndex > committedWriteHistory.startIndex else {
                 return
             }
@@ -348,7 +353,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
         streamingMode: StreamingMode
     ) -> KeyValueRangeResult {
         do {
-            return try _state.withLock { state in
+            return try _state.withLock { state throws(StorageError) in
                 try Self.validateOpen(state.lifecycle, operation: .rangeRead)
                 if !snapshot,
                    let conflictRegion = Self.readConflictRegion(
@@ -554,14 +559,15 @@ public final class InMemoryTransaction: Transaction, Sendable {
             case .failure(let error):
                 versionstampCompletion.fail(error)
             }
-            let completionResult = result.map { _ in () }
-            switch completionResult {
+            switch result {
             case .success:
                 completion.succeed()
             case .failure(let error):
                 completion.fail(error)
             }
-            try completionResult.get()
+            if case .failure(let error) = result {
+                throw error
+            }
         case .wait(let completion):
             try await completion.wait()
             let lifecycle = _state.withLock { $0.lifecycle }
@@ -687,7 +693,8 @@ public final class InMemoryTransaction: Transaction, Sendable {
         _ payload: CommitPayload
     ) -> Result<Int64, StorageError> {
         do {
-            let version = try engine._store.withLock { state -> Int64 in
+            let version = try engine._store.withLock {
+                state throws(StorageError) -> Int64 in
                 defer {
                     state.releaseTransaction(transactionIdentifier)
                 }
@@ -756,18 +763,8 @@ public final class InMemoryTransaction: Transaction, Sendable {
                 return nextVersion
             }
             return .success(version)
-        } catch let error as StorageError {
-            return .failure(error)
         } catch {
-            return .failure(
-                StorageError(
-                    code: .backendFailure,
-                    operation: .commit,
-                    backend: .inMemory,
-                    message: "In-memory transaction commit failed",
-                    underlyingDescription: String(describing: error)
-                )
-            )
+            return .failure(error)
         }
     }
 
@@ -804,7 +801,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
     private static func validateOpen(
         _ lifecycle: Lifecycle,
         operation: StorageOperation
-    ) throws {
+    ) throws(StorageError) {
         switch lifecycle {
         case .open:
             return
@@ -844,16 +841,8 @@ public final class InMemoryTransaction: Transaction, Sendable {
                         committedVersion: committedVersion
                     )
                 )
-            } catch let error as StorageError {
-                return .failure(error)
             } catch {
-                return .failure(StorageError(
-                    code: .backendContractViolation,
-                    operation: .read,
-                    backend: .inMemory,
-                    message: "Unable to encode the committed versionstamp",
-                    underlyingDescription: String(describing: error)
-                ))
+                return .failure(error)
             }
         case .failure(let error):
             return .failure(error)

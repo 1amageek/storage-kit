@@ -15,14 +15,8 @@ public struct StorageTransactionCleanupError:
         operationError: any Error,
         cancellationError: any Error
     ) {
-        if let existing = operationError as? StorageTransactionCleanupError {
-            self.operationError = existing.operationError
-            self.cancellationErrors = existing.cancellationErrors
-                + [cancellationError]
-        } else {
-            self.operationError = operationError
-            self.cancellationErrors = [cancellationError]
-        }
+        self.operationError = operationError
+        self.cancellationErrors = [cancellationError]
     }
 
     private init(
@@ -44,6 +38,6 @@ public struct StorageTransactionCleanupError:
 
     public var description: String {
         "Transaction operation failed and cancellation also failed: "
-            + "operation=\(operationError), cancellations=\(cancellationErrors)"
+            + "cancellationFailureCount=\(cancellationErrors.count)"
     }
 }

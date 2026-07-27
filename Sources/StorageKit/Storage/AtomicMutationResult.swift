@@ -40,7 +40,7 @@ extension MutationType {
     public func apply(
         to existing: ByteString?,
         param: ByteString
-    ) throws -> AtomicMutationResult {
+    ) throws(StorageError) -> AtomicMutationResult {
         switch self {
         case .add:
             return .set(
@@ -81,7 +81,13 @@ extension MutationType {
                 }
             )
         case .max:
-            let current = Self.adjusted(existing ?? [], to: param.count)
+            let base: ByteString
+            if let existing {
+                base = existing
+            } else {
+                base = ByteString()
+            }
+            let current = Self.adjusted(base, to: param.count)
             return .set(
                 Self.compareLittleEndian(current, param) >= 0
                     ? current

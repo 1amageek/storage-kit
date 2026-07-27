@@ -773,7 +773,7 @@ struct InMemoryEngineTests {
                 Issue.record("Expected error")
             }
             Issue.record("Expected error")
-        } catch let error as StorageError {
+        } catch let error {
             guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return

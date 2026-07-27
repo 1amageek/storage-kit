@@ -340,22 +340,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 )
             }
 
-            let versionstamp: TransactionVersionstamp
-            do {
-                versionstamp = try TransactionVersionstamp(
-                    committedVersion: response.committedVersion
-                )
-            } catch let error as StorageError {
-                throw error
-            } catch {
-                throw StorageError(
-                    code: .backendContractViolation,
-                    operation: .read,
-                    backend: .cloudflareDurableObject,
-                    message: "Unable to encode the committed versionstamp",
-                    underlyingDescription: String(describing: error)
-                )
-            }
+            let versionstamp = try TransactionVersionstamp(
+                committedVersion: response.committedVersion
+            )
             state.withLock { state in
                 state.phase = .committed
                 state.committedVersion = response.committedVersion
@@ -1116,7 +1103,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             operation: operation,
             backend: .cloudflareDurableObject,
             message: "Cloudflare Durable Object transaction failed",
-            underlyingDescription: String(describing: error)
+            underlyingDescription: underlyingStorageErrorDescription(error)
         )
     }
 
@@ -1236,13 +1223,13 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 operation: operation,
                 backend: .cloudflareDurableObject,
                 message: "Cloudflare Durable Object client operation failed",
-                underlyingDescription: String(describing: error)
+                underlyingDescription: underlyingStorageErrorDescription(error)
             )
         }
     }
 
     private func ensureDeadlineNotExpired(
-        _ deadline: ContinuousClock.Instant?,
+        _ deadline: StorageInstant?,
         operation: StorageOperation
     ) throws {
         guard let deadline else { return }

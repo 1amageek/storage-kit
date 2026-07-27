@@ -1,7 +1,8 @@
 import DatabaseTypes
-import Testing
 import Foundation
 import Synchronization
+import Testing
+
 @testable import StorageKit
 
 @Suite("KeyValueSequence Tests")
@@ -97,7 +98,7 @@ struct KeyValueSequenceTests {
                 Issue.record("Should not yield any elements")
             }
             Issue.record("Expected error to be thrown")
-        } catch let error as StorageError {
+        } catch let error {
             guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return
@@ -115,7 +116,7 @@ struct KeyValueSequenceTests {
         do {
             _ = try await iterator.next()
             Issue.record("Expected the first iteration to throw")
-        } catch let error as StorageError {
+        } catch let error {
             #expect(error.code == .invalidOperation)
         }
 
