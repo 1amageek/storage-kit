@@ -7,7 +7,6 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
     public let maxConflictRangesPerCommit: Int
     public let maxRangeLimit: Int
     public let maxSplitPoints: Int
-    public let maxNameBytes: Int
     public let maxSelectorResolutionSteps: Int
 
     public init(
@@ -18,7 +17,6 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         maxConflictRangesPerCommit: Int,
         maxRangeLimit: Int,
         maxSplitPoints: Int,
-        maxNameBytes: Int,
         maxSelectorResolutionSteps: Int = 10_000
     ) throws {
         try Self.validate(
@@ -57,17 +55,13 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
             maximum: 10_000
         )
         try Self.validate(
-            maxNameBytes,
-            field: "maxNameBytes",
-            maximum: 512
-        )
-        try Self.validate(
             maxSelectorResolutionSteps,
             field: "maxSelectorResolutionSteps",
             maximum: 10_000
         )
         guard maxBoundaryBytes > maxKeyBytes else {
-            throw CloudflareDurableObjectLimitsError
+            throw
+                CloudflareDurableObjectLimitsError
                 .boundaryCannotRepresentKeySuccessor(
                     keyBytes: maxKeyBytes,
                     boundaryBytes: maxBoundaryBytes
@@ -80,7 +74,6 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         self.maxConflictRangesPerCommit = maxConflictRangesPerCommit
         self.maxRangeLimit = maxRangeLimit
         self.maxSplitPoints = maxSplitPoints
-        self.maxNameBytes = maxNameBytes
         self.maxSelectorResolutionSteps = maxSelectorResolutionSteps
     }
 
@@ -92,7 +85,6 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         maxConflictRangesPerCommit: 1_000,
         maxRangeLimit: 1_000,
         maxSplitPoints: 10_000,
-        maxNameBytes: 512,
         maxSelectorResolutionSteps: 10_000,
         validated: ()
     )
@@ -105,7 +97,6 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         maxConflictRangesPerCommit: Int,
         maxRangeLimit: Int,
         maxSplitPoints: Int,
-        maxNameBytes: Int,
         maxSelectorResolutionSteps: Int,
         validated: Void
     ) {
@@ -117,7 +108,6 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         self.maxConflictRangesPerCommit = maxConflictRangesPerCommit
         self.maxRangeLimit = maxRangeLimit
         self.maxSplitPoints = maxSplitPoints
-        self.maxNameBytes = maxNameBytes
         self.maxSelectorResolutionSteps = maxSelectorResolutionSteps
     }
 

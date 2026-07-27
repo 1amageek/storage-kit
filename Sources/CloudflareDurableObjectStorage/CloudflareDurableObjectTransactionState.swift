@@ -1,3 +1,4 @@
+import CloudflareDurableObjectStorageWire
 import StorageKit
 
 enum CloudflareDurableObjectTransactionPhase: Sendable {
@@ -11,9 +12,9 @@ enum CloudflareDurableObjectTransactionPhase: Sendable {
 }
 
 struct CloudflareDurableObjectTransactionState: Sendable {
-    var mutations: [CloudflareDurableObjectMutation] = []
-    var readConflictRanges: [CloudflareDurableObjectConflictRange] = []
-    var writeConflictRanges: [CloudflareDurableObjectConflictRange] = []
+    var mutations: [StorageWireWriteOperation] = []
+    var readConflictRanges: [StorageWireKeyRange] = []
+    var writeConflictRanges: [StorageWireKeyRange] = []
     var phase: CloudflareDurableObjectTransactionPhase = .open
     var observedReadVersion: Int64?
     var committedVersion: Int64?

@@ -1,5 +1,6 @@
 import CloudflareDurableObjectStorage
 import CloudflareDurableObjectStorageTesting
+import CloudflareDurableObjectStorageWire
 import StorageKit
 import Testing
 
@@ -135,8 +136,9 @@ struct CloudflareDurableObjectStorageSemanticsTests {
     @Test func cancellingInFlightCommitProducesUnknownOutcome() async throws {
         let transport = SuspendingCloudflareDurableObjectStorageTransport()
         let client = CloudflareDurableObjectStorageWireClient(transport: transport)
-        let scope = try CloudflareDurableObjectStorageScope(databaseID: "main")
-        let engine = try await CloudflareDurableObjectSharedClientRouter(client: client).engine(for: scope)
+        let scope = try StorageWireScope(databaseID: "main")
+        let engine = try await CloudflareDurableObjectSharedClientRouter(client: client).engine(
+            for: scope)
         let transaction = try engine.createTransaction()
         try transaction.setValue([1], for: [0x01])
 
@@ -156,7 +158,8 @@ struct CloudflareDurableObjectStorageSemanticsTests {
             #expect(error.operation == .commit)
             commitError = error
         } catch {
-            Issue.record("In-flight cancellation must not be reported as a known rollback: \(error)")
+            Issue.record(
+                "In-flight cancellation must not be reported as a known rollback: \(error)")
             return
         }
 
@@ -170,7 +173,8 @@ struct CloudflareDurableObjectStorageSemanticsTests {
 
     private func makeEngine() async throws -> CloudflareDurableObjectStorageEngine {
         let client = InMemoryCloudflareDurableObjectStorageClient()
-        let scope = try CloudflareDurableObjectStorageScope(databaseID: "main")
-        return try await CloudflareDurableObjectSharedClientRouter(client: client).engine(for: scope)
+        let scope = try StorageWireScope(databaseID: "main")
+        return try await CloudflareDurableObjectSharedClientRouter(client: client).engine(
+            for: scope)
     }
 }

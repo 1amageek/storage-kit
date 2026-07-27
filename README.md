@@ -11,7 +11,7 @@ StorageKit provides a single `Transaction` protocol that works identically acros
 - **Unified API** — `StorageEngine` and `Transaction` protocols abstract away backend differences
 - **FDB-compatible semantics** — Lexicographic key ordering, range scans, `KeySelector`, Tuple Layer, Subspace, and namespace resolution
 - **Zero-copy design** — `getRange` returns backend-native `AsyncSequence` types without intermediate wrappers
-- **Swift 6 concurrency** — Full `Sendable` conformance, `Mutex` for synchronization, no `@unchecked Sendable`
+- **Swift 6.4 concurrency** — Full `Sendable` conformance, `Mutex` for synchronization, no `@unchecked Sendable`
 - **Nested transactions** — SQLite backend detects nested `withTransaction` calls via `@TaskLocal` and reuses the existing transaction
 - **Foundation-free Cloudflare protocol** — bounded StorageKit Wire v1 values, encoding, and decoding for Native, WASM, and Embedded Swift
 - **Durable Object transactions** — SQLite persistence, pinned reads, selector-aware conflicts, bounded pagination, and atomic commit
@@ -92,7 +92,11 @@ let engine = try await FDBStorageEngine(configuration: .init())
 ```
 
 FoundationDB client startup is serialized automatically across concurrent
-storage-engine initialization.
+storage-engine initialization. `fdb-swift-bindings` owns FoundationDB C handle
+and future lifetimes, while `DatabaseTypes.ByteString` is the shared byte value
+exposed to StorageKit. FoundationDB result buffers therefore reach StorageKit as
+borrowed `ByteString` storage without an intermediate byte wrapper or payload
+copy.
 
 ### Cloudflare Durable Object SQLite
 
@@ -104,6 +108,11 @@ The Cloudflare backend is split by runtime boundary:
 | `CloudflareDurableObjectStorage` | `StorageEngine`, transaction state, and typed StorageKit Wire client |
 | `CloudflareDurableObjectStorageHTTP` | URLSession transport for native clients |
 | `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch` transport for a WASI reactor |
+
+The storage engine and typed client use the canonical
+`CloudflareDurableObjectStorageWire` request, response, mutation, range, and
+scope values directly. The backend does not define parallel DTOs for the same
+wire semantics.
 
 The reusable JavaScript host lives in
 `Workers/CloudflareDurableObjectStorageHost`. An application-owned Durable

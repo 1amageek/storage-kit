@@ -1,3 +1,5 @@
+import CloudflareDurableObjectStorageWire
+
 /// Routes every logical storage scope through one shared Durable Object client.
 public struct CloudflareDurableObjectSharedClientRouter: CloudflareDurableObjectStorageRouter {
     public let client: any CloudflareDurableObjectStorageClient
@@ -11,7 +13,9 @@ public struct CloudflareDurableObjectSharedClientRouter: CloudflareDurableObject
         self.limits = limits
     }
 
-    public func engine(for scope: CloudflareDurableObjectStorageScope) async throws -> CloudflareDurableObjectStorageEngine {
+    public func engine(for scope: StorageWireScope) async throws
+        -> CloudflareDurableObjectStorageEngine
+    {
         try await CloudflareDurableObjectStorageEngine(
             configuration: CloudflareDurableObjectStorageConfiguration(
                 scope: scope,

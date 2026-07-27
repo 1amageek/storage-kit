@@ -1,18 +1,18 @@
-import DatabaseTypes
 import CloudflareDurableObjectStorage
 import CloudflareDurableObjectStorageWire
+import DatabaseTypes
 import StorageKit
 import Synchronization
 
-final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableObjectStorageTransport, Sendable {
+final class InMemoryCloudflareDurableObjectStorageTransport:
+    CloudflareDurableObjectStorageTransport, Sendable
+{
     var callExecution: CloudflareDurableObjectCallExecution {
         .synchronous
     }
 
     private struct State: Sendable {
-        var rowsByScope: [
-            StorageWireScope: [ByteString: ByteString]
-        ] = [:]
+        var rowsByScope: [StorageWireScope: [ByteString: ByteString]] = [:]
         var versionsByScope: [StorageWireScope: Int64] = [:]
         var conflictsByScope: [StorageWireScope: [ConflictEntry]] = [:]
     }
@@ -124,8 +124,9 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             )
             var total: Int64 = 0
             for (key, value) in state.rowsByScope[request.scope] ?? [:]
-                where StorageWireByteOrdering.compare(key, request.begin) >= 0
-                    && StorageWireByteOrdering.compare(key, request.end) < 0 {
+            where StorageWireByteOrdering.compare(key, request.begin) >= 0
+                && StorageWireByteOrdering.compare(key, request.end) < 0
+            {
                 total += Int64(key.count + value.count)
             }
             return .rangeSize(
@@ -153,10 +154,12 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             for row in rows {
                 let rowSize = Int64(row.key.count + row.value.count)
                 if chunkBytes > 0,
-                   rowSize > request.chunkSize - min(
-                    chunkBytes,
-                    request.chunkSize
-                   ) {
+                    rowSize > request.chunkSize
+                        - min(
+                            chunkBytes,
+                            request.chunkSize
+                        )
+                {
                     points.append(row.key)
                     chunkBytes = 0
                 }
@@ -226,12 +229,13 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             rows.removeValue(forKey: key)
         case .clearRange(let begin, let end):
             for key in Array(rows.keys)
-                where StorageWireByteOrdering.compare(key, begin) >= 0
-                    && StorageWireByteOrdering.compare(key, end) < 0 {
+            where StorageWireByteOrdering.compare(key, begin) >= 0
+                && StorageWireByteOrdering.compare(key, end) < 0
+            {
                 rows.removeValue(forKey: key)
             }
         case .atomic(let key, let param, let mutationType):
-            switch try mutationType.storageKitMutationType.apply(
+            switch try mutationType.mutationType.apply(
                 to: rows[key],
                 param: param
             ) {
@@ -374,7 +378,8 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
         guard let readVersion else { return }
         let conflicts = state.conflictsByScope[scope] ?? []
         for readRange in readConflictRanges {
-            for conflict in conflicts where conflict.version > readVersion && overlaps(conflict, readRange) {
+            for conflict in conflicts
+            where conflict.version > readVersion && overlaps(conflict, readRange) {
                 throw StorageError(
                     code: .transactionConflict,
                     operation: .commit,
@@ -406,8 +411,9 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
         state: inout State
     ) {
         guard let begin = range.begin,
-              let end = range.end,
-              StorageWireByteOrdering.compare(begin, end) < 0 else {
+            let end = range.end,
+            StorageWireByteOrdering.compare(begin, end) < 0
+        else {
             return
         }
         state.conflictsByScope[scope, default: []].append(
@@ -436,10 +442,14 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func overlaps(_ conflict: ConflictEntry, _ readRange: StorageWireKeyRange) -> Bool {
-        if let readEnd = readRange.end, StorageWireByteOrdering.compare(conflict.begin, readEnd) >= 0 {
+        if let readEnd = readRange.end,
+            StorageWireByteOrdering.compare(conflict.begin, readEnd) >= 0
+        {
             return false
         }
-        if let readBegin = readRange.begin, StorageWireByteOrdering.compare(conflict.end, readBegin) <= 0 {
+        if let readBegin = readRange.begin,
+            StorageWireByteOrdering.compare(conflict.end, readBegin) <= 0
+        {
             return false
         }
         return true
@@ -452,8 +462,9 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
         let requestedBegin = boundaryKey(request.begin)
         let requestedEnd = boundaryKey(request.end)
         if let requestedBegin,
-           let requestedEnd,
-           StorageWireByteOrdering.compare(requestedBegin, requestedEnd) < 0 {
+            let requestedEnd,
+            StorageWireByteOrdering.compare(requestedBegin, requestedEnd) < 0
+        {
             return StorageWireKeyRange(
                 begin: requestedBegin,
                 end: requestedEnd
@@ -525,31 +536,6 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             return .backendContractViolation
         default:
             return .backendFailure
-        }
-    }
-}
-
-private extension StorageWireMutationType {
-    var storageKitMutationType: MutationType {
-        switch self {
-        case .add:
-            return .add
-        case .setVersionstampedKey:
-            return .setVersionstampedKey
-        case .setVersionstampedValue:
-            return .setVersionstampedValue
-        case .bitOr:
-            return .bitOr
-        case .bitAnd:
-            return .bitAnd
-        case .bitXor:
-            return .bitXor
-        case .max:
-            return .max
-        case .min:
-            return .min
-        case .compareAndClear:
-            return .compareAndClear
         }
     }
 }

@@ -1,4 +1,5 @@
 import CloudflareDurableObjectStorage
+import CloudflareDurableObjectStorageWire
 
 actor SuspendingCloudflareDurableObjectStorageClient: CloudflareDurableObjectStorageClient {
     nonisolated var callExecution: CloudflareDurableObjectCallExecution {
@@ -24,20 +25,20 @@ actor SuspendingCloudflareDurableObjectStorageClient: CloudflareDurableObjectSto
     }
 
     func read(
-        _ request: CloudflareDurableObjectReadRequest
-    ) async throws -> CloudflareDurableObjectReadResponse {
+        _ request: StorageWireReadRequest
+    ) async throws -> StorageWireReadResponse {
         try await recordAndSuspendIfNeeded(.read)
-        return CloudflareDurableObjectReadResponse(
+        return StorageWireReadResponse(
             value: nil,
             currentCommitVersion: request.expectedReadVersion ?? 0
         )
     }
 
     func range(
-        _ request: CloudflareDurableObjectRangeRequest
-    ) async throws -> CloudflareDurableObjectRangeResponse {
+        _ request: StorageWireRangeRequest
+    ) async throws -> StorageWireRangeResponse {
         try await recordAndSuspendIfNeeded(.range)
-        return CloudflareDurableObjectRangeResponse(
+        return StorageWireRangeResponse(
             rows: [],
             hasMore: false,
             currentCommitVersion: request.expectedReadVersion ?? 0
@@ -45,17 +46,17 @@ actor SuspendingCloudflareDurableObjectStorageClient: CloudflareDurableObjectSto
     }
 
     func commit(
-        _ request: CloudflareDurableObjectCommitRequest
-    ) async throws -> CloudflareDurableObjectCommitResponse {
+        _ request: StorageWireCommitRequest
+    ) async throws -> StorageWireCommitResponse {
         try await recordAndSuspendIfNeeded(.commit)
-        return CloudflareDurableObjectCommitResponse(committedVersion: 1)
+        return StorageWireCommitResponse(committedVersion: 1)
     }
 
     func readiness(
-        _ request: CloudflareDurableObjectReadinessRequest
-    ) async throws -> CloudflareDurableObjectReadinessResponse {
+        _ request: StorageWireReadinessRequest
+    ) async throws -> StorageWireReadinessResponse {
         try await recordAndSuspendIfNeeded(.readiness)
-        return CloudflareDurableObjectReadinessResponse(
+        return StorageWireReadinessResponse(
             schemaVersion: 1,
             commitVersion: 0,
             metadataInitialized: true
@@ -63,20 +64,20 @@ actor SuspendingCloudflareDurableObjectStorageClient: CloudflareDurableObjectSto
     }
 
     func rangeSize(
-        _ request: CloudflareDurableObjectRangeSizeRequest
-    ) async throws -> CloudflareDurableObjectRangeSizeResponse {
+        _ request: StorageWireRangeSizeRequest
+    ) async throws -> StorageWireRangeSizeResponse {
         try await recordAndSuspendIfNeeded(.rangeSize)
-        return CloudflareDurableObjectRangeSizeResponse(
+        return StorageWireRangeSizeResponse(
             byteCount: 0,
             currentCommitVersion: request.expectedReadVersion ?? 0
         )
     }
 
     func rangeSplitPoints(
-        _ request: CloudflareDurableObjectRangeSplitPointsRequest
-    ) async throws -> CloudflareDurableObjectRangeSplitPointsResponse {
+        _ request: StorageWireRangeSplitPointsRequest
+    ) async throws -> StorageWireRangeSplitPointsResponse {
         try await recordAndSuspendIfNeeded(.rangeSplitPoints)
-        return CloudflareDurableObjectRangeSplitPointsResponse(
+        return StorageWireRangeSplitPointsResponse(
             splitPoints: [request.begin, request.end],
             currentCommitVersion: request.expectedReadVersion ?? 0
         )

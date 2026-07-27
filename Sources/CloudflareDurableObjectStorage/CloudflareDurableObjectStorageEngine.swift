@@ -1,3 +1,4 @@
+import CloudflareDurableObjectStorageWire
 import StorageKit
 
 /// StorageKit engine facade for one Cloudflare Durable Object scope.
@@ -15,14 +16,12 @@ public struct CloudflareDurableObjectStorageEngine: StorageEngine {
     public init(configuration: CloudflareDurableObjectStorageConfiguration) async throws {
         self.configuration = configuration
         self.transactionDomain = StorageTransactionDomain()
-        _ = try configuration.scope.durableObjectName(
-            maximumBytes: configuration.limits.maxNameBytes
-        )
         let readiness = try await configuration.client.readiness(
-            CloudflareDurableObjectReadinessRequest(scope: configuration.scope)
+            StorageWireReadinessRequest(scope: configuration.scope)
         )
         guard readiness.schemaVersion == 1,
-              readiness.metadataInitialized else {
+            readiness.metadataInitialized
+        else {
             throw StorageError(
                 code: .resourceUnavailable,
                 operation: .initialize,

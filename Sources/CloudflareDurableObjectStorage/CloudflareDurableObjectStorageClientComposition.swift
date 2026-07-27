@@ -1,28 +1,37 @@
+import CloudflareDurableObjectStorageWire
+
 /// Retains a concrete Durable Object client and forwards its storage operations
 /// across long-lived runtime ownership boundaries.
 public final class CloudflareDurableObjectStorageClientComposition:
     CloudflareDurableObjectStorageClient,
-    Sendable {
+    Sendable
+{
     public let callExecution: CloudflareDurableObjectCallExecution
 
-    private let readOperation: @Sendable (
-        CloudflareDurableObjectReadRequest
-    ) async throws -> CloudflareDurableObjectReadResponse
-    private let rangeOperation: @Sendable (
-        CloudflareDurableObjectRangeRequest
-    ) async throws -> CloudflareDurableObjectRangeResponse
-    private let commitOperation: @Sendable (
-        CloudflareDurableObjectCommitRequest
-    ) async throws -> CloudflareDurableObjectCommitResponse
-    private let readinessOperation: @Sendable (
-        CloudflareDurableObjectReadinessRequest
-    ) async throws -> CloudflareDurableObjectReadinessResponse
-    private let rangeSizeOperation: @Sendable (
-        CloudflareDurableObjectRangeSizeRequest
-    ) async throws -> CloudflareDurableObjectRangeSizeResponse
-    private let rangeSplitPointsOperation: @Sendable (
-        CloudflareDurableObjectRangeSplitPointsRequest
-    ) async throws -> CloudflareDurableObjectRangeSplitPointsResponse
+    private let readOperation:
+        @Sendable (
+            StorageWireReadRequest
+        ) async throws -> StorageWireReadResponse
+    private let rangeOperation:
+        @Sendable (
+            StorageWireRangeRequest
+        ) async throws -> StorageWireRangeResponse
+    private let commitOperation:
+        @Sendable (
+            StorageWireCommitRequest
+        ) async throws -> StorageWireCommitResponse
+    private let readinessOperation:
+        @Sendable (
+            StorageWireReadinessRequest
+        ) async throws -> StorageWireReadinessResponse
+    private let rangeSizeOperation:
+        @Sendable (
+            StorageWireRangeSizeRequest
+        ) async throws -> StorageWireRangeSizeResponse
+    private let rangeSplitPointsOperation:
+        @Sendable (
+            StorageWireRangeSplitPointsRequest
+        ) async throws -> StorageWireRangeSplitPointsResponse
 
     public init<Client: CloudflareDurableObjectStorageClient>(_ client: Client) {
         self.callExecution = client.callExecution
@@ -47,38 +56,38 @@ public final class CloudflareDurableObjectStorageClientComposition:
     }
 
     public func read(
-        _ request: CloudflareDurableObjectReadRequest
-    ) async throws -> CloudflareDurableObjectReadResponse {
+        _ request: StorageWireReadRequest
+    ) async throws -> StorageWireReadResponse {
         try await readOperation(request)
     }
 
     public func range(
-        _ request: CloudflareDurableObjectRangeRequest
-    ) async throws -> CloudflareDurableObjectRangeResponse {
+        _ request: StorageWireRangeRequest
+    ) async throws -> StorageWireRangeResponse {
         try await rangeOperation(request)
     }
 
     public func commit(
-        _ request: CloudflareDurableObjectCommitRequest
-    ) async throws -> CloudflareDurableObjectCommitResponse {
+        _ request: StorageWireCommitRequest
+    ) async throws -> StorageWireCommitResponse {
         try await commitOperation(request)
     }
 
     public func readiness(
-        _ request: CloudflareDurableObjectReadinessRequest
-    ) async throws -> CloudflareDurableObjectReadinessResponse {
+        _ request: StorageWireReadinessRequest
+    ) async throws -> StorageWireReadinessResponse {
         try await readinessOperation(request)
     }
 
     public func rangeSize(
-        _ request: CloudflareDurableObjectRangeSizeRequest
-    ) async throws -> CloudflareDurableObjectRangeSizeResponse {
+        _ request: StorageWireRangeSizeRequest
+    ) async throws -> StorageWireRangeSizeResponse {
         try await rangeSizeOperation(request)
     }
 
     public func rangeSplitPoints(
-        _ request: CloudflareDurableObjectRangeSplitPointsRequest
-    ) async throws -> CloudflareDurableObjectRangeSplitPointsResponse {
+        _ request: StorageWireRangeSplitPointsRequest
+    ) async throws -> StorageWireRangeSplitPointsResponse {
         try await rangeSplitPointsOperation(request)
     }
 

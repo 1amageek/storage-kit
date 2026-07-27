@@ -90,6 +90,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
+                "CloudflareDurableObjectStorageWire",
                 "StorageKit",
             ]
         ),

@@ -1,19 +1,21 @@
-import DatabaseTypes
 import CloudflareDurableObjectStorage
+import CloudflareDurableObjectStorageWire
+import DatabaseTypes
 import StorageKit
 import Synchronization
 
 public final class InMemoryCloudflareDurableObjectStorageClient:
     CloudflareDurableObjectStorageClient,
-    Sendable {
+    Sendable
+{
     public var callExecution: CloudflareDurableObjectCallExecution {
         .synchronous
     }
 
     private struct State: Sendable {
-        var rowsByScope: [CloudflareDurableObjectStorageScope: [ByteString: ByteString]] = [:]
-        var versionsByScope: [CloudflareDurableObjectStorageScope: Int64] = [:]
-        var conflictsByScope: [CloudflareDurableObjectStorageScope: [ConflictEntry]] = [:]
+        var rowsByScope: [StorageWireScope: [ByteString: ByteString]] = [:]
+        var versionsByScope: [StorageWireScope: Int64] = [:]
+        var conflictsByScope: [StorageWireScope: [ConflictEntry]] = [:]
     }
 
     private struct ConflictEntry: Sendable {
@@ -24,23 +26,29 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
 
     private let state = Mutex(State())
     private let onCommit: (@Sendable () -> Void)?
-    private let onRangeResponse: (@Sendable (CloudflareDurableObjectRangeRequest) throws -> Void)?
+    private let onRangeResponse: (@Sendable (StorageWireRangeRequest) throws -> Void)?
     private let rangeResponseOverride:
-        (@Sendable (CloudflareDurableObjectRangeRequest) throws -> CloudflareDurableObjectRangeResponse?)?
+        (@Sendable (StorageWireRangeRequest) throws -> StorageWireRangeResponse?)?
     private let rangeSplitPointsResponseOverride:
-        (@Sendable (CloudflareDurableObjectRangeSplitPointsRequest) throws -> CloudflareDurableObjectRangeSplitPointsResponse?)?
+        (
+            @Sendable (StorageWireRangeSplitPointsRequest) throws ->
+                StorageWireRangeSplitPointsResponse?
+        )?
     private let commitResponseOverride:
-        (@Sendable (CloudflareDurableObjectCommitRequest) throws -> CloudflareDurableObjectCommitResponse?)?
+        (@Sendable (StorageWireCommitRequest) throws -> StorageWireCommitResponse?)?
 
     public init(
         onCommit: (@Sendable () -> Void)? = nil,
-        onRangeResponse: (@Sendable (CloudflareDurableObjectRangeRequest) throws -> Void)? = nil,
+        onRangeResponse: (@Sendable (StorageWireRangeRequest) throws -> Void)? = nil,
         rangeResponseOverride:
-            (@Sendable (CloudflareDurableObjectRangeRequest) throws -> CloudflareDurableObjectRangeResponse?)? = nil,
+            (@Sendable (StorageWireRangeRequest) throws -> StorageWireRangeResponse?)? = nil,
         rangeSplitPointsResponseOverride:
-            (@Sendable (CloudflareDurableObjectRangeSplitPointsRequest) throws -> CloudflareDurableObjectRangeSplitPointsResponse?)? = nil,
+            (
+                @Sendable (StorageWireRangeSplitPointsRequest) throws ->
+                    StorageWireRangeSplitPointsResponse?
+            )? = nil,
         commitResponseOverride:
-            (@Sendable (CloudflareDurableObjectCommitRequest) throws -> CloudflareDurableObjectCommitResponse?)? = nil
+            (@Sendable (StorageWireCommitRequest) throws -> StorageWireCommitResponse?)? = nil
     ) {
         self.onCommit = onCommit
         self.onRangeResponse = onRangeResponse
@@ -50,8 +58,8 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     public func read(
-        _ request: CloudflareDurableObjectReadRequest
-    ) async throws -> CloudflareDurableObjectReadResponse {
+        _ request: StorageWireReadRequest
+    ) async throws -> StorageWireReadResponse {
         return try state.withLock { state in
             try verifyReadVersion(
                 request.expectedReadVersion,
@@ -59,16 +67,16 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                 state: state
             )
             let rows = state.rowsByScope[request.scope] ?? [:]
-            return CloudflareDurableObjectReadResponse(
-                value: rows[request.key.rawValue].map(CloudflareDurableObjectBytes.init),
+            return StorageWireReadResponse(
+                value: rows[request.key],
                 currentCommitVersion: state.versionsByScope[request.scope] ?? 0
             )
         }
     }
 
     public func range(
-        _ request: CloudflareDurableObjectRangeRequest
-    ) async throws -> CloudflareDurableObjectRangeResponse {
+        _ request: StorageWireRangeRequest
+    ) async throws -> StorageWireRangeResponse {
         if let override = try rangeResponseOverride?(request) {
             try onRangeResponse?(request)
             return override
@@ -81,7 +89,8 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                 operation: .rangeRead
             )
             let rows = state.rowsByScope[request.scope] ?? [:]
-            let sortedRows = rows
+            let sortedRows =
+                rows
                 .map { (key: $0.key, value: $0.value) }
                 .sorted { compare($0.key, $1.key) < 0 }
             let keys = sortedRows.map(\.key)
@@ -103,7 +112,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             if request.reverse {
                 selected.reverse()
             }
-            if let cursorKey = request.cursorKey?.rawValue {
+            if let cursorKey = request.cursorKey {
                 selected = selected.filter {
                     let ordering = compare($0.key, cursorKey)
                     return request.reverse ? ordering < 0 : ordering > 0
@@ -111,11 +120,11 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             }
             let limit = request.limit > 0 ? request.limit : selected.count
             let page = Array(selected.prefix(limit))
-            return CloudflareDurableObjectRangeResponse(
+            return StorageWireRangeResponse(
                 rows: page.map {
-                    CloudflareDurableObjectKeyValue(
-                        key: CloudflareDurableObjectBytes($0.key),
-                        value: CloudflareDurableObjectBytes($0.value)
+                    StorageWireKeyValue(
+                        key: $0.key,
+                        value: $0.value
                     )
                 },
                 hasMore: page.count < selected.count,
@@ -128,8 +137,8 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     public func commit(
-        _ request: CloudflareDurableObjectCommitRequest
-    ) async throws -> CloudflareDurableObjectCommitResponse {
+        _ request: StorageWireCommitRequest
+    ) async throws -> StorageWireCommitResponse {
         if let override = try commitResponseOverride?(request) {
             return override
         }
@@ -137,8 +146,8 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     public func commitForTesting(
-        _ request: CloudflareDurableObjectCommitRequest
-    ) throws -> CloudflareDurableObjectCommitResponse {
+        _ request: StorageWireCommitRequest
+    ) throws -> StorageWireCommitResponse {
         try state.withLock { state in
             try verifyReadConflicts(
                 readVersion: request.observedReadVersion,
@@ -155,22 +164,24 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                 try materialized($0, committedVersion: committedVersion)
             }
             for mutation in materializedMutations {
-                recordWriteConflict(mutation, version: committedVersion, scope: request.scope, state: &state)
+                recordWriteConflict(
+                    mutation, version: committedVersion, scope: request.scope, state: &state)
                 switch mutation {
                 case .set(let key, let value):
-                    rows[key.rawValue] = value.rawValue
+                    rows[key] = value
                 case .clear(let key):
-                    rows.removeValue(forKey: key.rawValue)
+                    rows.removeValue(forKey: key)
                 case .clearRange(let begin, let end):
-                    for key in Array(rows.keys) where compare(key, begin.rawValue) >= 0 && compare(key, end.rawValue) < 0 {
+                    for key in Array(rows.keys)
+                    where compare(key, begin) >= 0 && compare(key, end) < 0 {
                         rows.removeValue(forKey: key)
                     }
                 case .atomic(let key, let param, let mutationType):
-                    switch try mutationType.storageKitMutationType.apply(to: rows[key.rawValue], param: param.rawValue) {
+                    switch try mutationType.mutationType.apply(to: rows[key], param: param) {
                     case .set(let bytes):
-                        rows[key.rawValue] = bytes
+                        rows[key] = bytes
                     case .clear:
-                        rows.removeValue(forKey: key.rawValue)
+                        rows.removeValue(forKey: key)
                     case .unchanged:
                         break
                     }
@@ -187,15 +198,15 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
 
             state.rowsByScope[request.scope] = rows
             state.versionsByScope[request.scope] = committedVersion
-            return CloudflareDurableObjectCommitResponse(committedVersion: committedVersion)
+            return StorageWireCommitResponse(committedVersion: committedVersion)
         }
     }
 
     public func readiness(
-        _ request: CloudflareDurableObjectReadinessRequest
-    ) async throws -> CloudflareDurableObjectReadinessResponse {
+        _ request: StorageWireReadinessRequest
+    ) async throws -> StorageWireReadinessResponse {
         state.withLock { state in
-            CloudflareDurableObjectReadinessResponse(
+            StorageWireReadinessResponse(
                 schemaVersion: 1,
                 commitVersion: state.versionsByScope[request.scope] ?? 0,
                 metadataInitialized: true
@@ -204,8 +215,8 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     public func rangeSize(
-        _ request: CloudflareDurableObjectRangeSizeRequest
-    ) async throws -> CloudflareDurableObjectRangeSizeResponse {
+        _ request: StorageWireRangeSizeRequest
+    ) async throws -> StorageWireRangeSizeResponse {
         try state.withLock { state in
             try verifyReadVersion(
                 request.expectedReadVersion,
@@ -215,11 +226,12 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             )
             var total: Int64 = 0
             for (key, value) in state.rowsByScope[request.scope] ?? [:]
-                where compare(key, request.begin.rawValue) >= 0
-                    && compare(key, request.end.rawValue) < 0 {
+            where compare(key, request.begin) >= 0
+                && compare(key, request.end) < 0
+            {
                 total += Int64(key.count + value.count)
             }
-            return CloudflareDurableObjectRangeSizeResponse(
+            return StorageWireRangeSizeResponse(
                 byteCount: total,
                 currentCommitVersion: state.versionsByScope[request.scope] ?? 0
             )
@@ -227,8 +239,8 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     public func rangeSplitPoints(
-        _ request: CloudflareDurableObjectRangeSplitPointsRequest
-    ) async throws -> CloudflareDurableObjectRangeSplitPointsResponse {
+        _ request: StorageWireRangeSplitPointsRequest
+    ) async throws -> StorageWireRangeSplitPointsResponse {
         if let override = try rangeSplitPointsResponseOverride?(request) {
             return override
         }
@@ -246,26 +258,28 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             }
             let rows = (state.rowsByScope[request.scope] ?? [:])
                 .filter {
-                    compare($0.key, request.begin.rawValue) >= 0
-                        && compare($0.key, request.end.rawValue) < 0
+                    compare($0.key, request.begin) >= 0
+                        && compare($0.key, request.end) < 0
                 }
                 .sorted { compare($0.key, $1.key) < 0 }
-            var points = [request.begin.rawValue]
+            var points = [request.begin]
             var chunkBytes: Int64 = 0
             for row in rows {
                 let rowSize = Int64(row.key.count + row.value.count)
                 if chunkBytes > 0,
-                   rowSize > request.chunkSize - min(
-                    chunkBytes,
-                    request.chunkSize
-                   ) {
+                    rowSize > request.chunkSize
+                        - min(
+                            chunkBytes,
+                            request.chunkSize
+                        )
+                {
                     points.append(row.key)
                     chunkBytes = 0
                 }
                 chunkBytes += rowSize
             }
             if request.begin != request.end {
-                points.append(request.end.rawValue)
+                points.append(request.end)
             }
             guard points.count <= 10_000 else {
                 throw StorageError(
@@ -275,8 +289,8 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                     message: "Split point result exceeds the protocol limit"
                 )
             }
-            return CloudflareDurableObjectRangeSplitPointsResponse(
-                splitPoints: points.map(CloudflareDurableObjectBytes.init),
+            return StorageWireRangeSplitPointsResponse(
+                splitPoints: points,
                 currentCommitVersion: state.versionsByScope[request.scope] ?? 0
             )
         }
@@ -284,7 +298,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
 
     private func verifyReadVersion(
         _ expectedReadVersion: Int64?,
-        scope: CloudflareDurableObjectStorageScope,
+        scope: StorageWireScope,
         state: State,
         operation: StorageOperation = .read
     ) throws {
@@ -302,14 +316,15 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
 
     private func verifyReadConflicts(
         readVersion: Int64?,
-        readConflictRanges: [CloudflareDurableObjectConflictRange],
-        scope: CloudflareDurableObjectStorageScope,
+        readConflictRanges: [StorageWireKeyRange],
+        scope: StorageWireScope,
         state: State
     ) throws {
         guard let readVersion else { return }
         let conflicts = state.conflictsByScope[scope] ?? []
         for readRange in readConflictRanges {
-            for conflict in conflicts where conflict.version > readVersion && overlaps(conflict, readRange) {
+            for conflict in conflicts
+            where conflict.version > readVersion && overlaps(conflict, readRange) {
                 throw StorageError(
                     code: .transactionConflict,
                     operation: .commit,
@@ -321,9 +336,9 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     private func recordWriteConflict(
-        _ mutation: CloudflareDurableObjectMutation,
+        _ mutation: StorageWireWriteOperation,
         version: Int64,
-        scope: CloudflareDurableObjectStorageScope,
+        scope: StorageWireScope,
         state: inout State
     ) {
         guard let range = writeConflictRange(for: mutation) else {
@@ -335,14 +350,15 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     private func recordWriteConflict(
-        _ range: CloudflareDurableObjectConflictRange,
+        _ range: StorageWireKeyRange,
         version: Int64,
-        scope: CloudflareDurableObjectStorageScope,
+        scope: StorageWireScope,
         state: inout State
     ) {
-        guard let begin = range.begin?.rawValue,
-              let end = range.end?.rawValue,
-              compare(begin, end) < 0 else {
+        guard let begin = range.begin,
+            let end = range.end,
+            compare(begin, end) < 0
+        else {
             return
         }
         state.conflictsByScope[scope, default: []].append(
@@ -350,46 +366,44 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         )
     }
 
-    private func writeConflictRange(for mutation: CloudflareDurableObjectMutation) -> (begin: ByteString, end: ByteString)? {
+    private func writeConflictRange(for mutation: StorageWireWriteOperation) -> (
+        begin: ByteString, end: ByteString
+    )? {
         switch mutation {
         case .set(let key, _), .clear(let key), .atomic(let key, _, _):
-            return singleKeyRange(key.rawValue)
+            return singleKeyRange(key)
         case .clearRange(let begin, let end):
-            guard compare(begin.rawValue, end.rawValue) < 0 else {
+            guard compare(begin, end) < 0 else {
                 return nil
             }
-            return (begin.rawValue, end.rawValue)
+            return (begin, end)
         }
     }
 
     private func materialized(
-        _ mutation: CloudflareDurableObjectMutation,
+        _ mutation: StorageWireWriteOperation,
         committedVersion: Int64
-    ) throws -> CloudflareDurableObjectMutation {
+    ) throws -> StorageWireWriteOperation {
         guard case .atomic(let key, let param, let mutationType) = mutation else {
             return mutation
         }
         switch mutationType {
         case .setVersionstampedKey:
             return .set(
-                key: CloudflareDurableObjectBytes(
-                    try materializedVersionstampOperand(
-                        key.rawValue,
-                        committedVersion: committedVersion,
-                        maximumResultBytes: 1_024
-                    )
+                key: try materializedVersionstampOperand(
+                    key,
+                    committedVersion: committedVersion,
+                    maximumResultBytes: 1_024
                 ),
                 value: param
             )
         case .setVersionstampedValue:
             return .set(
                 key: key,
-                value: CloudflareDurableObjectBytes(
-                    try materializedVersionstampOperand(
-                        param.rawValue,
-                        committedVersion: committedVersion,
-                        maximumResultBytes: 1_048_576
-                    )
+                value: try materializedVersionstampOperand(
+                    param,
+                    committedVersion: committedVersion,
+                    maximumResultBytes: 1_048_576
                 )
             )
         default:
@@ -456,29 +470,25 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         return (key, end)
     }
 
-    private func overlaps(_ conflict: ConflictEntry, _ readRange: CloudflareDurableObjectConflictRange) -> Bool {
-        if let readEnd = readRange.end, compare(conflict.begin, readEnd.rawValue) >= 0 {
+    private func overlaps(_ conflict: ConflictEntry, _ readRange: StorageWireKeyRange) -> Bool {
+        if let readEnd = readRange.end, compare(conflict.begin, readEnd) >= 0 {
             return false
         }
-        if let readBegin = readRange.begin, compare(conflict.end, readBegin.rawValue) <= 0 {
+        if let readBegin = readRange.begin, compare(conflict.end, readBegin) <= 0 {
             return false
         }
         return true
     }
 
-    private func conflictRange(for request: CloudflareDurableObjectRangeRequest) -> CloudflareDurableObjectConflictRange {
-        CloudflareDurableObjectConflictRange(
-            begin: boundaryKey(request.begin).map(
-                CloudflareDurableObjectBytes.init
-            ),
-            end: boundaryKey(request.end).map(
-                CloudflareDurableObjectBytes.init
-            )
+    private func conflictRange(for request: StorageWireRangeRequest) -> StorageWireKeyRange {
+        StorageWireKeyRange(
+            begin: boundaryKey(request.begin),
+            end: boundaryKey(request.end)
         )
     }
 
     private func resolvedIndex(
-        _ boundary: CloudflareDurableObjectRangeBoundary,
+        _ boundary: StorageWireRangeBoundary,
         in keys: [ByteString],
         unboundedIndex: Int
     ) -> Int {
@@ -486,18 +496,18 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         case .unbounded:
             return unboundedIndex
         case .selector(let selector):
-            return selector.storageKitSelector.resolve(in: keys)
+            return selector.keySelector.resolve(in: keys)
         }
     }
 
     private func boundaryKey(
-        _ boundary: CloudflareDurableObjectRangeBoundary
+        _ boundary: StorageWireRangeBoundary
     ) -> ByteString? {
         switch boundary {
         case .unbounded:
             return nil
         case .selector(let selector):
-            return selector.key.rawValue
+            return selector.key
         }
     }
 

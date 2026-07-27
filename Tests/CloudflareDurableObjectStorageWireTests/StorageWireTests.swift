@@ -1,19 +1,19 @@
+import CloudflareDurableObjectStorageWire
 import DatabaseTypes
 import Testing
-import CloudflareDurableObjectStorageWire
 
 @Suite("Cloudflare Durable Object Storage Wire Tests")
 struct StorageWireTests {
     @Test func writerAndReaderUseLittleEndianIntegers() throws {
         var writer = StorageWireWriter()
         writer.writeUInt8(0xAB)
-        writer.writeUInt32(0x01020304)
-        writer.writeInt64(0x0102030405060708)
+        writer.writeUInt32(0x0102_0304)
+        writer.writeInt64(0x0102_0304_0506_0708)
 
         var reader = StorageWireReader(writer.bytes)
         #expect(try reader.readUInt8() == 0xAB)
-        #expect(try reader.readUInt32() == 0x01020304)
-        #expect(try reader.readInt64() == 0x0102030405060708)
+        #expect(try reader.readUInt32() == 0x0102_0304)
+        #expect(try reader.readInt64() == 0x0102_0304_0506_0708)
         #expect(reader.remainingCount == 0)
     }
 
@@ -24,7 +24,7 @@ struct StorageWireTests {
         var uint32Reader = StorageWireReader(
             ByteString(retaining: uint32Owner)
         )
-        #expect(try uint32Reader.readUInt32() == 0x01020304)
+        #expect(try uint32Reader.readUInt32() == 0x0102_0304)
         #expect(uint32Owner.borrowCount == 1)
 
         let uint64Owner = WireBorrowCountingOwner(
@@ -33,7 +33,7 @@ struct StorageWireTests {
         var uint64Reader = StorageWireReader(
             ByteString(retaining: uint64Owner)
         )
-        #expect(try uint64Reader.readUInt64() == 0x0102030405060708)
+        #expect(try uint64Reader.readUInt64() == 0x0102_0304_0506_0708)
         #expect(uint64Owner.borrowCount == 1)
     }
 
@@ -90,7 +90,8 @@ struct StorageWireTests {
         let request = StorageWireRequest.readiness(
             StorageWireReadinessRequest(scope: scope)
         )
-        var encoded = try StorageWire
+        var encoded =
+            try StorageWire
             .encode(request)
             .copyBytes()
         encoded.append(0xFF)
@@ -161,17 +162,63 @@ struct StorageWireTests {
         #expect(scope.durableObjectName.hasPrefix("storage-kit/cfdo/v1/"))
     }
 
+    @Test func scopePreservesIdentifiersAndProducesCanonicalName() throws {
+        let scope = try StorageWireScope(
+            databaseID: "MainDB",
+            tenantID: "TenantA",
+            workspaceID: "WorkspaceB"
+        )
+
+        #expect(scope.databaseID == "MainDB")
+        #expect(scope.tenantID == "TenantA")
+        #expect(scope.workspaceID == "WorkspaceB")
+        #expect(
+            scope.durableObjectName
+                == "storage-kit/cfdo/v1/database/TWFpbkRC/tenant/VGVuYW50QQ/workspace/V29ya3NwYWNlQg"
+        )
+    }
+
+    @Test func absentScopeComponentsCannotCollideWithLiteralMarker() throws {
+        let absent = try StorageWireScope(databaseID: "main")
+        let literal = try StorageWireScope(
+            databaseID: "main",
+            tenantID: "_",
+            workspaceID: "_"
+        )
+
+        #expect(
+            absent.durableObjectName
+                == "storage-kit/cfdo/v1/database/bWFpbg/tenant/_/workspace/_"
+        )
+        #expect(absent.durableObjectName != literal.durableObjectName)
+    }
+
+    @Test func scopeRejectsBlankAndControlCharacterComponents() {
+        #expect(throws: StorageWireProtocolError.self) {
+            _ = try StorageWireScope(databaseID: " \t\n")
+        }
+        #expect(throws: StorageWireProtocolError.self) {
+            _ = try StorageWireScope(databaseID: "main", tenantID: "")
+        }
+        #expect(throws: StorageWireProtocolError.self) {
+            _ = try StorageWireScope(databaseID: "main", workspaceID: " ")
+        }
+        #expect(throws: StorageWireProtocolError.self) {
+            _ = try StorageWireScope(databaseID: "main\u{0000}")
+        }
+    }
+
     @Test func cloudflareRangeResponseEnvelopeRoundTrips() throws {
         let response = StorageWireResponse.range(
             StorageWireRangeResponse(
                 rows: [
                     StorageWireKeyValue(key: [0x01], value: [0x0A]),
-                    StorageWireKeyValue(key: [0x02], value: [0x0B])
+                    StorageWireKeyValue(key: [0x02], value: [0x0B]),
                 ],
                 hasMore: true,
                 currentCommitVersion: 7,
                 readConflictRanges: [
-                    StorageWireKeyRange(begin: [0x01], end: [0x03]),
+                    StorageWireKeyRange(begin: [0x01], end: [0x03])
                 ]
             )
         )
@@ -191,11 +238,11 @@ struct StorageWireTests {
                 mutations: [
                     .set(key: [0x01], value: [0x0A]),
                     .atomic(key: [0x01], param: [0x01], mutationType: .add),
-                    .clearRange(begin: [0x10], end: [0x20])
+                    .clearRange(begin: [0x10], end: [0x20]),
                 ],
                 readConflictRanges: [
                     StorageWireKeyRange.singleKey([0x01]),
-                    StorageWireKeyRange(begin: [0x10], end: [0x20])
+                    StorageWireKeyRange(begin: [0x10], end: [0x20]),
                 ]
             )
         )

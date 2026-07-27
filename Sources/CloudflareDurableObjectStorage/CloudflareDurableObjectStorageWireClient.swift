@@ -1,5 +1,5 @@
-import DatabaseTypes
 import CloudflareDurableObjectStorageWire
+import DatabaseTypes
 import StorageKit
 
 /// Typed StorageKit client backed by the fixed Cloudflare Durable Object StorageKit Wire.
@@ -14,156 +14,67 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         self.transport = transport
     }
 
-    public func read(_ request: CloudflareDurableObjectReadRequest) async throws -> CloudflareDurableObjectReadResponse {
-        let response = try await send(
-            .read(
-                StorageWireReadRequest(
-                    scope: try wireScope(request.scope, operation: .read),
-                    key: request.key.rawValue,
-                    snapshot: request.snapshot,
-                    expectedReadVersion: request.expectedReadVersion
-                )
-            ),
-            operation: .read
-        )
+    public func read(
+        _ request: StorageWireReadRequest
+    ) async throws -> StorageWireReadResponse {
+        let response = try await send(.read(request), operation: .read)
         guard case .read(let readResponse) = response else {
             throw unexpectedResponse(operation: .read)
         }
-        return CloudflareDurableObjectReadResponse(
-            value: readResponse.value.map {
-                CloudflareDurableObjectBytes($0)
-            },
-            currentCommitVersion: readResponse.currentCommitVersion
-        )
+        return readResponse
     }
 
-    public func range(_ request: CloudflareDurableObjectRangeRequest) async throws -> CloudflareDurableObjectRangeResponse {
-        let response = try await send(
-            .range(
-                StorageWireRangeRequest(
-                    scope: try wireScope(request.scope, operation: .rangeRead),
-                    begin: wireBoundary(request.begin),
-                    end: wireBoundary(request.end),
-                    limit: request.limit,
-                    reverse: request.reverse,
-                    snapshot: request.snapshot,
-                    expectedReadVersion: request.expectedReadVersion,
-                    cursorKey: request.cursorKey?.rawValue
-                )
-            ),
-            operation: .rangeRead
-        )
+    public func range(
+        _ request: StorageWireRangeRequest
+    ) async throws -> StorageWireRangeResponse {
+        let response = try await send(.range(request), operation: .rangeRead)
         guard case .range(let rangeResponse) = response else {
             throw unexpectedResponse(operation: .rangeRead)
         }
-        return CloudflareDurableObjectRangeResponse(
-            rows: rangeResponse.rows.map {
-                CloudflareDurableObjectKeyValue(
-                    key: CloudflareDurableObjectBytes($0.key),
-                    value: CloudflareDurableObjectBytes($0.value)
-                )
-            },
-            hasMore: rangeResponse.hasMore,
-            currentCommitVersion: rangeResponse.currentCommitVersion,
-            readConflictRanges: rangeResponse.readConflictRanges.map(storageConflictRange)
-        )
+        return rangeResponse
     }
 
-    public func commit(_ request: CloudflareDurableObjectCommitRequest) async throws -> CloudflareDurableObjectCommitResponse {
-        let response = try await send(
-            .commit(
-                StorageWireCommitRequest(
-                    scope: try wireScope(request.scope, operation: .commit),
-                    observedReadVersion: request.observedReadVersion,
-                    mutations: request.mutations.map(wireMutation),
-                    readConflictRanges: request.readConflictRanges.map(wireConflictRange),
-                    writeConflictRanges: request.writeConflictRanges.map(
-                        wireConflictRange
-                    )
-                )
-            ),
-            operation: .commit
-        )
+    public func commit(
+        _ request: StorageWireCommitRequest
+    ) async throws -> StorageWireCommitResponse {
+        let response = try await send(.commit(request), operation: .commit)
         guard case .commit(let commitResponse) = response else {
             throw unexpectedResponse(operation: .commit)
         }
-        return CloudflareDurableObjectCommitResponse(committedVersion: commitResponse.committedVersion)
+        return commitResponse
     }
 
     public func readiness(
-        _ request: CloudflareDurableObjectReadinessRequest
-    ) async throws -> CloudflareDurableObjectReadinessResponse {
-        let response = try await send(
-            .readiness(
-                StorageWireReadinessRequest(
-                    scope: try wireScope(request.scope, operation: .initialize)
-                )
-            ),
-            operation: .initialize
-        )
+        _ request: StorageWireReadinessRequest
+    ) async throws -> StorageWireReadinessResponse {
+        let response = try await send(.readiness(request), operation: .initialize)
         guard case .readiness(let readinessResponse) = response else {
             throw unexpectedResponse(operation: .initialize)
         }
-        return CloudflareDurableObjectReadinessResponse(
-            schemaVersion: Int(readinessResponse.schemaVersion),
-            commitVersion: readinessResponse.commitVersion,
-            metadataInitialized: readinessResponse.metadataInitialized
-        )
+        return readinessResponse
     }
 
     public func rangeSize(
-        _ request: CloudflareDurableObjectRangeSizeRequest
-    ) async throws -> CloudflareDurableObjectRangeSizeResponse {
-        let response = try await send(
-            .rangeSize(
-                StorageWireRangeSizeRequest(
-                    scope: try wireScope(
-                        request.scope,
-                        operation: .rangeRead
-                    ),
-                    begin: request.begin.rawValue,
-                    end: request.end.rawValue,
-                    expectedReadVersion: request.expectedReadVersion
-                )
-            ),
-            operation: .rangeRead
-        )
+        _ request: StorageWireRangeSizeRequest
+    ) async throws -> StorageWireRangeSizeResponse {
+        let response = try await send(.rangeSize(request), operation: .rangeRead)
         guard case .rangeSize(let sizeResponse) = response else {
             throw unexpectedResponse(operation: .rangeRead)
         }
-        return CloudflareDurableObjectRangeSizeResponse(
-            byteCount: sizeResponse.byteCount,
-            currentCommitVersion: sizeResponse.currentCommitVersion
-        )
+        return sizeResponse
     }
 
     public func rangeSplitPoints(
-        _ request: CloudflareDurableObjectRangeSplitPointsRequest
-    ) async throws -> CloudflareDurableObjectRangeSplitPointsResponse {
+        _ request: StorageWireRangeSplitPointsRequest
+    ) async throws -> StorageWireRangeSplitPointsResponse {
         let response = try await send(
-            .rangeSplitPoints(
-                StorageWireRangeSplitPointsRequest(
-                    scope: try wireScope(
-                        request.scope,
-                        operation: .rangeRead
-                    ),
-                    begin: request.begin.rawValue,
-                    end: request.end.rawValue,
-                    chunkSize: request.chunkSize,
-                    expectedReadVersion: request.expectedReadVersion
-                )
-            ),
+            .rangeSplitPoints(request),
             operation: .rangeRead
         )
         guard case .rangeSplitPoints(let splitResponse) = response else {
             throw unexpectedResponse(operation: .rangeRead)
         }
-        return CloudflareDurableObjectRangeSplitPointsResponse(
-            splitPoints: splitResponse.splitPoints.map {
-                CloudflareDurableObjectBytes($0)
-            },
-            currentCommitVersion: splitResponse.currentCommitVersion
-        )
+        return splitResponse
     }
 
     private func send(
@@ -210,10 +121,12 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
             if case .failure(let status, let message) = response {
                 throw storageError(status: status, message: message, operation: operation)
             }
-            guard Self.matches(
-                response,
-                requestOperation: request.operation
-            ) else {
+            guard
+                Self.matches(
+                    response,
+                    requestOperation: request.operation
+                )
+            else {
                 throw responseDecodeError(
                     unexpectedResponse(operation: operation),
                     operation: operation
@@ -239,116 +152,6 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                 operation: operation
             )
         }
-    }
-
-    private func wireScope(
-        _ scope: CloudflareDurableObjectStorageScope,
-        operation: StorageOperation
-    ) throws -> StorageWireScope {
-        do {
-            return try StorageWireScope(
-                databaseID: scope.databaseID,
-                tenantID: scope.tenantID,
-                workspaceID: scope.workspaceID
-            )
-        } catch {
-            throw storageError(from: error, operation: operation, code: .invalidOperation)
-        }
-    }
-
-    private func wireSelector(
-        _ selector: KeySelector
-    ) -> StorageWireKeySelector {
-        return StorageWireKeySelector(
-            key: selector.key,
-            orEqual: selector.orEqual,
-            offset: selector.offset
-        )
-    }
-
-    private func wireBoundary(
-        _ boundary: CloudflareDurableObjectRangeBoundary
-    ) -> StorageWireRangeBoundary {
-        switch boundary {
-        case .unbounded:
-            return .unbounded
-        case .selector(let selector):
-            return .selector(
-                wireSelector(selector.storageKitSelector)
-            )
-        }
-    }
-
-    private func wireMutation(
-        _ mutation: CloudflareDurableObjectMutation
-    ) -> StorageWireWriteOperation {
-        switch mutation {
-        case .set(let key, let value):
-            return .set(
-                key: key.rawValue,
-                value: value.rawValue
-            )
-        case .clear(let key):
-            return .clear(key: key.rawValue)
-        case .clearRange(let begin, let end):
-            return .clearRange(
-                begin: begin.rawValue,
-                end: end.rawValue
-            )
-        case .atomic(let key, let param, let mutationType):
-            return .atomic(
-                key: key.rawValue,
-                param: param.rawValue,
-                mutationType: wireMutationType(mutationType)
-            )
-        }
-    }
-
-    private func wireMutationType(
-        _ mutationType: CloudflareDurableObjectMutationTypeCode
-    ) -> StorageWireMutationType {
-        switch mutationType {
-        case .add:
-            return .add
-        case .bitOr:
-            return .bitOr
-        case .bitAnd:
-            return .bitAnd
-        case .bitXor:
-            return .bitXor
-        case .max:
-            return .max
-        case .min:
-            return .min
-        case .compareAndClear:
-            return .compareAndClear
-        case .setVersionstampedKey:
-            return .setVersionstampedKey
-        case .setVersionstampedValue:
-            return .setVersionstampedValue
-        }
-    }
-
-    private func wireConflictRange(
-        _ range: CloudflareDurableObjectConflictRange
-    ) -> StorageWireKeyRange {
-        StorageWireKeyRange(
-            begin: range.begin.map { $0.rawValue },
-            end: range.end.map { $0.rawValue }
-        )
-    }
-
-    private func storageConflictRange(
-        _ range: StorageWireKeyRange
-    ) -> CloudflareDurableObjectConflictRange {
-        CloudflareDurableObjectConflictRange(
-            begin: range.begin.map {
-                CloudflareDurableObjectBytes($0)
-            },
-            end: range.end.map {
-                CloudflareDurableObjectBytes($0)
-            }
-        )
     }
 
     private func transportError(
@@ -463,11 +266,11 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     ) -> Bool {
         switch (response, requestOperation) {
         case (.readiness, .readiness),
-             (.read, .read),
-             (.range, .range),
-             (.commit, .commit),
-             (.rangeSize, .rangeSize),
-             (.rangeSplitPoints, .rangeSplitPoints):
+            (.read, .read),
+            (.range, .range),
+            (.commit, .commit),
+            (.rangeSize, .rangeSize),
+            (.rangeSplitPoints, .rangeSplitPoints):
             return true
         case (.failure, _):
             return false

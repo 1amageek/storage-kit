@@ -1,5 +1,8 @@
-import Testing
+import CloudflareDurableObjectStorageWire
+import DatabaseTypes
 import StorageKit
+import Testing
+
 @testable import CloudflareDurableObjectStorage
 
 @Suite("Cloudflare Durable Object Storage Value Semantics")
@@ -18,17 +21,17 @@ struct CloudflareDurableObjectStorageValueSemanticsTests {
         ]
 
         for mutationType in mutationTypes {
-            let code = CloudflareDurableObjectMutationTypeCode(mutationType)
-            #expect(code.storageKitMutationType == mutationType)
+            let code = StorageWireMutationType(mutationType)
+            #expect(code.mutationType == mutationType)
         }
     }
 
     @Test func singleKeyConflictRangeUsesHalfOpenFDBStyleBounds() {
-        let range = CloudflareDurableObjectConflictRange.singleKey(
-            CloudflareDurableObjectBytes([0x01, 0x02])
+        let range = StorageWireKeyRange.singleKey(
+            ByteString([0x01, 0x02])
         )
 
-        #expect(range.begin?.rawValue == [0x01, 0x02])
-        #expect(range.end?.rawValue == [0x01, 0x02, 0x00])
+        #expect(range.begin == ByteString([0x01, 0x02]))
+        #expect(range.end == ByteString([0x01, 0x02, 0x00]))
     }
 }

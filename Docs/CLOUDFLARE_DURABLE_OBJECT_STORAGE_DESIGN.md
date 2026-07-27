@@ -62,7 +62,7 @@ evaluation, selector resolution, and read-your-writes behavior belong to
 One logical scope routes to exactly one Durable Object:
 
 ```text
-StorageScope
+StorageWireScope
   databaseID: String
   tenantID: String?
   workspaceID: String?
@@ -84,6 +84,12 @@ from silently mixing two logical databases inside one object.
 
 Cross-scope transactions are not supported. Application-level resharding must
 use an explicit staged copy and atomic metadata switch outside StorageKit.
+
+`StorageWireScope` is the single scope model used by the wire codec, typed
+client, router, engine configuration, and transaction. The storage backend does
+not maintain a second scope type or convert between equivalent request and
+response DTOs. This keeps validation, naming, and protocol meaning in one owner
+while preserving `ByteString` storage views across the client boundary.
 
 ## StorageKit Wire v1
 

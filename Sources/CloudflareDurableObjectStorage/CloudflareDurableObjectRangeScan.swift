@@ -1,16 +1,14 @@
+import CloudflareDurableObjectStorageWire
 import DatabaseTypes
 import StorageKit
 
 struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     private struct RangeStorageAccess: Sendable {
-        let read:
-            @Sendable (CloudflareDurableObjectReadRequest) async throws -> CloudflareDurableObjectReadResponse
-        let range:
-            @Sendable (CloudflareDurableObjectRangeRequest) async throws -> CloudflareDurableObjectRangeResponse
+        let read: @Sendable (StorageWireReadRequest) async throws -> StorageWireReadResponse
+        let range: @Sendable (StorageWireRangeRequest) async throws -> StorageWireRangeResponse
         let ensureOpen: @Sendable () throws -> Void
         let recordReadVersion: @Sendable (Int64) throws -> Void
-        let recordReadConflictRange:
-            @Sendable (CloudflareDurableObjectConflictRange) throws -> Void
+        let recordReadConflictRange: @Sendable (StorageWireKeyRange) throws -> Void
     }
 
     private enum ResolvedBoundary: Sendable, Equatable {
@@ -20,7 +18,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private var storageAccess: RangeStorageAccess?
-    private let scope: CloudflareDurableObjectStorageScope
+    private let scope: StorageWireScope
     private let begin: KeySelector
     private let end: KeySelector
     private let snapshot: Bool
@@ -29,7 +27,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     private let maxSelectorResolutionSteps: Int
     private let userLimit: Int
     private let reverse: Bool
-    private var mutations: [CloudflareDurableObjectMutation]
+    private var mutations: [StorageWireWriteOperation]
     private var cursorKey: ByteString?
     private var stableReadVersion: Int64?
     private var finishedHostPages = false
@@ -39,21 +37,23 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     private var localIndex = 0
     private var allLocalRows: [(ByteString, ByteString)] = []
     private var viewPrepared = false
-    private var hostBegin = CloudflareDurableObjectRangeBoundary.unbounded
-    private var hostEnd = CloudflareDurableObjectRangeBoundary.unbounded
+    private var hostBegin = StorageWireRangeBoundary.unbounded
+    private var hostEnd = StorageWireRangeBoundary.unbounded
     private var lastEmittedKey: ByteString?
     private var emittedCount = 0
     private var selectorResolutionSteps = 0
     private var finished = false
 
     init(
-        read: @escaping @Sendable (
-            CloudflareDurableObjectReadRequest
-        ) async throws -> CloudflareDurableObjectReadResponse,
-        range: @escaping @Sendable (
-            CloudflareDurableObjectRangeRequest
-        ) async throws -> CloudflareDurableObjectRangeResponse,
-        scope: CloudflareDurableObjectStorageScope,
+        read:
+            @escaping @Sendable (
+                StorageWireReadRequest
+            ) async throws -> StorageWireReadResponse,
+        range:
+            @escaping @Sendable (
+                StorageWireRangeRequest
+            ) async throws -> StorageWireRangeResponse,
+        scope: StorageWireScope,
         begin: KeySelector,
         end: KeySelector,
         snapshot: Bool,
@@ -62,12 +62,13 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         maxSelectorResolutionSteps: Int,
         userLimit: Int,
         reverse: Bool,
-        mutations: [CloudflareDurableObjectMutation],
+        mutations: [StorageWireWriteOperation],
         ensureOpen: @escaping @Sendable () throws -> Void,
         recordReadVersion: @escaping @Sendable (Int64) throws -> Void,
-        recordReadConflictRange: @escaping @Sendable (
-            CloudflareDurableObjectConflictRange
-        ) throws -> Void
+        recordReadConflictRange:
+            @escaping @Sendable (
+                StorageWireKeyRange
+            ) throws -> Void
     ) {
         self.storageAccess = RangeStorageAccess(
             read: read,
@@ -173,7 +174,8 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
             )
         }
         guard begin.offset.magnitude <= UInt(maxSelectorResolutionSteps),
-              end.offset.magnitude <= UInt(maxSelectorResolutionSteps) else {
+            end.offset.magnitude <= UInt(maxSelectorResolutionSteps)
+        else {
             throw invalidRange("KeySelector offset exceeds configured limit")
         }
     }
@@ -231,8 +233,8 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         guard !viewPrepared else { return }
         viewPrepared = true
         guard !mutations.isEmpty else {
-            hostBegin = .selector(CloudflareDurableObjectKeySelector(begin))
-            hostEnd = .selector(CloudflareDurableObjectKeySelector(end))
+            hostBegin = .selector(StorageWireKeySelector(begin))
+            hostEnd = .selector(StorageWireKeySelector(end))
             return
         }
         try await prepareAllLocalRows()
@@ -256,7 +258,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         for operation in mutations {
             switch operation {
             case .set(let key, _), .clear(let key), .atomic(let key, _, _):
-                keys.append(key.rawValue)
+                keys.append(key)
             case .clearRange:
                 continue
             }
@@ -281,10 +283,12 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         guard keys.count > 1 else { return }
         var uniqueCount = 1
         for index in 1..<keys.count {
-            guard CloudflareDurableObjectByteOrdering.compare(
-                keys[index],
-                keys[uniqueCount - 1]
-            ) != 0 else {
+            guard
+                CloudflareDurableObjectByteOrdering.compare(
+                    keys[index],
+                    keys[uniqueCount - 1]
+                ) != 0
+            else {
                 continue
             }
             if index != uniqueCount {
@@ -410,12 +414,12 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
                 begin: .unbounded,
                 end: includeCurrent
                     ? .selector(
-                        CloudflareDurableObjectKeySelector(
+                        StorageWireKeySelector(
                             .firstGreaterThan(current)
                         )
                     )
                     : .selector(
-                        CloudflareDurableObjectKeySelector(
+                        StorageWireKeySelector(
                             .firstGreaterOrEqual(current)
                         )
                     ),
@@ -424,8 +428,8 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
                 cursorKey: nil
             )
             guard let row = response.rows.first else { return nil }
-            let key = row.key.rawValue
-            if try value(for: key, committed: row.value.rawValue) != nil {
+            let key = row.key
+            if try value(for: key, committed: row.value) != nil {
                 return .key(key.detached())
             }
             current = key.detached()
@@ -444,12 +448,12 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
             let response = try await rangeResponse(
                 begin: includeCurrent
                     ? .selector(
-                        CloudflareDurableObjectKeySelector(
+                        StorageWireKeySelector(
                             .firstGreaterOrEqual(current)
                         )
                     )
                     : .selector(
-                        CloudflareDurableObjectKeySelector(
+                        StorageWireKeySelector(
                             .firstGreaterThan(current)
                         )
                     ),
@@ -459,8 +463,8 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
                 cursorKey: nil
             )
             guard let row = response.rows.first else { return nil }
-            let key = row.key.rawValue
-            if try value(for: key, committed: row.value.rawValue) != nil {
+            let key = row.key
+            if try value(for: key, committed: row.value) != nil {
                 return .key(key.detached())
             }
             current = key.detached()
@@ -469,7 +473,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private mutating func lastCommittedBoundary() async throws -> ResolvedBoundary? {
-        var end = CloudflareDurableObjectRangeBoundary.unbounded
+        var end = StorageWireRangeBoundary.unbounded
         while true {
             try consumeSelectorResolutionStep()
             let response = try await rangeResponse(
@@ -480,13 +484,13 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
                 cursorKey: nil
             )
             guard let row = response.rows.first else { return nil }
-            let key = row.key.rawValue
-            if try value(for: key, committed: row.value.rawValue) != nil {
+            let key = row.key
+            if try value(for: key, committed: row.value) != nil {
                 return .key(key.detached())
             }
             let detachedKey = key.detached()
             end = .selector(
-                CloudflareDurableObjectKeySelector(
+                StorageWireKeySelector(
                     .firstGreaterOrEqual(detachedKey)
                 )
             )
@@ -561,33 +565,35 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         case .beforeAll: afterBegin = true
         case .pastEnd: afterBegin = false
         case .key(let beginKey):
-            afterBegin = CloudflareDurableObjectByteOrdering.compare(
-                key,
-                beginKey
-            ) >= 0
+            afterBegin =
+                CloudflareDurableObjectByteOrdering.compare(
+                    key,
+                    beginKey
+                ) >= 0
         }
         let beforeEnd: Bool
         switch end {
         case .beforeAll: beforeEnd = false
         case .pastEnd: beforeEnd = true
         case .key(let endKey):
-            beforeEnd = CloudflareDurableObjectByteOrdering.compare(
-                key,
-                endKey
-            ) < 0
+            beforeEnd =
+                CloudflareDurableObjectByteOrdering.compare(
+                    key,
+                    endKey
+                ) < 0
         }
         return afterBegin && beforeEnd
     }
 
     private func selector(
         for boundary: ResolvedBoundary
-    ) -> CloudflareDurableObjectRangeBoundary {
+    ) -> StorageWireRangeBoundary {
         switch boundary {
         case .beforeAll, .pastEnd:
             return .unbounded
         case .key(let key):
             return .selector(
-                CloudflareDurableObjectKeySelector(
+                StorageWireKeySelector(
                     .firstGreaterOrEqual(key)
                 )
             )
@@ -601,6 +607,8 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private mutating func loadNextHostPage() async throws {
+        // The ordering key survives release of the previous page. Detaching it
+        // avoids retaining that complete response frame between page requests.
         lastEmittedKey = lastEmittedKey?.detached()
         hostRows.removeAll(keepingCapacity: false)
         hostIndex = 0
@@ -616,9 +624,9 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         var rows: [(ByteString, ByteString)] = []
         rows.reserveCapacity(response.rows.count)
         for row in response.rows {
-            let key = row.key.rawValue
+            let key = row.key
             guard !containsLocalRow(for: key) else { continue }
-            if let value = try value(for: key, committed: row.value.rawValue) {
+            if let value = try value(for: key, committed: row.value) {
                 rows.append((key, value))
             }
         }
@@ -647,17 +655,17 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private mutating func rangeResponse(
-        begin: CloudflareDurableObjectRangeBoundary,
-        end: CloudflareDurableObjectRangeBoundary,
+        begin: StorageWireRangeBoundary,
+        end: StorageWireRangeBoundary,
         limit: Int,
         reverse: Bool,
         cursorKey: ByteString?
-    ) async throws -> CloudflareDurableObjectRangeResponse {
+    ) async throws -> StorageWireRangeResponse {
         guard let storageAccess else {
             throw invalidRange("Range storage access is unavailable")
         }
         let response = try await storageAccess.range(
-            CloudflareDurableObjectRangeRequest(
+            StorageWireRangeRequest(
                 scope: scope,
                 begin: begin,
                 end: end,
@@ -665,7 +673,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
                 reverse: reverse,
                 snapshot: snapshot,
                 expectedReadVersion: expectedReadVersionForRequest,
-                cursorKey: cursorKey.map(CloudflareDurableObjectBytes.init)
+                cursorKey: cursorKey
             )
         )
         try acceptReadVersion(response.currentCommitVersion)
@@ -679,7 +687,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
 
     private mutating func updateCursor(
         hasMore: Bool,
-        rows: [CloudflareDurableObjectKeyValue]
+        rows: [StorageWireKeyValue]
     ) throws {
         guard hasMore else {
             cursorKey = nil
@@ -694,15 +702,17 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
                 message: "Range continuation was returned with an empty page"
             )
         }
-        cursorKey = lastRow.key.rawValue.detached()
+        // The continuation survives the current response page and is the only
+        // part of that frame needed by the next request.
+        cursorKey = lastRow.key.detached()
     }
 
     private func validateHostPageOrder(
-        _ rows: [CloudflareDurableObjectKeyValue]
+        _ rows: [StorageWireKeyValue]
     ) throws {
         var previous = cursorKey
         for row in rows {
-            let key = row.key.rawValue
+            let key = row.key
             if let previous {
                 let comparison = CloudflareDurableObjectByteOrdering.compare(
                     key,
@@ -750,9 +760,9 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
             throw invalidRange("Range storage access is unavailable")
         }
         let response = try await storageAccess.read(
-            CloudflareDurableObjectReadRequest(
+            StorageWireReadRequest(
                 scope: scope,
-                key: CloudflareDurableObjectBytes(key),
+                key: key,
                 snapshot: snapshot,
                 expectedReadVersion: expectedReadVersionForRequest
             )
@@ -760,10 +770,10 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         try acceptReadVersion(response.currentCommitVersion)
         if !snapshot {
             try storageAccess.recordReadConflictRange(
-                .singleKey(CloudflareDurableObjectBytes(key))
+                .singleKey(key)
             )
         }
-        return response.value?.rawValue
+        return response.value
     }
 
     private func value(for key: ByteString, committed: ByteString?) throws -> ByteString? {
@@ -771,26 +781,26 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         for operation in mutations {
             switch operation {
             case .set(let operationKey, let operationValue)
-                where operationKey.rawValue == key:
-                value = operationValue.rawValue
+            where operationKey == key:
+                value = operationValue
             case .clear(let operationKey)
-                where operationKey.rawValue == key:
+            where operationKey == key:
                 value = nil
             case .clearRange(let begin, let end)
-                where CloudflareDurableObjectByteOrdering.compare(
+            where CloudflareDurableObjectByteOrdering.compare(
+                key,
+                begin
+            ) >= 0
+                && CloudflareDurableObjectByteOrdering.compare(
                     key,
-                    begin.rawValue
-                ) >= 0
-                    && CloudflareDurableObjectByteOrdering.compare(
-                        key,
-                        end.rawValue
-                    ) < 0:
+                    end
+                ) < 0:
                 value = nil
             case .atomic(let operationKey, let parameter, let mutationType)
-                where operationKey.rawValue == key:
-                switch try mutationType.storageKitMutationType.apply(
+            where operationKey == key:
+                switch try mutationType.mutationType.apply(
                     to: value,
-                    param: parameter.rawValue
+                    param: parameter
                 ) {
                 case .set(let bytes): value = bytes
                 case .clear: value = nil

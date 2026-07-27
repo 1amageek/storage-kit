@@ -1,10 +1,50 @@
+import CloudflareDurableObjectStorageWire
 import DatabaseTypes
 import StorageKit
 import Testing
+
 @testable import CloudflareDurableObjectStorage
 
 @Suite("Cloudflare Durable Object Storage Wire Client Tests")
 struct CloudflareDurableObjectStorageWireClientTests {
+    @Test func readResponseValueBorrowsTheTransportFrame() async throws {
+        let responseFrame = try StorageWire.encode(
+            .read(
+                StorageWireReadResponse(
+                    value: ByteString([0xAA, 0xBB, 0xCC]),
+                    currentCommitVersion: 7
+                )
+            )
+        )
+        let client = CloudflareDurableObjectStorageWireClient(
+            transport: BorrowedResponseCloudflareDurableObjectStorageTransport(
+                responseBytes: responseFrame
+            )
+        )
+        let response = try await client.read(
+            StorageWireReadRequest(
+                scope: try StorageWireScope(databaseID: "main"),
+                key: [0x01],
+                snapshot: true
+            )
+        )
+        let value = try #require(response.value)
+        let frameAddress = try #require(
+            responseFrame.withUnsafeBytes {
+                $0.baseAddress.map { UInt(bitPattern: $0) }
+            }
+        )
+        let valueAddress = try #require(
+            value.withUnsafeBytes {
+                $0.baseAddress.map { UInt(bitPattern: $0) }
+            }
+        )
+
+        #expect(value == [0xAA, 0xBB, 0xCC])
+        #expect(valueAddress >= frameAddress)
+        #expect(valueAddress + UInt(value.count) <= frameAddress + UInt(responseFrame.count))
+    }
+
     @Test func storageEngineRoundTripsThroughStorageWireClient() async throws {
         let engine = try await makeEngine()
 
@@ -85,17 +125,17 @@ struct CloudflareDurableObjectStorageWireClientTests {
                 )
             )
         )
-        let scope = try CloudflareDurableObjectStorageScope(databaseID: "main")
+        let scope = try StorageWireScope(databaseID: "main")
 
         do {
             _ = try await client.commit(
-                CloudflareDurableObjectCommitRequest(
+                StorageWireCommitRequest(
                     scope: scope,
                     observedReadVersion: nil,
                     mutations: [
                         .set(
-                            key: CloudflareDurableObjectBytes([0x01]),
-                            value: CloudflareDurableObjectBytes([0x01])
+                            key: ByteString([0x01]),
+                            value: ByteString([0x01])
                         )
                     ]
                 )
@@ -113,17 +153,17 @@ struct CloudflareDurableObjectStorageWireClientTests {
         let client = CloudflareDurableObjectStorageWireClient(
             transport: TruncatedResponseCloudflareDurableObjectStorageTransport()
         )
-        let scope = try CloudflareDurableObjectStorageScope(databaseID: "main")
+        let scope = try StorageWireScope(databaseID: "main")
 
         do {
             _ = try await client.commit(
-                CloudflareDurableObjectCommitRequest(
+                StorageWireCommitRequest(
                     scope: scope,
                     observedReadVersion: nil,
                     mutations: [
                         .set(
-                            key: CloudflareDurableObjectBytes([0x01]),
-                            value: CloudflareDurableObjectBytes([0x01])
+                            key: ByteString([0x01]),
+                            value: ByteString([0x01])
                         )
                     ]
                 )
@@ -141,19 +181,19 @@ struct CloudflareDurableObjectStorageWireClientTests {
         let client = CloudflareDurableObjectStorageWireClient(
             transport: MismatchedOperationCloudflareDurableObjectStorageTransport()
         )
-        let scope = try CloudflareDurableObjectStorageScope(
+        let scope = try StorageWireScope(
             databaseID: "main"
         )
 
         do {
             _ = try await client.commit(
-                CloudflareDurableObjectCommitRequest(
+                StorageWireCommitRequest(
                     scope: scope,
                     observedReadVersion: nil,
                     mutations: [
                         .set(
-                            key: CloudflareDurableObjectBytes([0x01]),
-                            value: CloudflareDurableObjectBytes([0x01])
+                            key: ByteString([0x01]),
+                            value: ByteString([0x01])
                         )
                     ]
                 )
@@ -169,8 +209,9 @@ struct CloudflareDurableObjectStorageWireClientTests {
         let client = CloudflareDurableObjectStorageWireClient(
             transport: InMemoryCloudflareDurableObjectStorageTransport()
         )
-        let scope = try CloudflareDurableObjectStorageScope(databaseID: "main")
-        return try await CloudflareDurableObjectSharedClientRouter(client: client).engine(for: scope)
+        let scope = try StorageWireScope(databaseID: "main")
+        return try await CloudflareDurableObjectSharedClientRouter(client: client).engine(
+            for: scope)
     }
 
     private func versionstampOperand(
@@ -180,14 +221,14 @@ struct CloudflareDurableObjectStorageWireClientTests {
         let offset = UInt32(prefix.count)
         return ByteString(
             prefix.copyBytes()
-            + Array(repeating: 0xFF, count: 10)
-            + suffix.copyBytes()
-            + [
-                UInt8(truncatingIfNeeded: offset),
-                UInt8(truncatingIfNeeded: offset >> 8),
-                UInt8(truncatingIfNeeded: offset >> 16),
-                UInt8(truncatingIfNeeded: offset >> 24),
-            ]
+                + Array(repeating: 0xFF, count: 10)
+                + suffix.copyBytes()
+                + [
+                    UInt8(truncatingIfNeeded: offset),
+                    UInt8(truncatingIfNeeded: offset >> 8),
+                    UInt8(truncatingIfNeeded: offset >> 16),
+                    UInt8(truncatingIfNeeded: offset >> 24),
+                ]
         )
     }
 }

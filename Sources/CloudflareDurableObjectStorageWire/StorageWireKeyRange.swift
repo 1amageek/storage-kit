@@ -1,4 +1,5 @@
 import DatabaseTypes
+
 /// Half-open key range carried for read/write conflict tracking.
 public struct StorageWireKeyRange: Sendable, Hashable {
     public let begin: ByteString?
@@ -17,6 +18,14 @@ public struct StorageWireKeyRange: Sendable, Hashable {
             destination[key.count] = 0
         }
         return StorageWireKeyRange(begin: key, end: end)
+    }
+
+    /// Returns a range whose boundaries own storage independently of a decoded frame.
+    public func detached() -> StorageWireKeyRange {
+        StorageWireKeyRange(
+            begin: begin.map { $0.detached() },
+            end: end.map { $0.detached() }
+        )
     }
 
     public func encode(into writer: inout StorageWireWriter) throws(StorageWireError) {

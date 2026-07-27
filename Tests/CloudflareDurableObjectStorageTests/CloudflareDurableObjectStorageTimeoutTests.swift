@@ -1,5 +1,7 @@
+import CloudflareDurableObjectStorageWire
 import StorageKit
 import Testing
+
 @testable import CloudflareDurableObjectStorage
 
 @Suite("Cloudflare Durable Object Storage Timeout Tests")
@@ -54,7 +56,8 @@ struct CloudflareDurableObjectStorageTimeoutTests {
         try transaction.setOption(
             forOption: .timeout(milliseconds: 25)
         )
-        var iterator = transaction
+        var iterator =
+            transaction
             .getRange(begin: [0x01], end: [0x02])
             .makeAsyncIterator()
 
@@ -193,7 +196,7 @@ struct CloudflareDurableObjectStorageTimeoutTests {
         clock: any StorageMonotonicClock = SystemStorageClock()
     ) throws -> CloudflareDurableObjectStorageTransaction {
         CloudflareDurableObjectStorageTransaction(
-            scope: try CloudflareDurableObjectStorageScope(databaseID: "main"),
+            scope: try StorageWireScope(databaseID: "main"),
             client: client,
             limits: .default,
             monotonicClock: clock
