@@ -1,6 +1,6 @@
 import DatabaseTypes
 @testable import CloudflareDurableObjectStorageHostTransport
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 import Synchronization
 import Testing
 

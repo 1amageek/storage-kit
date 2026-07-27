@@ -1,7 +1,6 @@
 import DatabaseTypes
-import CloudflareDurableObjectStorageEmbedded
+import CloudflareDurableObjectStorageWire
 import StorageKit
-import StorageKitEmbeddedCore
 
 /// Typed StorageKit client backed by the fixed Cloudflare Durable Object StorageKit Wire.
 public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectStorageClient {
@@ -18,8 +17,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     public func read(_ request: CloudflareDurableObjectReadRequest) async throws -> CloudflareDurableObjectReadResponse {
         let response = try await send(
             .read(
-                CloudflareDurableObjectEmbeddedReadRequest(
-                    scope: try embeddedScope(request.scope, operation: .read),
+                StorageWireReadRequest(
+                    scope: try wireScope(request.scope, operation: .read),
                     key: request.key.rawValue,
                     snapshot: request.snapshot,
                     expectedReadVersion: request.expectedReadVersion
@@ -41,16 +40,10 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     public func range(_ request: CloudflareDurableObjectRangeRequest) async throws -> CloudflareDurableObjectRangeResponse {
         let response = try await send(
             .range(
-                CloudflareDurableObjectEmbeddedRangeRequest(
-                    scope: try embeddedScope(request.scope, operation: .rangeRead),
-                    begin: try embeddedBoundary(
-                        request.begin,
-                        operation: .rangeRead
-                    ),
-                    end: try embeddedBoundary(
-                        request.end,
-                        operation: .rangeRead
-                    ),
+                StorageWireRangeRequest(
+                    scope: try wireScope(request.scope, operation: .rangeRead),
+                    begin: wireBoundary(request.begin),
+                    end: wireBoundary(request.end),
                     limit: request.limit,
                     reverse: request.reverse,
                     snapshot: request.snapshot,
@@ -79,13 +72,13 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     public func commit(_ request: CloudflareDurableObjectCommitRequest) async throws -> CloudflareDurableObjectCommitResponse {
         let response = try await send(
             .commit(
-                CloudflareDurableObjectEmbeddedCommitRequest(
-                    scope: try embeddedScope(request.scope, operation: .commit),
+                StorageWireCommitRequest(
+                    scope: try wireScope(request.scope, operation: .commit),
                     observedReadVersion: request.observedReadVersion,
-                    mutations: try request.mutations.map { try embeddedMutation($0, operation: .commit) },
-                    readConflictRanges: request.readConflictRanges.map(embeddedConflictRange),
+                    mutations: request.mutations.map(wireMutation),
+                    readConflictRanges: request.readConflictRanges.map(wireConflictRange),
                     writeConflictRanges: request.writeConflictRanges.map(
-                        embeddedConflictRange
+                        wireConflictRange
                     )
                 )
             ),
@@ -102,8 +95,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     ) async throws -> CloudflareDurableObjectReadinessResponse {
         let response = try await send(
             .readiness(
-                CloudflareDurableObjectEmbeddedReadinessRequest(
-                    scope: try embeddedScope(request.scope, operation: .initialize)
+                StorageWireReadinessRequest(
+                    scope: try wireScope(request.scope, operation: .initialize)
                 )
             ),
             operation: .initialize
@@ -123,8 +116,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     ) async throws -> CloudflareDurableObjectRangeSizeResponse {
         let response = try await send(
             .rangeSize(
-                CloudflareDurableObjectEmbeddedRangeSizeRequest(
-                    scope: try embeddedScope(
+                StorageWireRangeSizeRequest(
+                    scope: try wireScope(
                         request.scope,
                         operation: .rangeRead
                     ),
@@ -149,8 +142,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     ) async throws -> CloudflareDurableObjectRangeSplitPointsResponse {
         let response = try await send(
             .rangeSplitPoints(
-                CloudflareDurableObjectEmbeddedRangeSplitPointsRequest(
-                    scope: try embeddedScope(
+                StorageWireRangeSplitPointsRequest(
+                    scope: try wireScope(
                         request.scope,
                         operation: .rangeRead
                     ),
@@ -174,12 +167,12 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     }
 
     private func send(
-        _ request: CloudflareDurableObjectEmbeddedRequest,
+        _ request: StorageWireRequest,
         operation: StorageOperation
-    ) async throws -> CloudflareDurableObjectEmbeddedResponse {
+    ) async throws -> StorageWireResponse {
         let requestBytes: ByteString
         do {
-            requestBytes = try CloudflareDurableObjectStorageWireCodec.encode(request)
+            requestBytes = try StorageWire.encode(request)
         } catch {
             throw StorageError(
                 code: .invalidOperation,
@@ -213,7 +206,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         }
 
         do {
-            let response = try CloudflareDurableObjectStorageWireCodec.decodeResponse(responseBytes)
+            let response = try StorageWire.decodeResponse(responseBytes)
             if case .failure(let status, let message) = response {
                 throw storageError(status: status, message: message, operation: operation)
             }
@@ -229,7 +222,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
             return response
         } catch let error as StorageError {
             throw error
-        } catch let error as CloudflareDurableObjectEmbeddedError {
+        } catch let error as StorageWireProtocolError {
             throw responseDecodeError(
                 storageError(from: error, operation: operation, code: .dataCorruption),
                 operation: operation
@@ -248,12 +241,12 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         }
     }
 
-    private func embeddedScope(
+    private func wireScope(
         _ scope: CloudflareDurableObjectStorageScope,
         operation: StorageOperation
-    ) throws -> CloudflareDurableObjectEmbeddedScope {
+    ) throws -> StorageWireScope {
         do {
-            return try CloudflareDurableObjectEmbeddedScope(
+            return try StorageWireScope(
                 databaseID: scope.databaseID,
                 tenantID: scope.tenantID,
                 workspaceID: scope.workspaceID
@@ -263,39 +256,32 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         }
     }
 
-    private func embeddedSelector(
-        _ selector: KeySelector,
-        operation: StorageOperation
-    ) throws -> EmbeddedKeySelector {
-        _ = operation
-        return EmbeddedKeySelector(
+    private func wireSelector(
+        _ selector: KeySelector
+    ) -> StorageWireKeySelector {
+        return StorageWireKeySelector(
             key: selector.key,
             orEqual: selector.orEqual,
             offset: selector.offset
         )
     }
 
-    private func embeddedBoundary(
-        _ boundary: CloudflareDurableObjectRangeBoundary,
-        operation: StorageOperation
-    ) throws -> EmbeddedRangeBoundary {
+    private func wireBoundary(
+        _ boundary: CloudflareDurableObjectRangeBoundary
+    ) -> StorageWireRangeBoundary {
         switch boundary {
         case .unbounded:
             return .unbounded
         case .selector(let selector):
             return .selector(
-                try embeddedSelector(
-                    selector.storageKitSelector,
-                    operation: operation
-                )
+                wireSelector(selector.storageKitSelector)
             )
         }
     }
 
-    private func embeddedMutation(
-        _ mutation: CloudflareDurableObjectMutation,
-        operation: StorageOperation
-    ) throws -> EmbeddedWriteOperation {
+    private func wireMutation(
+        _ mutation: CloudflareDurableObjectMutation
+    ) -> StorageWireWriteOperation {
         switch mutation {
         case .set(let key, let value):
             return .set(
@@ -313,15 +299,14 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
             return .atomic(
                 key: key.rawValue,
                 param: param.rawValue,
-                mutationType: try embeddedMutationType(mutationType, operation: operation)
+                mutationType: wireMutationType(mutationType)
             )
         }
     }
 
-    private func embeddedMutationType(
-        _ mutationType: CloudflareDurableObjectMutationTypeCode,
-        operation: StorageOperation
-    ) throws -> EmbeddedMutationType {
+    private func wireMutationType(
+        _ mutationType: CloudflareDurableObjectMutationTypeCode
+    ) -> StorageWireMutationType {
         switch mutationType {
         case .add:
             return .add
@@ -344,17 +329,17 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         }
     }
 
-    private func embeddedConflictRange(
+    private func wireConflictRange(
         _ range: CloudflareDurableObjectConflictRange
-    ) -> EmbeddedKeyRange {
-        EmbeddedKeyRange(
+    ) -> StorageWireKeyRange {
+        StorageWireKeyRange(
             begin: range.begin.map { $0.rawValue },
             end: range.end.map { $0.rawValue }
         )
     }
 
     private func storageConflictRange(
-        _ range: EmbeddedKeyRange
+        _ range: StorageWireKeyRange
     ) -> CloudflareDurableObjectConflictRange {
         CloudflareDurableObjectConflictRange(
             begin: range.begin.map {
@@ -424,7 +409,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     }
 
     private func storageError(
-        status: CloudflareDurableObjectEmbeddedFailureStatus,
+        status: StorageWireFailureStatus,
         message: String,
         operation: StorageOperation
     ) -> StorageError {
@@ -450,7 +435,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     }
 
     private func storageError(
-        from error: CloudflareDurableObjectEmbeddedError,
+        from error: StorageWireProtocolError,
         operation: StorageOperation,
         code: StorageError.Code
     ) -> StorageError {
@@ -473,8 +458,8 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     }
 
     private static func matches(
-        _ response: CloudflareDurableObjectEmbeddedResponse,
-        requestOperation: CloudflareDurableObjectEmbeddedOperation
+        _ response: StorageWireResponse,
+        requestOperation: StorageWireOperation
     ) -> Bool {
         switch (response, requestOperation) {
         case (.readiness, .readiness),

@@ -1,6 +1,6 @@
 import DatabaseTypes
 import CloudflareDurableObjectStorageHostTransport
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 struct ReversingStorageHostDispatcher:
     StorageHostDispatching {

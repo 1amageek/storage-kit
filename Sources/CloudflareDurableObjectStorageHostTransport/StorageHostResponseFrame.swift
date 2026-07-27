@@ -1,5 +1,5 @@
 import DatabaseTypes
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 /// Adopts the storage response frame allocated in guest memory by the host.
 enum StorageHostResponseFrame {

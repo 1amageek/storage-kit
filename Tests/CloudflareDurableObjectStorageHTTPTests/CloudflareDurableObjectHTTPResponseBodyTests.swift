@@ -1,7 +1,7 @@
 import DatabaseTypes
 #if !os(WASI)
 import Foundation
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 @testable import CloudflareDurableObjectStorageHTTP
 import Testing
 

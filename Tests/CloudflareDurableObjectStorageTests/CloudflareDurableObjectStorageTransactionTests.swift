@@ -1,7 +1,7 @@
 import DatabaseTypes
 import Testing
 import StorageKit
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 import Synchronization
 import CloudflareDurableObjectStorageTesting
 @testable import CloudflareDurableObjectStorage

@@ -1,7 +1,6 @@
 import DatabaseTypes
 import CloudflareDurableObjectStorage
-import CloudflareDurableObjectStorageEmbedded
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 struct MismatchedOperationCloudflareDurableObjectStorageTransport:
     CloudflareDurableObjectStorageTransport {
@@ -11,9 +10,9 @@ struct MismatchedOperationCloudflareDurableObjectStorageTransport:
 
     func send(_ requestBytes: ByteString) async throws -> ByteString {
         _ = requestBytes
-        return try CloudflareDurableObjectStorageWireCodec.encode(
+        return try StorageWire.encode(
             .readiness(
-                CloudflareDurableObjectEmbeddedReadinessResponse(
+                StorageWireReadinessResponse(
                     schemaVersion: 1,
                     commitVersion: 1,
                     metadataInitialized: true

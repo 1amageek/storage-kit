@@ -17,7 +17,7 @@ test("canonical StorageKit wire starts at protocol version one", () => {
   assert.equal(protocolVersion, 1);
 });
 
-test("scope name codec matches the StorageKit v1 canonical format", () => {
+test("scope name encoding matches the StorageKit v1 canonical format", () => {
   assert.equal(
     nameForScope({ databaseID: "main", tenantID: "tenant-a", workspaceID: "workspace-a" }),
     "storage-kit/cfdo/v1/database/bWFpbg/tenant/dGVuYW50LWE/workspace/d29ya3NwYWNlLWE"

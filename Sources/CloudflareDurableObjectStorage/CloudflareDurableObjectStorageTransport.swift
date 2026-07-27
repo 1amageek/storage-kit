@@ -1,5 +1,5 @@
 import DatabaseTypes
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 /// StorageKit Wire request transport for a Durable Object storage endpoint.
 public protocol CloudflareDurableObjectStorageTransport: Sendable {

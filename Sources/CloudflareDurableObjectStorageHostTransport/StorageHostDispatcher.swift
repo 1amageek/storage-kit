@@ -1,5 +1,5 @@
 import DatabaseTypes
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 #if arch(wasm32)
 @_extern(wasm, module: "storage_host", name: "dispatch")

@@ -10,7 +10,7 @@ import {
 } from "../src/StorageKitWireConstants.js";
 
 const fixtureURL = new URL(
-  "../../../Tests/CloudflareDurableObjectStorageEmbeddedTests/GoldenVectors/StorageKitWireV1.json",
+  "../../../Tests/CloudflareDurableObjectStorageWireTests/GoldenVectors/StorageKitWireV1.json",
   import.meta.url
 );
 const vectors = JSON.parse(readFileSync(fileURLToPath(fixtureURL), "utf8"));

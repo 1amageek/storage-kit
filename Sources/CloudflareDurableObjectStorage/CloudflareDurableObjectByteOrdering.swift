@@ -1,10 +1,10 @@
 import DatabaseTypes
 import StorageKit
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 enum CloudflareDurableObjectByteOrdering {
     static func compare(_ lhs: ByteString, _ rhs: ByteString) -> Int {
-        EmbeddedByteOrdering.compare(lhs, rhs)
+        StorageWireByteOrdering.compare(lhs, rhs)
     }
 
     static func sortedUnique(_ keys: [ByteString]) -> [ByteString] {

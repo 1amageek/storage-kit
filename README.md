@@ -13,7 +13,7 @@ StorageKit provides a single `Transaction` protocol that works identically acros
 - **Zero-copy design** — `getRange` returns backend-native `AsyncSequence` types without intermediate wrappers
 - **Swift 6 concurrency** — Full `Sendable` conformance, `Mutex` for synchronization, no `@unchecked Sendable`
 - **Nested transactions** — SQLite backend detects nested `withTransaction` calls via `@TaskLocal` and reuses the existing transaction
-- **Embedded Cloudflare client** — Foundation-free StorageKit Wire v1 codec for Embedded Swift
+- **Foundation-free Cloudflare protocol** — bounded StorageKit Wire v1 values, encoding, and decoding for Native, WASM, and Embedded Swift
 - **Durable Object transactions** — SQLite persistence, pinned reads, selector-aware conflicts, bounded pagination, and atomic commit
 
 ## Installation
@@ -100,7 +100,7 @@ The Cloudflare backend is split by runtime boundary:
 
 | Product | Use |
 |---|---|
-| `CloudflareDurableObjectStorageEmbedded` | Foundation-free StorageKit Wire v1 values and codec |
+| `CloudflareDurableObjectStorageWire` | Foundation-free StorageKit Wire v1 values, bounded encoding, and bounded decoding |
 | `CloudflareDurableObjectStorage` | `StorageEngine`, transaction state, and typed StorageKit Wire client |
 | `CloudflareDurableObjectStorageHTTP` | URLSession transport for native clients |
 | `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch` transport for a WASI reactor |

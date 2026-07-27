@@ -3,7 +3,7 @@ import DatabaseTypes
 import FoundationNetworking
 #endif
 import Foundation
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 import Synchronization
 
 final class CloudflareDurableObjectHTTPResponseCollector:

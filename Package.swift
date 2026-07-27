@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v15), .iOS(.v18)],
     products: [
         .library(name: "StorageKit", targets: ["StorageKit"]),
-        .library(name: "StorageKitEmbeddedCore", targets: ["StorageKitEmbeddedCore"]),
+        .library(name: "CloudflareDurableObjectStorageWire", targets: ["CloudflareDurableObjectStorageWire"]),
         .library(name: "FDBStorage", targets: ["FDBStorage"]),
         .library(name: "SQLiteStorage", targets: ["SQLiteStorage"]),
         .library(name: "PostgreSQLStorage", targets: ["PostgreSQLStorage"]),
@@ -19,7 +19,6 @@ let package = Package(
             name: "CloudflareDurableObjectStorageHTTP",
             targets: ["CloudflareDurableObjectStorageHTTP"]
         ),
-        .library(name: "CloudflareDurableObjectStorageEmbedded", targets: ["CloudflareDurableObjectStorageEmbedded"]),
         .library(
             name: "CloudflareDurableObjectStorageHostTransport",
             targets: ["CloudflareDurableObjectStorageHostTransport"]
@@ -38,7 +37,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "StorageKitEmbeddedCore",
+            name: "CloudflareDurableObjectStorageWire",
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
             ]
@@ -47,7 +46,6 @@ let package = Package(
             name: "StorageKit",
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
-                "StorageKitEmbeddedCore",
             ]
         ),
         .target(
@@ -84,8 +82,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
-                "StorageKitEmbeddedCore",
-                "CloudflareDurableObjectStorageEmbedded",
+                "CloudflareDurableObjectStorageWire",
             ]
         ),
         .target(
@@ -102,14 +99,7 @@ let package = Package(
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
                 "StorageKit",
-                "StorageKitEmbeddedCore",
-            ]
-        ),
-        .target(
-            name: "CloudflareDurableObjectStorageEmbedded",
-            dependencies: [
-                .product(name: "DatabaseTypes", package: "database-types"),
-                "StorageKitEmbeddedCore",
+                "CloudflareDurableObjectStorageWire",
             ]
         ),
         .target(
@@ -117,7 +107,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
-                "StorageKitEmbeddedCore",
+                "CloudflareDurableObjectStorageWire",
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Extern"),
@@ -128,7 +118,6 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
-                "StorageKitEmbeddedCore",
             ]
         ),
         .testTarget(
@@ -161,16 +150,14 @@ let package = Package(
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
                 "CloudflareDurableObjectStorageTesting",
-                "CloudflareDurableObjectStorageEmbedded",
-                "StorageKitEmbeddedCore",
+                "CloudflareDurableObjectStorageWire",
             ]
         ),
         .testTarget(
-            name: "CloudflareDurableObjectStorageEmbeddedTests",
+            name: "CloudflareDurableObjectStorageWireTests",
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
-                "CloudflareDurableObjectStorageEmbedded",
-                "StorageKitEmbeddedCore",
+                "CloudflareDurableObjectStorageWire",
             ],
             resources: [
                 .copy("GoldenVectors"),
@@ -181,7 +168,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorageHostTransport",
-                "StorageKitEmbeddedCore",
+                "CloudflareDurableObjectStorageWire",
             ]
         ),
         .testTarget(
@@ -189,7 +176,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorageHTTP",
-                "StorageKitEmbeddedCore",
+                "CloudflareDurableObjectStorageWire",
             ]
         ),
     ]

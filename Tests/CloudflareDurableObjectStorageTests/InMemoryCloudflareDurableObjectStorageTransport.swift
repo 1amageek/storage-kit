@@ -1,8 +1,7 @@
 import DatabaseTypes
 import CloudflareDurableObjectStorage
-import CloudflareDurableObjectStorageEmbedded
+import CloudflareDurableObjectStorageWire
 import StorageKit
-import StorageKitEmbeddedCore
 import Synchronization
 
 final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableObjectStorageTransport, Sendable {
@@ -12,10 +11,10 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private struct State: Sendable {
         var rowsByScope: [
-            CloudflareDurableObjectEmbeddedScope: [ByteString: ByteString]
+            StorageWireScope: [ByteString: ByteString]
         ] = [:]
-        var versionsByScope: [CloudflareDurableObjectEmbeddedScope: Int64] = [:]
-        var conflictsByScope: [CloudflareDurableObjectEmbeddedScope: [ConflictEntry]] = [:]
+        var versionsByScope: [StorageWireScope: Int64] = [:]
+        var conflictsByScope: [StorageWireScope: [ConflictEntry]] = [:]
     }
 
     private struct ConflictEntry: Sendable {
@@ -28,29 +27,29 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     func send(_ requestBytes: ByteString) async throws -> ByteString {
         do {
-            let request = try CloudflareDurableObjectStorageWireCodec.decodeRequest(requestBytes)
+            let request = try StorageWire.decodeRequest(requestBytes)
             return try state.withLock { state in
-                try CloudflareDurableObjectStorageWireCodec.encode(handle(request, state: &state))
+                try StorageWire.encode(handle(request, state: &state))
             }
         } catch let error as StorageError {
-            return try CloudflareDurableObjectStorageWireCodec.encode(
+            return try StorageWire.encode(
                 .failure(status: statusCode(for: error), message: error.message)
             )
         } catch {
-            return try CloudflareDurableObjectStorageWireCodec.encode(
+            return try StorageWire.encode(
                 .failure(status: .invalidOperation, message: String(describing: error))
             )
         }
     }
 
     private func handle(
-        _ request: CloudflareDurableObjectEmbeddedRequest,
+        _ request: StorageWireRequest,
         state: inout State
-    ) throws -> CloudflareDurableObjectEmbeddedResponse {
+    ) throws -> StorageWireResponse {
         switch request {
         case .readiness(let request):
             return .readiness(
-                CloudflareDurableObjectEmbeddedReadinessResponse(
+                StorageWireReadinessResponse(
                     schemaVersion: 1,
                     commitVersion: state.versionsByScope[request.scope] ?? 0,
                     metadataInitialized: true
@@ -63,7 +62,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
                 state: state
             )
             return .read(
-                CloudflareDurableObjectEmbeddedReadResponse(
+                StorageWireReadResponse(
                     value: state.rowsByScope[request.scope]?[request.key],
                     currentCommitVersion: state.versionsByScope[request.scope] ?? 0
                 )
@@ -76,7 +75,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             )
             let rows = try pageRows(for: request, state: state)
             return .range(
-                CloudflareDurableObjectEmbeddedRangeResponse(
+                StorageWireRangeResponse(
                     rows: rows.page,
                     hasMore: rows.hasMore,
                     currentCommitVersion: state.versionsByScope[request.scope] ?? 0,
@@ -116,7 +115,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             }
             state.rowsByScope[request.scope] = rows
             state.versionsByScope[request.scope] = committedVersion
-            return .commit(CloudflareDurableObjectEmbeddedCommitResponse(committedVersion: committedVersion))
+            return .commit(StorageWireCommitResponse(committedVersion: committedVersion))
         case .rangeSize(let request):
             try verifyReadVersion(
                 request.expectedReadVersion,
@@ -125,12 +124,12 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             )
             var total: Int64 = 0
             for (key, value) in state.rowsByScope[request.scope] ?? [:]
-                where EmbeddedByteOrdering.compare(key, request.begin) >= 0
-                    && EmbeddedByteOrdering.compare(key, request.end) < 0 {
+                where StorageWireByteOrdering.compare(key, request.begin) >= 0
+                    && StorageWireByteOrdering.compare(key, request.end) < 0 {
                 total += Int64(key.count + value.count)
             }
             return .rangeSize(
-                CloudflareDurableObjectEmbeddedRangeSizeResponse(
+                StorageWireRangeSizeResponse(
                     byteCount: total,
                     currentCommitVersion: state.versionsByScope[request.scope] ?? 0
                 )
@@ -143,11 +142,11 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             )
             let rows = (state.rowsByScope[request.scope] ?? [:])
                 .filter {
-                    EmbeddedByteOrdering.compare($0.key, request.begin) >= 0
-                        && EmbeddedByteOrdering.compare($0.key, request.end) < 0
+                    StorageWireByteOrdering.compare($0.key, request.begin) >= 0
+                        && StorageWireByteOrdering.compare($0.key, request.end) < 0
                 }
                 .sorted {
-                    EmbeddedByteOrdering.compare($0.key, $1.key) < 0
+                    StorageWireByteOrdering.compare($0.key, $1.key) < 0
                 }
             var points = [request.begin]
             var chunkBytes: Int64 = 0
@@ -166,7 +165,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             if request.begin != request.end {
                 points.append(request.end)
             }
-            guard points.count <= EmbeddedLimits.cloudflareDurableObject.maxSplitPoints else {
+            guard points.count <= StorageWireLimits.cloudflareDurableObject.maxSplitPoints else {
                 throw StorageError(
                     code: .resourceUnavailable,
                     operation: .rangeRead,
@@ -175,7 +174,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
                 )
             }
             return .rangeSplitPoints(
-                CloudflareDurableObjectEmbeddedRangeSplitPointsResponse(
+                StorageWireRangeSplitPointsResponse(
                     splitPoints: points,
                     currentCommitVersion: state.versionsByScope[request.scope] ?? 0
                 )
@@ -184,24 +183,30 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func pageRows(
-        for request: CloudflareDurableObjectEmbeddedRangeRequest,
+        for request: StorageWireRangeRequest,
         state: State
-    ) throws -> (page: [EmbeddedKeyValue], hasMore: Bool) {
-        let committedRows = (state.rowsByScope[request.scope] ?? [:]).map {
-            EmbeddedKeyValue(key: $0.key, value: $0.value)
+    ) throws -> (page: [StorageWireKeyValue], hasMore: Bool) {
+        var selected = (state.rowsByScope[request.scope] ?? [:]).map {
+            StorageWireKeyValue(key: $0.key, value: $0.value)
         }
-        let selected = try EmbeddedRangeOverlay.overlay(
-            committedRows: committedRows,
-            writes: [],
-            begin: request.begin,
-            end: request.end,
-            reverse: request.reverse,
-            limit: 0
+        selected.sort {
+            StorageWireByteOrdering.compare($0.key, $1.key) < 0
+        }
+        let keys = selected.map(\.key)
+        let start = resolvedIndex(for: request.begin, in: keys, unbounded: 0)
+        let finish = resolvedIndex(
+            for: request.end,
+            in: keys,
+            unbounded: selected.count
         )
+        selected = start < finish ? Array(selected[start..<finish]) : []
+        if request.reverse {
+            selected.reverse()
+        }
         var remaining = selected
         if let cursorKey = request.cursorKey {
             remaining = selected.filter {
-                let ordering = EmbeddedByteOrdering.compare($0.key, cursorKey)
+                let ordering = StorageWireByteOrdering.compare($0.key, cursorKey)
                 return request.reverse ? ordering < 0 : ordering > 0
             }
         }
@@ -211,7 +216,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func apply(
-        _ mutation: EmbeddedWriteOperation,
+        _ mutation: StorageWireWriteOperation,
         to rows: inout [ByteString: ByteString]
     ) throws {
         switch mutation {
@@ -221,12 +226,15 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             rows.removeValue(forKey: key)
         case .clearRange(let begin, let end):
             for key in Array(rows.keys)
-                where EmbeddedByteOrdering.compare(key, begin) >= 0
-                    && EmbeddedByteOrdering.compare(key, end) < 0 {
+                where StorageWireByteOrdering.compare(key, begin) >= 0
+                    && StorageWireByteOrdering.compare(key, end) < 0 {
                 rows.removeValue(forKey: key)
             }
         case .atomic(let key, let param, let mutationType):
-            switch try mutationType.apply(to: rows[key], param: param) {
+            switch try mutationType.storageKitMutationType.apply(
+                to: rows[key],
+                param: param
+            ) {
             case .set(let value):
                 rows[key] = value
             case .clear:
@@ -237,10 +245,27 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
         }
     }
 
+    private func resolvedIndex(
+        for boundary: StorageWireRangeBoundary,
+        in keys: [ByteString],
+        unbounded: Int
+    ) -> Int {
+        switch boundary {
+        case .unbounded:
+            return unbounded
+        case .selector(let selector):
+            return KeySelector(
+                key: selector.key,
+                orEqual: selector.orEqual,
+                offset: selector.offset
+            ).resolve(in: keys)
+        }
+    }
+
     private func materialized(
-        _ mutation: EmbeddedWriteOperation,
+        _ mutation: StorageWireWriteOperation,
         committedVersion: Int64
-    ) throws -> EmbeddedWriteOperation {
+    ) throws -> StorageWireWriteOperation {
         guard case .atomic(let key, let param, let mutationType) = mutation else {
             return mutation
         }
@@ -325,7 +350,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private func verifyReadVersion(
         _ expectedReadVersion: Int64?,
-        scope: CloudflareDurableObjectEmbeddedScope,
+        scope: StorageWireScope,
         state: State
     ) throws {
         guard let expectedReadVersion else { return }
@@ -342,8 +367,8 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private func verifyReadConflicts(
         readVersion: Int64?,
-        readConflictRanges: [EmbeddedKeyRange],
-        scope: CloudflareDurableObjectEmbeddedScope,
+        readConflictRanges: [StorageWireKeyRange],
+        scope: StorageWireScope,
         state: State
     ) throws {
         guard let readVersion else { return }
@@ -361,9 +386,9 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func recordWriteConflict(
-        _ mutation: EmbeddedWriteOperation,
+        _ mutation: StorageWireWriteOperation,
         version: Int64,
-        scope: CloudflareDurableObjectEmbeddedScope,
+        scope: StorageWireScope,
         state: inout State
     ) {
         guard let range = writeConflictRange(for: mutation) else {
@@ -375,14 +400,14 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func recordWriteConflict(
-        _ range: EmbeddedKeyRange,
+        _ range: StorageWireKeyRange,
         version: Int64,
-        scope: CloudflareDurableObjectEmbeddedScope,
+        scope: StorageWireScope,
         state: inout State
     ) {
         guard let begin = range.begin,
               let end = range.end,
-              EmbeddedByteOrdering.compare(begin, end) < 0 else {
+              StorageWireByteOrdering.compare(begin, end) < 0 else {
             return
         }
         state.conflictsByScope[scope, default: []].append(
@@ -391,13 +416,13 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     }
 
     private func writeConflictRange(
-        for mutation: EmbeddedWriteOperation
+        for mutation: StorageWireWriteOperation
     ) -> (begin: ByteString, end: ByteString)? {
         switch mutation {
         case .set(let key, _), .clear(let key), .atomic(let key, _, _):
             return singleKeyRange(key)
         case .clearRange(let begin, let end):
-            guard EmbeddedByteOrdering.compare(begin, end) < 0 else {
+            guard StorageWireByteOrdering.compare(begin, end) < 0 else {
                 return nil
             }
             return (begin, end)
@@ -410,44 +435,44 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
         (key, keySuccessor(key))
     }
 
-    private func overlaps(_ conflict: ConflictEntry, _ readRange: EmbeddedKeyRange) -> Bool {
-        if let readEnd = readRange.end, EmbeddedByteOrdering.compare(conflict.begin, readEnd) >= 0 {
+    private func overlaps(_ conflict: ConflictEntry, _ readRange: StorageWireKeyRange) -> Bool {
+        if let readEnd = readRange.end, StorageWireByteOrdering.compare(conflict.begin, readEnd) >= 0 {
             return false
         }
-        if let readBegin = readRange.begin, EmbeddedByteOrdering.compare(conflict.end, readBegin) <= 0 {
+        if let readBegin = readRange.begin, StorageWireByteOrdering.compare(conflict.end, readBegin) <= 0 {
             return false
         }
         return true
     }
 
     private func conflictRange(
-        for request: CloudflareDurableObjectEmbeddedRangeRequest,
-        rows: [EmbeddedKeyValue]
-    ) -> EmbeddedKeyRange {
+        for request: StorageWireRangeRequest,
+        rows: [StorageWireKeyValue]
+    ) -> StorageWireKeyRange {
         let requestedBegin = boundaryKey(request.begin)
         let requestedEnd = boundaryKey(request.end)
         if let requestedBegin,
            let requestedEnd,
-           EmbeddedByteOrdering.compare(requestedBegin, requestedEnd) < 0 {
-            return EmbeddedKeyRange(
+           StorageWireByteOrdering.compare(requestedBegin, requestedEnd) < 0 {
+            return StorageWireKeyRange(
                 begin: requestedBegin,
                 end: requestedEnd
             )
         }
 
         let orderedKeys = rows.map(\.key).sorted {
-            EmbeddedByteOrdering.compare($0, $1) < 0
+            StorageWireByteOrdering.compare($0, $1) < 0
         }
         let begin = minimumKey(requestedBegin, orderedKeys.first)
         let end = maximumKey(
             requestedEnd.map(keySuccessor),
             orderedKeys.last.map(keySuccessor)
         )
-        return EmbeddedKeyRange(begin: begin, end: end)
+        return StorageWireKeyRange(begin: begin, end: end)
     }
 
     private func boundaryKey(
-        _ boundary: EmbeddedRangeBoundary
+        _ boundary: StorageWireRangeBoundary
     ) -> ByteString? {
         switch boundary {
         case .unbounded:
@@ -463,7 +488,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     ) -> ByteString? {
         guard let left else { return right }
         guard let right else { return left }
-        return EmbeddedByteOrdering.compare(left, right) <= 0 ? left : right
+        return StorageWireByteOrdering.compare(left, right) <= 0 ? left : right
     }
 
     private func maximumKey(
@@ -472,7 +497,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
     ) -> ByteString? {
         guard let left else { return right }
         guard let right else { return left }
-        return EmbeddedByteOrdering.compare(left, right) >= 0 ? left : right
+        return StorageWireByteOrdering.compare(left, right) >= 0 ? left : right
     }
 
     private func keySuccessor(_ key: ByteString) -> ByteString {
@@ -488,7 +513,7 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
 
     private func statusCode(
         for error: StorageError
-    ) -> CloudflareDurableObjectEmbeddedFailureStatus {
+    ) -> StorageWireFailureStatus {
         switch error.code {
         case .transactionConflict:
             return .transactionConflict
@@ -500,6 +525,31 @@ final class InMemoryCloudflareDurableObjectStorageTransport: CloudflareDurableOb
             return .backendContractViolation
         default:
             return .backendFailure
+        }
+    }
+}
+
+private extension StorageWireMutationType {
+    var storageKitMutationType: MutationType {
+        switch self {
+        case .add:
+            return .add
+        case .setVersionstampedKey:
+            return .setVersionstampedKey
+        case .setVersionstampedValue:
+            return .setVersionstampedValue
+        case .bitOr:
+            return .bitOr
+        case .bitAnd:
+            return .bitAnd
+        case .bitXor:
+            return .bitXor
+        case .max:
+            return .max
+        case .min:
+            return .min
+        case .compareAndClear:
+            return .compareAndClear
         }
     }
 }

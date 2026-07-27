@@ -1,7 +1,6 @@
 import DatabaseTypes
 import CloudflareDurableObjectStorage
-import CloudflareDurableObjectStorageEmbedded
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 actor SuspendingCloudflareDurableObjectStorageTransport: CloudflareDurableObjectStorageTransport {
     nonisolated var callExecution: CloudflareDurableObjectCallExecution {
@@ -12,12 +11,12 @@ actor SuspendingCloudflareDurableObjectStorageTransport: CloudflareDurableObject
     private var commitStartWaiters: [CheckedContinuation<Void, Never>] = []
 
     func send(_ requestBytes: ByteString) async throws -> ByteString {
-        let request = try CloudflareDurableObjectStorageWireCodec.decodeRequest(requestBytes)
+        let request = try StorageWire.decodeRequest(requestBytes)
         switch request {
         case .readiness:
-            return try CloudflareDurableObjectStorageWireCodec.encode(
+            return try StorageWire.encode(
                 .readiness(
-                    CloudflareDurableObjectEmbeddedReadinessResponse(
+                    StorageWireReadinessResponse(
                         schemaVersion: 1,
                         commitVersion: 0,
                         metadataInitialized: true
@@ -27,11 +26,11 @@ actor SuspendingCloudflareDurableObjectStorageTransport: CloudflareDurableObject
         case .commit:
             signalCommitStarted()
             try await Task.sleep(for: .seconds(60))
-            return try CloudflareDurableObjectStorageWireCodec.encode(
-                .commit(CloudflareDurableObjectEmbeddedCommitResponse(committedVersion: 1))
+            return try StorageWire.encode(
+                .commit(StorageWireCommitResponse(committedVersion: 1))
             )
         default:
-            return try CloudflareDurableObjectStorageWireCodec.encode(
+            return try StorageWire.encode(
                 .failure(status: .invalidOperation, message: "Only commit is supported")
             )
         }

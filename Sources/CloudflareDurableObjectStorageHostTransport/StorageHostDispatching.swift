@@ -1,5 +1,5 @@
 import DatabaseTypes
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 public protocol StorageHostDispatching: Sendable {
     func dispatch(

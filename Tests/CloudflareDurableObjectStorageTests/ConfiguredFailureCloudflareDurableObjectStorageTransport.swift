@@ -1,7 +1,7 @@
 import DatabaseTypes
 import CloudflareDurableObjectStorage
 import StorageKit
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 final class ConfiguredFailureCloudflareDurableObjectStorageTransport: CloudflareDurableObjectStorageTransport, Sendable {
     var callExecution: CloudflareDurableObjectCallExecution {

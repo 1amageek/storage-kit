@@ -5,7 +5,7 @@ import FoundationNetworking
 import CloudflareDurableObjectStorage
 import Foundation
 import StorageKit
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 /// URLSession-backed StorageKit Wire transport for a Durable Object endpoint.
 public struct CloudflareDurableObjectHTTPTransport: CloudflareDurableObjectStorageTransport {

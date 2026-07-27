@@ -44,15 +44,16 @@ must never leak into the public database API.
 
 | Product | Dependencies | Responsibility |
 |---|---|---|
-| `StorageKitEmbeddedCore` | None | Foundation-free byte values, selectors, mutations, limits, and codec primitives |
-| `CloudflareDurableObjectStorageEmbedded` | Embedded core | Foundation-free StorageKit Wire v1 request and response model |
-| `CloudflareDurableObjectStorage` | StorageKit and Embedded product | `StorageEngine`, transaction state machine, range overlay, and typed StorageKit Wire client |
+| `CloudflareDurableObjectStorageWire` | DatabaseTypes | Foundation-free protocol tags, request/response values, resource limits, bounded encoding, and bounded decoding |
+| `CloudflareDurableObjectStorage` | StorageKit and storage wire | `StorageEngine`, transaction state machine, read-your-writes overlay, and typed StorageKit Wire client |
 | `CloudflareDurableObjectStorageHTTP` | Foundation and URLSession | Native HTTP transport only |
-| `CloudflareDurableObjectStorageHostTransport` | Cloudflare storage product | Synchronous `storage_host.dispatch` transport for a standard WASI reactor |
+| `CloudflareDurableObjectStorageHostTransport` | Cloudflare storage and storage wire | Synchronous `storage_host.dispatch` transport for a standard WASI reactor |
 
-`CloudflareDurableObjectStorageEmbedded` and
-`CloudflareDurableObjectStorageHostTransport` are distinct products. Embedded
-clients do not inherit Foundation or URLSession.
+`CloudflareDurableObjectStorageWire` and
+`CloudflareDurableObjectStorageHostTransport` are distinct products. Clients
+using the wire product do not inherit Foundation or URLSession. Mutation
+evaluation, selector resolution, and read-your-writes behavior belong to
+`StorageKit`; the wire product only represents and validates protocol data.
 
 ## Storage Scope
 
@@ -178,7 +179,7 @@ and the current
 Swift and JavaScript tests consume the same physical fixture:
 
 ```text
-Tests/CloudflareDurableObjectStorageEmbeddedTests/GoldenVectors/StorageKitWireV1.json
+Tests/CloudflareDurableObjectStorageWireTests/GoldenVectors/StorageKitWireV1.json
 ```
 
 The fixture covers readiness, range, range metrics, ordinary and versionstamped
@@ -418,7 +419,7 @@ by the full database-framework reactor.
 
 Phase completion requires:
 
-- native builds for the Embedded codec, typed client, HTTP transport, and host
+- native builds for the Foundation-free wire representation, typed client, HTTP transport, and host
   transport products;
 - a standard WASI build of `CloudflareDurableObjectStorageHostTransport`;
 - shared Swift/JavaScript golden vectors;
@@ -441,7 +442,7 @@ Phase completion requires:
 5. The SQLite host owns atomic storage primitives, persistence, and conflict
    history.
 6. Range responses return all conflict dependencies.
-7. Embedded, HTTP, and WASI transports are separate products.
+7. JavaScript, HTTP, and WASI transports are separate products.
 8. The standalone storage Worker does not host a mini Swift runtime.
 9. The full database-framework reactor consumes the synchronous storage host ABI.
 10. Compatibility paths are introduced only by a future explicit design

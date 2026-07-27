@@ -1,6 +1,6 @@
 import DatabaseTypes
 import CloudflareDurableObjectStorage
-import StorageKitEmbeddedCore
+import CloudflareDurableObjectStorageWire
 
 final class TruncatedResponseCloudflareDurableObjectStorageTransport: CloudflareDurableObjectStorageTransport, Sendable {
     var callExecution: CloudflareDurableObjectCallExecution {
