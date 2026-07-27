@@ -1,42 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import worker, {
-  CloudflareDurableObjectStorageHost,
-} from "../src/CloudflareDurableObjectStorageHost.js";
+import worker from "../src/StorageKitHTTPGateway.js";
 import { nameForScope } from "../src/StorageKitScope.js";
 import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
 import { operation, statusCode } from "../src/StorageKitWireConstants.js";
-import { InMemorySQLiteStorage } from "./InMemorySQLiteStorage.js";
 
 const accessToken = "storage-kit-test-token";
-
-test("Durable Object migration runs inside blockConcurrencyWhile", async () => {
-  const sql = new InMemorySQLiteStorage();
-  let initializationCount = 0;
-  const ctx = {
-    storage: {
-      sql,
-      transactionSync(operation) {
-        return sql.transactionSync(operation);
-      },
-    },
-    blockConcurrencyWhile(operation) {
-      initializationCount += 1;
-      return operation();
-    },
-  };
-  const object = new CloudflareDurableObjectStorageHost(ctx, {});
-  assert.equal(initializationCount, 1);
-
-  const response = StorageKitWireCodec.decodeResponse(object.dispatch(
-    StorageKitWireCodec.encodeRequest({
-      operation: operation.readiness,
-      scope: { databaseID: "main", tenantID: null, workspaceID: null },
-    })
-  ));
-  assert.equal(response.status, statusCode.ok);
-  assert.equal(response.schemaVersion, 1);
-});
 
 test("worker routes StorageKit Wire requests to the Durable Object name derived from scope", async () => {
   const scope = {
@@ -64,18 +33,14 @@ test("worker routes StorageKit Wire requests to the Durable Object name derived 
       },
       get() {
         return {
-          async fetch(request) {
-            observedBody = new Uint8Array(await request.arrayBuffer());
-            return new Response(StorageKitWireCodec.encodeResponse({
+          execute(requestBytes) {
+            observedBody = requestBytes;
+            return StorageKitWireCodec.encodeResponse({
               status: statusCode.ok,
               operation: operation.readiness,
               schemaVersion: 1,
               commitVersion: 0n,
               metadataInitialized: false,
-            }), {
-              headers: {
-                "content-type": "application/octet-stream",
-              },
             });
           },
         };
@@ -167,12 +132,12 @@ test("worker decodes only routing scope before Durable Object dispatch", async (
       },
       get() {
         return {
-          fetch() {
+          execute() {
             forwarded = true;
-            return new Response(StorageKitWireCodec.encodeFailure(
+            return StorageKitWireCodec.encodeFailure(
               statusCode.invalidOperation,
               "Trailing bytes"
-            ));
+            );
           },
         };
       },

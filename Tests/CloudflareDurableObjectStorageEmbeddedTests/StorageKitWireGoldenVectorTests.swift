@@ -50,6 +50,31 @@ struct StorageKitWireGoldenVectorTests {
         )
         #expect(try encodeHex(commit) == vectors.commitRequest)
 
+        let versionstampedCommit = CloudflareDurableObjectEmbeddedRequest
+            .commit(
+                CloudflareDurableObjectEmbeddedCommitRequest(
+                    scope: scope,
+                    observedReadVersion: 8,
+                    mutations: [
+                        .atomic(
+                            key: [0x20],
+                            param: [
+                                0xAA,
+                                0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                0xBB,
+                                0x01, 0x00, 0x00, 0x00,
+                            ],
+                            mutationType: .setVersionstampedValue
+                        ),
+                    ]
+                )
+            )
+        #expect(
+            try encodeHex(versionstampedCommit)
+                == vectors.versionstampedCommitRequest
+        )
+
         let rangeResponse = CloudflareDurableObjectEmbeddedResponse.range(
             CloudflareDurableObjectEmbeddedRangeResponse(
                 rows: [
@@ -118,6 +143,16 @@ struct StorageKitWireGoldenVectorTests {
             message: "conflict"
         )
         #expect(try encodeHex(failure) == vectors.failureResponse)
+
+        let backendContractFailure = CloudflareDurableObjectEmbeddedResponse
+            .failure(
+                status: .backendContractViolation,
+                message: "sqlite cursor contract"
+            )
+        #expect(
+            try encodeHex(backendContractFailure)
+                == vectors.backendContractFailureResponse
+        )
     }
 
     @Test func canonicalVectorsDecodeAndReencodeWithoutChange() throws {
@@ -126,6 +161,7 @@ struct StorageKitWireGoldenVectorTests {
             vectors.readinessRequest,
             vectors.rangeRequest,
             vectors.commitRequest,
+            vectors.versionstampedCommitRequest,
             vectors.rangeSizeRequest,
             vectors.rangeSplitPointsRequest,
         ] {
@@ -141,6 +177,7 @@ struct StorageKitWireGoldenVectorTests {
             vectors.rangeSizeResponse,
             vectors.rangeSplitPointsResponse,
             vectors.failureResponse,
+            vectors.backendContractFailureResponse,
         ] {
             let bytes = try decodeHex(hex)
             let response = try CloudflareDurableObjectStorageWireCodec.decodeResponse(bytes)
@@ -179,12 +216,14 @@ struct StorageKitWireGoldenVectorTests {
         let readinessRequest: String
         let rangeRequest: String
         let commitRequest: String
+        let versionstampedCommitRequest: String
         let rangeResponse: String
         let rangeSizeRequest: String
         let rangeSizeResponse: String
         let rangeSplitPointsRequest: String
         let rangeSplitPointsResponse: String
         let failureResponse: String
+        let backendContractFailureResponse: String
         let invalidSuccessWithoutOperation: String
         let invalidNegativeReadinessVersion: String
         let invalidEmptyRangeContinuation: String

@@ -171,6 +171,7 @@ and the current
 | 2 | invalid operation |
 | 3 | backend failure |
 | 4 | resource unavailable |
+| 5 | backend contract violation |
 
 ### Canonical Vectors
 
@@ -180,9 +181,10 @@ Swift and JavaScript tests consume the same physical fixture:
 Tests/CloudflareDurableObjectStorageEmbeddedTests/GoldenVectors/StorageKitWireV1.json
 ```
 
-The fixture covers readiness, range, range metrics, commit, multiple conflict
-ranges, and a typed failure. A protocol change is accepted only when both
-implementations produce the exact same bytes.
+The fixture covers readiness, range, range metrics, ordinary and versionstamped
+commits, multiple conflict ranges, and typed storage/backend-contract failures.
+A protocol change is accepted only when both implementations produce the exact
+same bytes.
 
 ## Resource Limits
 
@@ -302,8 +304,12 @@ part of the storage protocol:
 - signed little-endian max and min;
 - compare-and-clear.
 
-Versionstamped key and value mutations fail explicitly until their commit-version
-substitution contract is implemented. They are never silently approximated.
+Versionstamped key and value mutations replace the ten-byte placeholder selected
+by the operand's trailing little-endian `UInt32` offset. Substitution, the
+resulting write, conflict-range recording, and commit-version advancement occur
+inside the same synchronous SQLite transaction. An invalid placeholder, offset,
+or resulting key/value size fails the entire transaction without advancing its
+version.
 
 ## Durable Object SQLite
 
@@ -353,7 +359,8 @@ requests. It:
 1. verifies the bearer token;
 2. rejects an oversized body while streaming;
 3. decodes only enough to derive and validate the scope;
-4. routes through the Durable Object namespace binding;
+4. invokes the Durable Object's `execute(Uint8Array)` RPC through the namespace
+   binding;
 5. forwards the unchanged v1 frame.
 
 Public HTTP is an adapter for native clients and administrative tooling. The

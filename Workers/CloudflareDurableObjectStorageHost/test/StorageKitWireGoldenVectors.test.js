@@ -51,6 +51,28 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
     ],
   })), vectors.commitRequest);
 
+  assert.equal(hex(StorageKitWireCodec.encodeRequest({
+    operation: operation.commit,
+    scope,
+    observedReadVersion: 8n,
+    mutations: [
+      {
+        tag: 4,
+        key: bytes(0x20),
+        param: bytes(
+          0xAA,
+          0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+          0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+          0xBB,
+          0x01, 0x00, 0x00, 0x00
+        ),
+        mutationType: mutationType.setVersionstampedValue,
+      },
+    ],
+    readConflictRanges: [],
+    writeConflictRanges: [],
+  })), vectors.versionstampedCommitRequest);
+
   assert.equal(hex(StorageKitWireCodec.encodeResponse({
     status: statusCode.ok,
     operation: operation.range,
@@ -101,6 +123,13 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
     hex(StorageKitWireCodec.encodeFailure(statusCode.transactionConflict, "conflict")),
     vectors.failureResponse
   );
+  assert.equal(
+    hex(StorageKitWireCodec.encodeFailure(
+      statusCode.backendContractViolation,
+      "sqlite cursor contract"
+    )),
+    vectors.backendContractFailureResponse
+  );
 });
 
 test("JavaScript decoder reencodes every canonical vector", () => {
@@ -108,6 +137,7 @@ test("JavaScript decoder reencodes every canonical vector", () => {
     "readinessRequest",
     "rangeRequest",
     "commitRequest",
+    "versionstampedCommitRequest",
     "rangeSizeRequest",
     "rangeSplitPointsRequest",
   ]) {
@@ -122,6 +152,7 @@ test("JavaScript decoder reencodes every canonical vector", () => {
     "rangeSizeResponse",
     "rangeSplitPointsResponse",
     "failureResponse",
+    "backendContractFailureResponse",
   ]) {
     const encoded = fromHex(vectors[name]);
     assert.deepEqual(
