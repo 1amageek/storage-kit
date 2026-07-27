@@ -562,13 +562,13 @@ struct SQLiteNestedTransactionTests {
     }
 
     // =========================================================================
-    // MARK: - DirectoryService for SQLite
+    // MARK: - Namespace resolution for SQLite
     // =========================================================================
 
-    @Test func sqliteEngine_directoryServiceIsStatic() async throws {
+    @Test func sqliteEngineUsesDeterministicNamespaceResolution() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        let service = engine.directoryService
-        #expect(service is StaticDirectoryService)
+        #expect(engine.namespaceResolver is DeterministicNamespaceResolver)
+        #expect(engine.namespaceCatalog == nil)
         engine.close()
     }
 }

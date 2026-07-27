@@ -75,8 +75,8 @@ struct FDBStorageTransactionFootprintTests {
         #expect(backend.cancelCount == 1)
     }
 
-    @Test("Opaque directory mutations participate in commit-request admission")
-    func rejectsOpaqueDirectoryMutationFootprint() async throws {
+    @Test("Opaque namespace mutations participate in commit-request admission")
+    func rejectsOpaqueNamespaceMutationFootprint() async throws {
         let maximum = CommitRequestLimit.default.maximumByteCount
         let backend = SizeReportingTransaction(
             approximateSize: 0,
@@ -88,7 +88,7 @@ struct FDBStorageTransactionFootprintTests {
             transactionDomain: transactionDomain
         )
 
-        try await transaction.withDirectoryOperation(
+        try await transaction.withNamespaceOperation(
             transactionDomain: transactionDomain,
             writes: true,
             operation: .write
@@ -184,15 +184,15 @@ struct FDBStorageTransactionFootprintTests {
         #expect(backend.commitCount == 1)
     }
 
-    @Test("Directory mutation prevents late logical admission configuration")
-    func rejectsConfigurationAfterDirectoryMutation() async throws {
+    @Test("Namespace mutation prevents late logical admission configuration")
+    func rejectsConfigurationAfterNamespaceMutation() async throws {
         let backend = SizeReportingTransaction(approximateSize: 1)
         let transactionDomain = StorageTransactionDomain()
         let transaction = try FDBStorageTransaction(
             backend,
             transactionDomain: transactionDomain
         )
-        try await transaction.withDirectoryOperation(
+        try await transaction.withNamespaceOperation(
             transactionDomain: transactionDomain,
             writes: true,
             operation: .write

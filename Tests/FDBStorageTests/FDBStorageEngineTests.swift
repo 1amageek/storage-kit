@@ -44,6 +44,59 @@ struct FDBStorageEngineTests {
         return result
     }
 
+    @Test func namespaceRegistryExposesCatalogLifecycle() async throws {
+        let engine = try await makeEngine()
+        let root = "storage-kit-\(Foundation.UUID().uuidString)"
+        let rootPath = [root]
+        let childPath = [root, "events"]
+
+        let created = try await engine.withTransaction { transaction in
+            try await engine.namespaceResolver.resolveOrCreate(
+                path: childPath,
+                transaction: transaction
+            )
+        }
+
+        try await engine.withTransaction { transaction in
+            let exists = try await engine.namespaceResolver.namespaceExists(
+                path: childPath,
+                transaction: transaction
+            )
+            let opened = try await engine.namespaceResolver.resolveExisting(
+                path: childPath,
+                transaction: transaction
+            )
+            let catalog = try #require(engine.namespaceCatalog)
+            let children = try await catalog.listNamespaces(
+                path: rootPath,
+                transaction: transaction
+            )
+            #expect(exists)
+            #expect(opened == created)
+            #expect(children == ["events"])
+        }
+
+        try await engine.withTransaction { transaction in
+            let catalog = try #require(engine.namespaceCatalog)
+            try await catalog.removeNamespace(
+                path: childPath,
+                transaction: transaction
+            )
+            try await catalog.removeNamespace(
+                path: rootPath,
+                transaction: transaction
+            )
+        }
+
+        try await engine.withTransaction { transaction in
+            let exists = try await engine.namespaceResolver.namespaceExists(
+                path: childPath,
+                transaction: transaction
+            )
+            #expect(!exists)
+        }
+    }
+
     @Test func fdbResultsRemainBorrowedUntilExplicitDetach() async throws {
         let engine = try await makeEngine()
         let prefix = testPrefix()

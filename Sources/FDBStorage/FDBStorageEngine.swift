@@ -135,8 +135,15 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         }
     }
 
-    public var directoryService: any DirectoryService {
-        FDBDirectoryService(
+    public var namespaceResolver: any NamespaceResolver {
+        NamespaceRegistry(
+            database: database,
+            transactionDomain: transactionDomain
+        )
+    }
+
+    public var namespaceCatalog: (any NamespaceCatalog)? {
+        NamespaceRegistry(
             database: database,
             transactionDomain: transactionDomain
         )

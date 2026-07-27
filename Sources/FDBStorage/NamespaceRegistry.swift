@@ -2,11 +2,14 @@ import DatabaseTypes
 import StorageKit
 import FoundationDB
 
-/// Directory service using FDB DirectoryLayer.
+/// Persistent namespace registry backed by FoundationDB's directory layer.
 ///
 /// FDB's DirectoryLayer uses the High Contention Allocator (HCA)
 /// to dynamically assign short prefixes.
-public final class FDBDirectoryService: DirectoryService, Sendable {
+final class NamespaceRegistry:
+    NamespaceResolver,
+    NamespaceCatalog,
+    Sendable {
 
     private let database: any DatabaseProtocol
     private let transactionDomain: StorageTransactionDomain
@@ -19,7 +22,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
         self.transactionDomain = transactionDomain
     }
 
-    public func createOrOpen(
+    func resolveOrCreate(
         path: [String],
         transaction: any StorageKit.TransactionAccess
     ) async throws -> StorageKit.Subspace {
@@ -39,7 +42,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
         }
     }
 
-    public func open(
+    func resolveExisting(
         path: [String],
         transaction: any StorageKit.TransactionAccess
     ) async throws -> StorageKit.Subspace {
@@ -59,7 +62,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
         }
     }
 
-    public func list(
+    func listNamespaces(
         path: [String],
         transaction: any StorageKit.TransactionAccess
     ) async throws -> [String] {
@@ -76,7 +79,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
         }
     }
 
-    public func remove(
+    func removeNamespace(
         path: [String],
         transaction: any StorageKit.TransactionAccess
     ) async throws {
@@ -93,7 +96,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
         }
     }
 
-    public func exists(
+    func namespaceExists(
         path: [String],
         transaction: any StorageKit.TransactionAccess
     ) async throws -> Bool {
@@ -124,7 +127,7 @@ public final class FDBDirectoryService: DirectoryService, Sendable {
                 message: "FoundationDB directory operations require an FDB storage transaction"
             )
         }
-        return try await transaction.withDirectoryOperation(
+        return try await transaction.withNamespaceOperation(
             transactionDomain: transactionDomain,
             writes: writes,
             operation: operation

@@ -9,7 +9,7 @@ StorageKit provides a single `Transaction` protocol that works identically acros
 ## Features
 
 - **Unified API** — `StorageEngine` and `Transaction` protocols abstract away backend differences
-- **FDB-compatible semantics** — Lexicographic key ordering, range scans, `KeySelector`, Tuple Layer, Subspace, DirectoryService
+- **FDB-compatible semantics** — Lexicographic key ordering, range scans, `KeySelector`, Tuple Layer, Subspace, and namespace resolution
 - **Zero-copy design** — `getRange` returns backend-native `AsyncSequence` types without intermediate wrappers
 - **Swift 6 concurrency** — Full `Sendable` conformance, `Mutex` for synchronization, no `@unchecked Sendable`
 - **Nested transactions** — SQLite backend detects nested `withTransaction` calls via `@TaskLocal` and reuses the existing transaction
@@ -191,17 +191,17 @@ let (begin, end) = users.range()
 users.contains(key) // true
 ```
 
-### DirectoryService
+### Namespace resolution and catalog capability
 
 Hierarchical namespace management (equivalent to FDB's DirectoryLayer):
 
 ```swift
-let userSpace = try await engine.createOrOpenDirectory(
+let userSpace = try await engine.resolveOrCreateNamespace(
     path: ["app", "users"]
 )
 
 try await engine.withTransaction { transaction in
-    let indexSpace = try await engine.directoryService.createOrOpen(
+    let indexSpace = try await engine.namespaceResolver.resolveOrCreate(
         path: ["app", "users", "email_index"],
         transaction: transaction
     )
@@ -209,13 +209,14 @@ try await engine.withTransaction { transaction in
 }
 ```
 
-- **FDB**: `FDBDirectoryService` — dynamic prefix allocation via DirectoryLayer with HCA
-- **SQLite / InMemory**: `StaticDirectoryService` — deterministic Tuple encoding; namespace enumeration and removal are explicitly unsupported
+- **FDB**: a persistent namespace registry resolves paths and also exposes `NamespaceCatalog` for enumeration and removal.
+- **SQLite / InMemory / PostgreSQL**: `DeterministicNamespaceResolver` maps every valid path directly to a `Subspace` and does not expose a catalog.
 
-Every `DirectoryService` operation receives the caller-owned transaction. The
-one-shot `StorageEngine` helpers create a transaction for convenience; use the
-transaction-aware service API whenever namespace metadata and data mutations
-must commit atomically.
+Every resolver and catalog operation receives the caller-owned transaction.
+The one-shot `StorageEngine` helpers create a transaction for convenience; use
+the transaction-aware capability whenever namespace metadata and data mutations
+must commit atomically. Catalog absence is represented by `nil`, rather than by
+methods that exist only to throw unsupported-operation errors.
 
 ### Physical Compaction
 
@@ -237,7 +238,8 @@ never treated as a successful no-op.
 │  │ Engine   │  │Transaction │  │ Tuple Layer          │ │
 │  │ Protocol │  │ Protocol   │  │ Tuple, Subspace,     │ │
 │  │          │  │            │  │ KeySelector,         │ │
-│  │          │  │            │  │ DirectoryService     │ │
+│  │          │  │            │  │ NamespaceResolver    │ │
+│  │          │  │            │  │ NamespaceCatalog?    │ │
 │  └──────────┘  └────────────┘  └──────────────────────┘ │
 ├─────────────┬───────────────┬───────────────────────────┤
 │  InMemory   │ SQLiteStorage │ FDBStorage │ Cloudflare DO │

@@ -938,18 +938,18 @@ struct PostgreSQLStorageTests {
     }
 
     // =========================================================================
-    // MARK: - DirectoryService
+    // MARK: - Namespace resolution
     // =========================================================================
 
-    @Test func directoryServiceIsStatic() async throws {
+    @Test func namespaceResolutionIsDeterministic() async throws {
         let engine = try await makeEngine()
         defer { engine.shutdown() }
 
-        let subspace1 = try await engine.createOrOpenDirectory(path: ["app", "users"])
-        let subspace2 = try await engine.createOrOpenDirectory(path: ["app", "users"])
+        let subspace1 = try await engine.resolveOrCreateNamespace(path: ["app", "users"])
+        let subspace2 = try await engine.resolveExistingNamespace(path: ["app", "users"])
         #expect(subspace1 == subspace2)
 
-        let exists = try await engine.directoryExists(path: ["app", "users"])
+        let exists = try await engine.namespaceExists(path: ["app", "users"])
         #expect(exists == true)
     }
 

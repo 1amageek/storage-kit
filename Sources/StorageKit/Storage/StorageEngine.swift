@@ -27,14 +27,12 @@ public protocol StorageEngine: Sendable {
     /// Create a new transaction.
     func createTransaction() throws -> TransactionType
 
-    /// Hierarchical namespace management service.
-    ///
-    /// Higher-level frameworks (e.g. database-kit) call this property to resolve
-    /// model directory paths into `Subspace` instances, regardless of the backend.
-    ///
-    /// - FDB: `FDBDirectoryService` — dynamic prefix allocation via DirectoryLayer.
-    /// - SQLite / InMemory: `StaticDirectoryService` — deterministic Tuple encoding.
-    var directoryService: any DirectoryService { get }
+    /// Hierarchical namespace resolution capability.
+    var namespaceResolver: any NamespaceResolver { get }
+
+    /// Administrative namespace catalog when the backend stores independent
+    /// namespace metadata.
+    var namespaceCatalog: (any NamespaceCatalog)? { get }
 
     /// Monotonic clock used for deadlines, retry backoff, and throttling.
     var monotonicClock: any StorageMonotonicClock { get }
@@ -45,16 +43,19 @@ public protocol StorageEngine: Sendable {
     /// Implementations should be idempotent (safe to call multiple times).
     /// Default implementation is a no-op.
     func shutdown()
-
 }
 
 extension StorageEngine {
-    /// Default: `StaticDirectoryService`.
+    /// Default deterministic namespace resolution.
     ///
     /// Non-FDB backends use this default. The deterministic Tuple encoding
-    /// ensures that callers (e.g. database-kit) can resolve directory paths
+    /// ensures that callers such as database-framework can resolve namespace paths
     /// without backend-specific logic.
-    public var directoryService: any DirectoryService { StaticDirectoryService() }
+    public var namespaceResolver: any NamespaceResolver {
+        DeterministicNamespaceResolver()
+    }
+
+    public var namespaceCatalog: (any NamespaceCatalog)? { nil }
 
     public var monotonicClock: any StorageMonotonicClock {
         SystemStorageClock()
@@ -62,54 +63,66 @@ extension StorageEngine {
 
     public func shutdown() {}
 
-    /// Resolve a directory in a one-shot transaction.
+    /// Resolve or create a namespace in a one-shot transaction.
     ///
     /// Application write paths that already own a transaction must call the
-    /// transaction-aware `DirectoryService` API directly so namespace metadata
+    /// transaction-aware `NamespaceResolver` API directly so namespace metadata
     /// shares their commit boundary.
-    public func createOrOpenDirectory(path: [String]) async throws -> Subspace {
+    public func resolveOrCreateNamespace(path: [String]) async throws -> Subspace {
         try await withTransaction { transaction in
-            try await directoryService.createOrOpen(
+            try await namespaceResolver.resolveOrCreate(
                 path: path,
                 transaction: transaction
             )
         }
     }
 
-    /// Open a directory in a one-shot transaction.
-    public func openDirectory(path: [String]) async throws -> Subspace {
+    /// Resolve an existing namespace in a one-shot transaction.
+    public func resolveExistingNamespace(path: [String]) async throws -> Subspace {
         try await withTransaction { transaction in
-            try await directoryService.open(
+            try await namespaceResolver.resolveExisting(
                 path: path,
                 transaction: transaction
             )
         }
     }
 
-    /// List directories in a one-shot transaction.
-    public func listDirectories(path: [String]) async throws -> [String] {
-        try await withTransaction { transaction in
-            try await directoryService.list(
+    /// List child namespaces in a one-shot transaction.
+    public func listNamespaces(path: [String]) async throws -> [String] {
+        guard let namespaceCatalog else {
+            throw StorageError.unsupportedOperation(
+                "This storage backend does not maintain a namespace catalog",
+                operation: .read
+            )
+        }
+        return try await withTransaction { transaction in
+            return try await namespaceCatalog.listNamespaces(
                 path: path,
                 transaction: transaction
             )
         }
     }
 
-    /// Remove a directory in a one-shot transaction.
-    public func removeDirectory(path: [String]) async throws {
+    /// Remove a namespace in a one-shot transaction.
+    public func removeNamespace(path: [String]) async throws {
+        guard let namespaceCatalog else {
+            throw StorageError.unsupportedOperation(
+                "This storage backend does not maintain a namespace catalog",
+                operation: .delete
+            )
+        }
         try await withTransaction { transaction in
-            try await directoryService.remove(
+            try await namespaceCatalog.removeNamespace(
                 path: path,
                 transaction: transaction
             )
         }
     }
 
-    /// Test directory existence in a one-shot transaction.
-    public func directoryExists(path: [String]) async throws -> Bool {
+    /// Test namespace existence in a one-shot transaction.
+    public func namespaceExists(path: [String]) async throws -> Bool {
         try await withTransaction { transaction in
-            try await directoryService.exists(
+            try await namespaceResolver.namespaceExists(
                 path: path,
                 transaction: transaction
             )

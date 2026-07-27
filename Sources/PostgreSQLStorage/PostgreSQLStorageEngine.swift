@@ -234,7 +234,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         }
     }
 
-    // DirectoryService: uses StaticDirectoryService (default from protocol extension).
+    // Namespace resolution uses the deterministic default implementation.
 
     public func shutdown() {
         runTask.withLock { task in
