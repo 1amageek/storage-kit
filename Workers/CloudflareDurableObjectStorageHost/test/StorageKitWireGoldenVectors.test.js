@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
+import { StorageKitWire } from "../src/StorageKitWire.js";
 import {
   mutationType,
   operation,
@@ -17,12 +17,12 @@ const vectors = JSON.parse(readFileSync(fileURLToPath(fixtureURL), "utf8"));
 const scope = Object.freeze({ databaseID: "main", tenantID: null, workspaceID: null });
 
 test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
-  assert.equal(hex(StorageKitWireCodec.encodeRequest({
+  assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.readiness,
     scope,
   })), vectors.readinessRequest);
 
-  assert.equal(hex(StorageKitWireCodec.encodeRequest({
+  assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.range,
     scope,
     begin: null,
@@ -34,7 +34,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
     cursorKey: bytes(0xFF),
   })), vectors.rangeRequest);
 
-  assert.equal(hex(StorageKitWireCodec.encodeRequest({
+  assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.commit,
     scope,
     observedReadVersion: 7n,
@@ -51,7 +51,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
     ],
   })), vectors.commitRequest);
 
-  assert.equal(hex(StorageKitWireCodec.encodeRequest({
+  assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.commit,
     scope,
     observedReadVersion: 8n,
@@ -73,7 +73,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
     writeConflictRanges: [],
   })), vectors.versionstampedCommitRequest);
 
-  assert.equal(hex(StorageKitWireCodec.encodeResponse({
+  assert.equal(hex(StorageKitWire.encodeResponse({
     status: statusCode.ok,
     operation: operation.range,
     rows: [
@@ -88,7 +88,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
     ],
   })), vectors.rangeResponse);
 
-  assert.equal(hex(StorageKitWireCodec.encodeRequest({
+  assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.rangeSize,
     scope,
     begin: bytes(0x01),
@@ -96,14 +96,14 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
     expectedReadVersion: 7n,
   })), vectors.rangeSizeRequest);
 
-  assert.equal(hex(StorageKitWireCodec.encodeResponse({
+  assert.equal(hex(StorageKitWire.encodeResponse({
     status: statusCode.ok,
     operation: operation.rangeSize,
     byteCount: 11n,
     currentCommitVersion: 8n,
   })), vectors.rangeSizeResponse);
 
-  assert.equal(hex(StorageKitWireCodec.encodeRequest({
+  assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.rangeSplitPoints,
     scope,
     begin: bytes(0x01),
@@ -112,7 +112,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
     expectedReadVersion: 7n,
   })), vectors.rangeSplitPointsRequest);
 
-  assert.equal(hex(StorageKitWireCodec.encodeResponse({
+  assert.equal(hex(StorageKitWire.encodeResponse({
     status: statusCode.ok,
     operation: operation.rangeSplitPoints,
     splitPoints: [bytes(0x01), bytes(0x03), bytes(0x04)],
@@ -120,11 +120,11 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
   })), vectors.rangeSplitPointsResponse);
 
   assert.equal(
-    hex(StorageKitWireCodec.encodeFailure(statusCode.transactionConflict, "conflict")),
+    hex(StorageKitWire.encodeFailure(statusCode.transactionConflict, "conflict")),
     vectors.failureResponse
   );
   assert.equal(
-    hex(StorageKitWireCodec.encodeFailure(
+    hex(StorageKitWire.encodeFailure(
       statusCode.backendContractViolation,
       "sqlite cursor contract"
     )),
@@ -143,7 +143,7 @@ test("JavaScript decoder reencodes every canonical vector", () => {
   ]) {
     const encoded = fromHex(vectors[name]);
     assert.deepEqual(
-      StorageKitWireCodec.encodeRequest(StorageKitWireCodec.decodeRequest(encoded)),
+      StorageKitWire.encodeRequest(StorageKitWire.decodeRequest(encoded)),
       encoded
     );
   }
@@ -156,7 +156,7 @@ test("JavaScript decoder reencodes every canonical vector", () => {
   ]) {
     const encoded = fromHex(vectors[name]);
     assert.deepEqual(
-      StorageKitWireCodec.encodeResponse(StorageKitWireCodec.decodeResponse(encoded)),
+      StorageKitWire.encodeResponse(StorageKitWire.decodeResponse(encoded)),
       encoded
     );
   }
@@ -169,11 +169,11 @@ test("shared invalid success frame is rejected", () => {
     "invalidEmptyRangeContinuation",
   ]) {
     assert.throws(
-      () => StorageKitWireCodec.decodeResponse(fromHex(vectors[name]))
+      () => StorageKitWire.decodeResponse(fromHex(vectors[name]))
     );
   }
   assert.throws(
-    () => StorageKitWireCodec.decodeRequest(
+    () => StorageKitWire.decodeRequest(
       fromHex(vectors.invalidUnknownAtomicMutation)
     )
   );
@@ -185,7 +185,7 @@ test("range cursor decoding borrows the canonical request buffer", () => {
   backing.set(encoded, 1);
   const frame = backing.subarray(1, backing.byteLength - 1);
 
-  const request = StorageKitWireCodec.decodeRequest(frame);
+  const request = StorageKitWire.decodeRequest(frame);
 
   assert.deepEqual([...request.cursorKey], [0xFF]);
   assert.strictEqual(request.cursorKey.buffer, backing.buffer);
@@ -193,7 +193,7 @@ test("range cursor decoding borrows the canonical request buffer", () => {
 
 test("range response encoder rejects an empty continuation page", () => {
   assert.throws(
-    () => StorageKitWireCodec.encodeResponse({
+    () => StorageKitWire.encodeResponse({
       status: statusCode.ok,
       operation: operation.range,
       rows: [],
@@ -206,7 +206,7 @@ test("range response encoder rejects an empty continuation page", () => {
 });
 
 test("JavaScript encoder rejects unknown atomic mutation types", () => {
-  assert.throws(() => StorageKitWireCodec.encodeRequest({
+  assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.commit,
     scope,
     observedReadVersion: 0n,

@@ -14,7 +14,7 @@ import {
 import { TestStorageRequestAuthorizer } from "./TestStorageRequestAuthorizer.js";
 import { nameForScope } from "../../src/StorageKitScope.js";
 import { statusCode } from "../../src/StorageKitWireConstants.js";
-import { StorageKitWireCodec } from "../../src/StorageKitWireCodec.js";
+import { StorageKitWire } from "../../src/StorageKitWire.js";
 
 const durableObjectBindingName = "STORAGEKIT_DURABLE_OBJECT";
 
@@ -61,9 +61,9 @@ export async function handleTestStorageRequest(request, env) {
   }
   let decodedRequest;
   try {
-    decodedRequest = StorageKitWireCodec.decodeRoutingScope(requestBytes);
+    decodedRequest = StorageKitWire.decodeRoutingScope(requestBytes);
   } catch (error) {
-    return storageWireResponse(StorageKitWireCodec.encodeFailure(
+    return storageWireResponse(StorageKitWire.encodeFailure(
       statusCode.invalidOperation,
       errorMessage(error)
     ));
@@ -71,7 +71,7 @@ export async function handleTestStorageRequest(request, env) {
 
   const namespace = env?.[durableObjectBindingName];
   if (namespace === undefined || namespace === null) {
-    return storageWireResponse(StorageKitWireCodec.encodeFailure(
+    return storageWireResponse(StorageKitWire.encodeFailure(
       statusCode.resourceUnavailable,
       "Cloudflare Durable Object binding is not configured"
     ));
@@ -83,7 +83,7 @@ export async function handleTestStorageRequest(request, env) {
     const id = namespace.idFromName(durableObjectName);
     stub = namespace.get(id);
   } catch (error) {
-    return storageWireResponse(StorageKitWireCodec.encodeFailure(
+    return storageWireResponse(StorageKitWire.encodeFailure(
       statusCode.invalidOperation,
       errorMessage(error)
     ));

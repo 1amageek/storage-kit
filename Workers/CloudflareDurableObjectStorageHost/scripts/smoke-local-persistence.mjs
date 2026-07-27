@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { randomBytes } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
+import { StorageKitWire } from "../src/StorageKitWire.js";
 import {
   operation,
   statusCode,
@@ -124,10 +124,10 @@ async function send(request) {
       accept: "application/octet-stream",
       authorization: `Bearer ${accessToken}`,
     },
-    body: StorageKitWireCodec.encodeRequest(request),
+    body: StorageKitWire.encodeRequest(request),
   });
   assert.equal(response.status, 200);
-  return StorageKitWireCodec.decodeResponse(new Uint8Array(await response.arrayBuffer()));
+  return StorageKitWire.decodeResponse(new Uint8Array(await response.arrayBuffer()));
 }
 
 function expectOk(response) {

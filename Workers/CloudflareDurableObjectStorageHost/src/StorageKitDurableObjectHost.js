@@ -1,5 +1,5 @@
 import { StorageKitSQLiteStore } from "./StorageKitSQLiteStore.js";
-import { StorageKitWireCodec } from "./StorageKitWireCodec.js";
+import { StorageKitWire } from "./StorageKitWire.js";
 import { statusCode } from "./StorageKitWireConstants.js";
 import { StorageKitWireError } from "./StorageKitWireError.js";
 
@@ -14,11 +14,11 @@ export class StorageKitDurableObjectHost {
 
   dispatchBytes(bytes) {
     try {
-      const request = StorageKitWireCodec.decodeRequest(bytes);
+      const request = StorageKitWire.decodeRequest(bytes);
       const response = this.store.dispatch(request);
-      return StorageKitWireCodec.encodeResponse(response);
+      return StorageKitWire.encodeResponse(response);
     } catch (error) {
-      return StorageKitWireCodec.encodeFailure(statusForError(error), error.message);
+      return StorageKitWire.encodeFailure(statusForError(error), error.message);
     }
   }
 }

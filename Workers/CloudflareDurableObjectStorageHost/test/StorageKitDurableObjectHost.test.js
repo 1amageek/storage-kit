@@ -3,7 +3,7 @@ import test from "node:test";
 import { StorageKitWireWriter } from "../src/StorageKitWireWriter.js";
 import { StorageKitDurableObjectHost } from "../src/StorageKitDurableObjectHost.js";
 import { nameForScope } from "../src/StorageKitScope.js";
-import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
+import { StorageKitWire } from "../src/StorageKitWire.js";
 import { mutationType, operation, protocolVersion, statusCode } from "../src/StorageKitWireConstants.js";
 import { InMemorySQLiteStorage } from "./InMemorySQLiteStorage.js";
 
@@ -26,11 +26,11 @@ test("scope name encoding matches the StorageKit v1 canonical format", () => {
 
 test("host dispatch rejects trailing bytes as a typed failure", () => {
   const host = makeHost();
-  const bytes = StorageKitWireCodec.encodeRequest({
+  const bytes = StorageKitWire.encodeRequest({
     operation: operation.readiness,
     scope,
   });
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes([...bytes, 0xff]));
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes([...bytes, 0xff]));
   assert.equal(response.status, statusCode.invalidOperation);
   assert.match(response.message, /Trailing bytes/);
 });
@@ -43,7 +43,7 @@ test("host dispatch rejects invalid UTF-8 as a typed failure", () => {
   writer.writeBytes(new Uint8Array([0xff]));
   writer.writeBool(false);
   writer.writeBool(false);
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(writer.toBytes()));
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(writer.toBytes()));
   assert.equal(response.status, statusCode.invalidOperation);
   assert.match(response.message, /Invalid UTF-8/);
 });
@@ -59,14 +59,14 @@ test("host dispatch rejects invalid bool as a typed failure", () => {
   writer.writeBytes(bytes(0x01));
   writer.writeUInt8(2);
   writer.writeBool(false);
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(writer.toBytes()));
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(writer.toBytes()));
   assert.equal(response.status, statusCode.invalidOperation);
   assert.match(response.message, /Invalid bool/);
 });
 
 test("host dispatch rejects removed operation 7 as a typed failure", () => {
   const host = makeHost();
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(new Uint8Array([
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(new Uint8Array([
     protocolVersion,
     0x07,
   ])));
@@ -99,7 +99,7 @@ test("migration and CRUD do not depend on unavailable SQLite PRAGMAs", () => {
 
 test("response decoder rejects an unknown status", () => {
   assert.throws(
-    () => StorageKitWireCodec.decodeResponse(new Uint8Array([protocolVersion, 0xff])),
+    () => StorageKitWire.decodeResponse(new Uint8Array([protocolVersion, 0xff])),
     /Unknown status/
   );
 });
@@ -115,13 +115,13 @@ test("request decoder rejects oversized collections before reading elements", ()
   writer.writeUInt32(1_001);
 
   const host = makeHost();
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(writer.toBytes()));
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(writer.toBytes()));
   assert.equal(response.status, statusCode.invalidOperation);
   assert.match(response.message, /Mutation count/);
 });
 
 test("request encoder rejects oversized keys and values", () => {
-  assert.throws(() => StorageKitWireCodec.encodeRequest({
+  assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.read,
     scope,
     key: new Uint8Array(1_025),
@@ -129,7 +129,7 @@ test("request encoder rejects oversized keys and values", () => {
     expectedReadVersion: null,
   }), /Key bytes/);
 
-  assert.throws(() => StorageKitWireCodec.encodeRequest({
+  assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.commit,
     scope,
     observedReadVersion: null,
@@ -141,7 +141,7 @@ test("request encoder rejects oversized keys and values", () => {
 
 test("host dispatch rejects an oversized raw range cursor as a typed failure", () => {
   const host = makeHost();
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(rawRangeRequestWithCursor(
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(rawRangeRequestWithCursor(
     new Uint8Array(1_025),
     {
       operation: operation.range,
@@ -359,9 +359,9 @@ test("failed mutation batch rolls back values versions and conflict history", ()
   );
   host.migrate();
 
-  const response = StorageKitWireCodec.decodeResponse(
+  const response = StorageKitWire.decodeResponse(
     host.dispatchBytes(
-      StorageKitWireCodec.encodeRequest({
+      StorageKitWire.encodeRequest({
         operation: operation.commit,
         scope,
         observedReadVersion: 0n,
@@ -457,14 +457,14 @@ test("range metric requests reject invalid bounds chunk sizes and stale versions
     ],
   });
 
-  assert.throws(() => StorageKitWireCodec.encodeRequest({
+  assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.rangeSize,
     scope,
     begin: bytes(0x02),
     end: bytes(0x01),
     expectedReadVersion: 1n,
   }), /not ordered/);
-  assert.throws(() => StorageKitWireCodec.encodeRequest({
+  assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.rangeSplitPoints,
     scope,
     begin: bytes(0x01),
@@ -473,8 +473,8 @@ test("range metric requests reject invalid bounds chunk sizes and stale versions
     expectedReadVersion: 1n,
   }), /positive/);
 
-  const stale = StorageKitWireCodec.decodeResponse(host.dispatchBytes(
-    StorageKitWireCodec.encodeRequest({
+  const stale = StorageKitWire.decodeResponse(host.dispatchBytes(
+    StorageKitWire.encodeRequest({
       operation: operation.rangeSize,
       scope,
       begin: bytes(0x01),
@@ -494,7 +494,7 @@ test("range size response decoder rejects negative byte counts", () => {
   writer.writeInt64(0n);
 
   assert.throws(
-    () => StorageKitWireCodec.decodeResponse(writer.toBytes()),
+    () => StorageKitWire.decodeResponse(writer.toBytes()),
     /Range byte count must be a non-negative Int64/
   );
 });
@@ -517,7 +517,7 @@ test("range split response decoder rejects invalid point ordering", () => {
 
   for (const item of cases) {
     assert.throws(
-      () => StorageKitWireCodec.decodeResponse(rawSplitPointsResponse(item.points)),
+      () => StorageKitWire.decodeResponse(rawSplitPointsResponse(item.points)),
       item.message
     );
   }
@@ -531,7 +531,7 @@ test("range split response decoder rejects oversized count before element decode
   writer.writeUInt32(10_001);
 
   assert.throws(
-    () => StorageKitWireCodec.decodeResponse(writer.toBytes()),
+    () => StorageKitWire.decodeResponse(writer.toBytes()),
     /Split point count exceeds the configured limit of 10000/
   );
 });
@@ -544,7 +544,7 @@ test("range split response decoder rejects a truncated point collection", () => 
   writer.writeUInt32(1);
 
   assert.throws(
-    () => StorageKitWireCodec.decodeResponse(writer.toBytes()),
+    () => StorageKitWire.decodeResponse(writer.toBytes()),
     /Truncated StorageKit Wire frame/
   );
 });
@@ -582,10 +582,10 @@ test("range metric dispatch rejects raw zero chunks and reversed bounds", () => 
 
   for (const item of cases) {
     assert.throws(
-      () => StorageKitWireCodec.decodeRequest(item.request),
+      () => StorageKitWire.decodeRequest(item.request),
       item.message
     );
-    const response = StorageKitWireCodec.decodeResponse(
+    const response = StorageKitWire.decodeResponse(
       host.dispatchBytes(item.request)
     );
     assert.equal(response.status, statusCode.invalidOperation);
@@ -643,8 +643,8 @@ test("snapshot reads still enforce a pinned read version", () => {
     ],
   });
 
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(
-    StorageKitWireCodec.encodeRequest({
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(
+    StorageKitWire.encodeRequest({
       operation: operation.read,
       scope,
       key: bytes(0x01),
@@ -657,8 +657,8 @@ test("snapshot reads still enforce a pinned read version", () => {
 
 test("commit rejects future versions and read conflicts without a version", () => {
   const host = makeHost();
-  let response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(
-    StorageKitWireCodec.encodeRequest({
+  let response = StorageKitWire.decodeResponse(host.dispatchBytes(
+    StorageKitWire.encodeRequest({
       operation: operation.commit,
       scope,
       observedReadVersion: 1n,
@@ -670,8 +670,8 @@ test("commit rejects future versions and read conflicts without a version", () =
   ));
   assert.equal(response.status, statusCode.transactionConflict);
 
-  response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(
-    StorageKitWireCodec.encodeRequest({
+  response = StorageKitWire.decodeResponse(host.dispatchBytes(
+    StorageKitWire.encodeRequest({
       operation: operation.commit,
       scope,
       observedReadVersion: null,
@@ -701,8 +701,8 @@ test("empty commit validates reads without advancing the commit version", () => 
 test("one Durable Object rejects a different persisted scope", () => {
   const host = makeHost();
   send(host, { operation: operation.readiness, scope });
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(
-    StorageKitWireCodec.encodeRequest({
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(
+    StorageKitWire.encodeRequest({
       operation: operation.readiness,
       scope: { databaseID: "other", tenantID: null, workspaceID: null },
     })
@@ -731,7 +731,7 @@ test("non-snapshot read conflict range detects conflicting commit", () => {
     ],
   });
 
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(StorageKitWireCodec.encodeRequest({
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(StorageKitWire.encodeRequest({
     operation: operation.commit,
     scope,
     observedReadVersion: firstRead.currentCommitVersion,
@@ -782,7 +782,7 @@ test("range read conflict range catches inserts into selector gaps", () => {
     readConflictRanges: [],
   });
 
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(StorageKitWireCodec.encodeRequest({
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(StorageKitWire.encodeRequest({
     operation: operation.commit,
     scope,
     observedReadVersion: rangeRead.currentCommitVersion,
@@ -826,8 +826,8 @@ test("selector dependency conflicts when begin and end collapse on an inserted k
       { tag: 1, key: bytes(0x03), value: bytes(3) },
     ],
   });
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(
-    StorageKitWireCodec.encodeRequest({
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(
+    StorageKitWire.encodeRequest({
       operation: operation.commit,
       scope,
       observedReadVersion: rangeRead.currentCommitVersion,
@@ -925,7 +925,7 @@ test("range read conflict range includes exact key for firstGreaterThan end sele
     readConflictRanges: [],
   });
 
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(StorageKitWireCodec.encodeRequest({
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(StorageKitWire.encodeRequest({
     operation: operation.commit,
     scope,
     observedReadVersion: rangeRead.currentCommitVersion,
@@ -964,7 +964,7 @@ test("old conflict entries are pruned and stale readers conflict", () => {
   const rows = sql.exec("SELECT COUNT(*) AS count FROM storagekit_conflicts");
   assert.ok(rows[0].count <= 4096);
 
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(StorageKitWireCodec.encodeRequest({
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(StorageKitWire.encodeRequest({
     operation: operation.commit,
     scope,
     observedReadVersion: initialRead.currentCommitVersion,
@@ -1139,8 +1139,8 @@ function makeHost() {
 }
 
 function send(host, request) {
-  const bytes = StorageKitWireCodec.encodeRequest(request);
-  const response = StorageKitWireCodec.decodeResponse(host.dispatchBytes(bytes));
+  const bytes = StorageKitWire.encodeRequest(request);
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(bytes));
   if (response.status !== statusCode.ok) {
     throw new Error(response.message);
   }
@@ -1171,7 +1171,7 @@ function read(host, key) {
 }
 
 function rawRangeRequestWithCursor(cursor, request) {
-  const encoded = StorageKitWireCodec.encodeRequest(request);
+  const encoded = StorageKitWire.encodeRequest(request);
   assert.equal(encoded[encoded.byteLength - 1], 0);
   const result = new Uint8Array(
     encoded.byteLength - 1 + 1 + 4 + cursor.byteLength

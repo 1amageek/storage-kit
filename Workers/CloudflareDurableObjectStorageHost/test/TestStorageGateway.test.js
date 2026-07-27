@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import worker from "./fixtures/TestStorageGateway.js";
 import { nameForScope } from "../src/StorageKitScope.js";
-import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
+import { StorageKitWire } from "../src/StorageKitWire.js";
 import { operation, statusCode } from "../src/StorageKitWireConstants.js";
 
 const accessToken = "storage-kit-test-token";
@@ -13,7 +13,7 @@ test("fixture routes StorageKit Wire requests to the Durable Object name derived
     tenantID: "tenant-a",
     workspaceID: "workspace-a",
   };
-  const requestBytes = StorageKitWireCodec.encodeRequest({
+  const requestBytes = StorageKitWire.encodeRequest({
     operation: operation.readiness,
     scope,
   });
@@ -35,7 +35,7 @@ test("fixture routes StorageKit Wire requests to the Durable Object name derived
         return {
           execute(requestBytes) {
             observedBody = requestBytes;
-            return StorageKitWireCodec.encodeResponse({
+            return StorageKitWire.encodeResponse({
               status: statusCode.ok,
               operation: operation.readiness,
               schemaVersion: 1,
@@ -52,7 +52,7 @@ test("fixture routes StorageKit Wire requests to the Durable Object name derived
   assert.deepEqual([...observedBody], [...requestBytes]);
   assert.equal(response.headers.get("content-type"), "application/octet-stream");
 
-  const decodedResponse = StorageKitWireCodec.decodeResponse(new Uint8Array(await response.arrayBuffer()));
+  const decodedResponse = StorageKitWire.decodeResponse(new Uint8Array(await response.arrayBuffer()));
   assert.equal(decodedResponse.status, statusCode.ok);
   assert.equal(decodedResponse.operation, operation.readiness);
 });
@@ -74,7 +74,7 @@ test("fixture returns a typed failure when routing cannot decode scope", async (
     },
   });
 
-  const decodedResponse = StorageKitWireCodec.decodeResponse(new Uint8Array(await response.arrayBuffer()));
+  const decodedResponse = StorageKitWire.decodeResponse(new Uint8Array(await response.arrayBuffer()));
   assert.equal(decodedResponse.status, statusCode.invalidOperation);
 });
 
@@ -98,7 +98,7 @@ test("fixture rejects removed operation 7 before Durable Object routing", async 
     },
   });
 
-  const decodedResponse = StorageKitWireCodec.decodeResponse(
+  const decodedResponse = StorageKitWire.decodeResponse(
     new Uint8Array(await response.arrayBuffer())
   );
   assert.equal(decodedResponse.status, statusCode.invalidOperation);
@@ -107,7 +107,7 @@ test("fixture rejects removed operation 7 before Durable Object routing", async 
 });
 
 test("fixture decodes only routing scope before Durable Object dispatch", async () => {
-  const validPrefix = StorageKitWireCodec.encodeRequest({
+  const validPrefix = StorageKitWire.encodeRequest({
     operation: operation.readiness,
     scope: {
       databaseID: "main",
@@ -134,7 +134,7 @@ test("fixture decodes only routing scope before Durable Object dispatch", async 
         return {
           execute() {
             forwarded = true;
-            return StorageKitWireCodec.encodeFailure(
+            return StorageKitWire.encodeFailure(
               statusCode.invalidOperation,
               "Trailing bytes"
             );
@@ -148,7 +148,7 @@ test("fixture decodes only routing scope before Durable Object dispatch", async 
 });
 
 test("fixture returns a typed failure when the Durable Object binding is absent", async () => {
-  const requestBytes = StorageKitWireCodec.encodeRequest({
+  const requestBytes = StorageKitWire.encodeRequest({
     operation: operation.readiness,
     scope: {
       databaseID: "main",
@@ -165,7 +165,7 @@ test("fixture returns a typed failure when the Durable Object binding is absent"
     STORAGEKIT_ACCESS_TOKEN: accessToken,
   });
 
-  const decodedResponse = StorageKitWireCodec.decodeResponse(new Uint8Array(await response.arrayBuffer()));
+  const decodedResponse = StorageKitWire.decodeResponse(new Uint8Array(await response.arrayBuffer()));
   assert.equal(decodedResponse.status, statusCode.resourceUnavailable);
 });
 

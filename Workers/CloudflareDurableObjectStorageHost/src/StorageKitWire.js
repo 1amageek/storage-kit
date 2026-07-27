@@ -11,7 +11,7 @@ import {
 import { StorageKitWireError } from "./StorageKitWireError.js";
 import { storageKitWireLimits } from "./StorageKitWireLimits.js";
 
-export class StorageKitWireCodec {
+export class StorageKitWire {
   static decodeRoutingScope(bytes) {
     const reader = new StorageKitWireReader(bytes);
     const version = reader.readUInt8();

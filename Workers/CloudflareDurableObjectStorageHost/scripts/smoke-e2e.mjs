@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { StorageKitWireCodec } from "../src/StorageKitWireCodec.js";
+import { StorageKitWire } from "../src/StorageKitWire.js";
 import {
   mutationType,
   operation,
@@ -96,7 +96,7 @@ async function smokeHttpGuards() {
       "content-type": "application/octet-stream",
       accept: "application/octet-stream",
     },
-    body: StorageKitWireCodec.encodeRequest({
+    body: StorageKitWire.encodeRequest({
       operation: operation.readiness,
       scope: scope("unauthorized"),
     }),
@@ -530,7 +530,7 @@ async function smokeTypedBadRequest() {
     body: new Uint8Array([0xff]),
   });
   assert.equal(httpResponse.status, 200);
-  const response = StorageKitWireCodec.decodeResponse(new Uint8Array(await httpResponse.arrayBuffer()));
+  const response = StorageKitWire.decodeResponse(new Uint8Array(await httpResponse.arrayBuffer()));
   assert.equal(response.status, statusCode.invalidOperation);
 }
 
@@ -542,10 +542,10 @@ async function send(request) {
       accept: "application/octet-stream",
       authorization: `Bearer ${accessToken}`,
     },
-    body: StorageKitWireCodec.encodeRequest(request),
+    body: StorageKitWire.encodeRequest(request),
   });
   assert.equal(response.status, 200);
-  return StorageKitWireCodec.decodeResponse(new Uint8Array(await response.arrayBuffer()));
+  return StorageKitWire.decodeResponse(new Uint8Array(await response.arrayBuffer()));
 }
 
 function expectOk(response) {
