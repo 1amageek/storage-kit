@@ -122,10 +122,12 @@ extension Int64: TupleElement {
     }
 
     private static func byteCount(for value: UInt64) -> Int {
-        for (i, limit) in sizeLimits.enumerated() {
-            if value <= limit {
-                return i + 1
+        var index = 0
+        while index < sizeLimits.count {
+            if value <= sizeLimits[index] {
+                return index + 1
             }
+            index += 1
         }
         return 8
     }
@@ -205,10 +207,12 @@ extension UInt64: TupleElement {
     }
 
     private func byteCount(for value: UInt64) -> Int {
-        for (i, limit) in sizeLimits.enumerated() {
-            if value <= limit {
-                return i + 1
+        var index = 0
+        while index < sizeLimits.count {
+            if value <= sizeLimits[index] {
+                return index + 1
             }
+            index += 1
         }
         return 8
     }
