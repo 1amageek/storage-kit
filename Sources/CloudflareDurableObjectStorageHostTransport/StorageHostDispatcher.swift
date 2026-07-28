@@ -3,16 +3,19 @@ import CloudflareDurableObjectStorageWire
 
 #if arch(wasm32)
 @_extern(wasm, module: "storage_host", name: "dispatch")
-private func requestStorageResponseFrame(
+private func dispatchStorageRequest(
     _ pointer: UInt32,
     _ length: UInt32
 ) -> UInt32
 
-@_extern(c, "database_dealloc")
-private func releaseStorageResponseFrame(
+@_extern(wasm, module: "storage_host", name: "receive")
+private func receiveStorageResponse(
     _ pointer: UInt32,
     _ length: UInt32
 )
+
+@_extern(wasm, module: "storage_host", name: "discard")
+private func discardStorageResponse()
 #endif
 
 public struct StorageHostDispatcher:
@@ -30,26 +33,34 @@ public struct StorageHostDispatcher:
         guard let requestLength = UInt32(exactly: requestBytes.count) else {
             throw StorageHostTransportError.requestLengthOverflow
         }
-        let framePointer = requestBytes.withUnsafeBytes { buffer in
+        let responseByteCount = requestBytes.withUnsafeBytes { buffer in
             let pointer = buffer.baseAddress.map {
                 UInt32(truncatingIfNeeded: UInt(bitPattern: $0))
             } ?? 0
-            return requestStorageResponseFrame(pointer, requestLength)
+            return dispatchStorageRequest(pointer, requestLength)
         }
-        guard framePointer != 0 else {
+        guard responseByteCount > 0 else {
             throw StorageHostTransportError.hostReturnedNoResponse
         }
-        return try StorageHostResponseFrame.adopt(
-            unsafeAddress: UInt(framePointer),
+        return try StorageHostResponse.receive(
+            byteCount: Int(responseByteCount),
             maximumResponseBytes: maximumResponseBytes,
-            deallocator: { address, count in
-                guard let pointer = UInt32(exactly: address),
-                      let byteCount = UInt32(exactly: count) else {
+            discard: {
+                discardStorageResponse()
+            },
+            copyInto: { destination in
+                guard let baseAddress = destination.baseAddress else {
                     preconditionFailure(
-                        "Storage response ownership exceeded the guest address space"
+                        "A nonempty storage response requires destination storage"
                     )
                 }
-                releaseStorageResponseFrame(pointer, byteCount)
+                let destinationAddress = UInt(bitPattern: baseAddress)
+                guard let pointer = UInt32(exactly: destinationAddress) else {
+                    preconditionFailure(
+                        "Storage response destination exceeded the guest address space"
+                    )
+                }
+                receiveStorageResponse(pointer, responseByteCount)
             }
         )
 #else

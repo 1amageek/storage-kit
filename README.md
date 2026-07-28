@@ -124,7 +124,7 @@ The Cloudflare backend is split by runtime boundary:
 | `CloudflareDurableObjectStorageWire` | Foundation-free StorageKit Wire v1 values, bounded encoding, and bounded decoding |
 | `CloudflareDurableObjectStorage` | `StorageEngine`, transaction state, and typed StorageKit Wire client |
 | `CloudflareDurableObjectStorageHTTP` | URLSession transport for native clients |
-| `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch` transport for a WASI reactor |
+| `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch/receive/discard` transport for a WASI reactor |
 
 `StorageKit` itself is Foundation-free. `StorageKitFoundation` supplies the
 explicit Foundation `Date` and `UUID` Tuple Layer adapters; canonical UUID tuple

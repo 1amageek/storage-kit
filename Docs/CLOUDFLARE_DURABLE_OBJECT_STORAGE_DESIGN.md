@@ -22,7 +22,7 @@ flowchart LR
     Router --> DO["Application Durable Object"]
 
     Reactor["Full database-framework WASI reactor"] --> HostTransport["CloudflareDurableObjectStorageHostTransport"]
-    HostTransport --> Import["storage_host.dispatch"]
+    HostTransport --> Import["storage_host.dispatch / receive / discard"]
     Import --> Store["StorageKitDurableObjectHost"]
 
     DO --> Store
@@ -52,7 +52,7 @@ must never leak into the public database API.
 | `CloudflareDurableObjectStorageWire` | DatabaseTypes | Foundation-free protocol tags, request/response values, resource limits, bounded encoding, and bounded decoding |
 | `CloudflareDurableObjectStorage` | StorageKit, StorageKitSystemClock, and storage wire | Standard-WASI `StorageEngine`, transaction state machine, read-your-writes overlay, and typed StorageKit Wire client |
 | `CloudflareDurableObjectStorageHTTP` | Foundation and URLSession | Native HTTP transport only |
-| `CloudflareDurableObjectStorageHostTransport` | Cloudflare storage and storage wire | Synchronous `storage_host.dispatch` transport for a standard WASI reactor |
+| `CloudflareDurableObjectStorageHostTransport` | Cloudflare storage and storage wire | Synchronous request dispatch and response transfer for a standard WASI reactor |
 
 `CloudflareDurableObjectStorageWire` and
 `CloudflareDurableObjectStorageHostTransport` are distinct products. Clients
@@ -387,12 +387,21 @@ database-framework reactor:
 
 ```text
 storage_host.dispatch(requestPointer: UInt32, requestLength: UInt32) -> UInt32
+storage_host.receive(responsePointer: UInt32, responseLength: UInt32) -> Void
+storage_host.discard() -> Void
 ```
 
-The result points to a length-prefixed response frame in guest linear memory.
-The app-specific reactor host owns the corresponding allocation contract and
-must prove the synchronous import, response ownership, maximum memory, and
-deallocation behavior in its reactor integration tests.
+`dispatch` borrows the request only for the call and returns the exact response
+length while retaining the independent host response. After the import
+returns, Swift allocates the final `ByteString` storage once and lends that
+destination to `receive`. `discard` releases a response rejected by Swift's
+size limit before allocation. The host must reject a second dispatch while a
+response is pending and must reject missing or length-mismatched receipt.
+
+The host never calls a reactor export while a storage import is active. This
+prevents allocator re-entry. The response crosses the JavaScript/WebAssembly
+ownership boundary with one required copy directly into final Swift storage;
+there is no intermediate guest frame or guest deallocation callback.
 
 This import is a storage boundary only. TypeScript does not interpret
 DatabaseWire or execute database-framework operations.
