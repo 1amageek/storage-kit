@@ -65,7 +65,9 @@ struct PostgreSQLStorageTests {
         let result = try await engine.withTransaction { tx in
             try await tx.getValue(for: key)
         }
-        #expect(result == value)
+        let storedValue = try #require(result)
+        #expect(storedValue == value)
+        #expect(storedValue.retainedByteCount == nil)
     }
 
     @Test func clearKey() async throws {

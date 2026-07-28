@@ -10,6 +10,9 @@ struct PostgreSQLResultBytesOwner: ByteStringOwner {
         buffer.readableBytes
     }
 
+    /// A readable region can share a larger PostgreSQL/NIO result allocation.
+    var retainedByteCount: Int? { nil }
+
     func borrowBytes(
         _ body: (UnsafeRawBufferPointer) throws -> Void
     ) rethrows {

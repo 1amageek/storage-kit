@@ -19,7 +19,7 @@ struct CloudflareDurableObjectHTTPResponseBodyTests {
         let bytes = body.bytes()
 
         #expect(try address(of: bytes) == address(of: data))
-        #expect(bytes.retainedByteCount == data.count)
+        #expect(bytes.retainedByteCount == nil)
         #expect(bytes.count == data.count)
         #expect(bytes.first == 0xa5)
     }
