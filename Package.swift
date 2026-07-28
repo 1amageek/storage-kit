@@ -29,11 +29,11 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/1amageek/database-types.git",
-            from: "26.0728.0"
+            from: "26.0728.2"
         ),
         .package(
             url: "https://github.com/1amageek/fdb-swift-bindings.git",
-            from: "0.3.2"
+            from: "0.3.3"
         ),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
     ],

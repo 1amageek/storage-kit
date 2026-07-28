@@ -35,7 +35,7 @@ struct CloudflareDurableObjectHTTPResponseBodyTests {
         let bytes = body.bytes()
 
         let detached = bytes.detached()
-        #expect(bytes.retainedByteCount == bytes.count)
+        #expect(try #require(bytes.retainedByteCount) >= bytes.count)
         #expect(try address(of: bytes) == address(of: detached))
         #expect(bytes == [1, 2, 3, 4, 5])
     }
