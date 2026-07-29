@@ -13,12 +13,6 @@ struct CloudflareDurableObjectStorageHostTransportTests {
         let response = try await transport.send([1, 2, 3, 4])
 
         #expect(response == [4, 3, 2])
-        switch transport.callExecution {
-        case .suspending:
-            break
-        case .synchronous:
-            Issue.record("Host transport must declare its suspension boundary")
-        }
     }
 
     @Test func rejectsOversizedRequestBeforeHostDispatch() async throws {

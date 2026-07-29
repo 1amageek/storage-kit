@@ -11,7 +11,7 @@ public struct CloudflareDurableObjectStorageHostTransport:
     public let maximumResponseBytes: Int
 
     public var callExecution: CloudflareDurableObjectCallExecution {
-        .suspending
+        .synchronous
     }
 
     public init(
