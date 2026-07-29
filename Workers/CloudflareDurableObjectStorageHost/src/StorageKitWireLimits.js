@@ -12,7 +12,7 @@ export const storageKitWireLimits = Object.freeze({
   // Database-level mutations expand into physical item and index writes.
   // maxFrameBytes remains the aggregate byte admission limit.
   maxMutationsPerCommit: 10_000,
-  maxConflictRangesPerCommit: 1_000,
+  maxConflictRangesPerCommit: 10_000,
   maxRangeLimit: 1_000,
   maxSplitPoints: 10_000,
   maxSelectorResolutionSteps: 10_000n,

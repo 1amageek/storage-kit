@@ -45,7 +45,8 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         try Self.validate(
             maxConflictRangesPerCommit,
             field: "maxConflictRangesPerCommit",
-            maximum: 1_000
+            maximum: StorageWireLimits.cloudflareDurableObject
+                .maxConflictRangesPerCommit
         )
         try Self.validate(
             maxRangeLimit,
@@ -86,7 +87,8 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         maxValueBytes: 1_048_576,
         maxMutationsPerCommit: StorageWireLimits.cloudflareDurableObject
             .maxMutationsPerCommit,
-        maxConflictRangesPerCommit: 1_000,
+        maxConflictRangesPerCommit: StorageWireLimits.cloudflareDurableObject
+            .maxConflictRangesPerCommit,
         maxRangeLimit: 1_000,
         maxSplitPoints: 10_000,
         maxSelectorResolutionSteps: 10_000,

@@ -140,6 +140,13 @@ test("wire accepts physical mutation batches above the former database-level cei
     StorageKitWire.encodeRequest(request),
   );
   assert.equal(decoded.mutations.length, request.mutations.length);
+
+  const host = makeHost();
+  const response = StorageKitWire.decodeResponse(
+    host.dispatchBytes(StorageKitWire.encodeRequest(request)),
+  );
+  assert.equal(response.status, statusCode.ok);
+  assert.equal(response.committedVersion, 1n);
 });
 
 test("request encoder rejects oversized keys and values", () => {

@@ -60,7 +60,7 @@ public struct StorageWireLimits: Sendable, Hashable {
             // mutations because one persisted model also maintains indexes.
             // The frame-size limit remains the aggregate byte bound.
             maxMutationsPerCommit: 10_000,
-            maxConflictRangesPerCommit: 1_000,
+            maxConflictRangesPerCommit: 10_000,
             maxRangeLimit: 1_000,
             maxSplitPoints: 10_000,
             maxFrameBytes: 16 * 1_024 * 1_024,
