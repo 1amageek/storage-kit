@@ -11,7 +11,7 @@ public struct CloudflareDurableObjectStorageHostTransport:
     public let maximumResponseBytes: Int
 
     public var callExecution: CloudflareDurableObjectCallExecution {
-        .synchronous
+        .suspending
     }
 
     public init(
@@ -50,6 +50,10 @@ public struct CloudflareDurableObjectStorageHostTransport:
                 maximum: maximumRequestBytes
             )
         }
+        // The synchronous WASM host import must begin from a fresh task turn.
+        // This keeps the host frame budget independent of the framework call
+        // depth that produced the StorageKit Wire request.
+        await Task.yield()
         let responseBytes = try dispatcher.dispatch(
             requestBytes,
             maximumResponseBytes: maximumResponseBytes

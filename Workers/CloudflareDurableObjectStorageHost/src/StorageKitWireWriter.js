@@ -1,6 +1,8 @@
 import { StorageKitWireError } from "./StorageKitWireError.js";
 import { storageKitWireLimits } from "./StorageKitWireLimits.js";
 
+const utf8Encoder = new TextEncoder();
+
 export class StorageKitWireWriter {
   constructor(
     maximumBytes = storageKitWireLimits.maxFrameBytes,
@@ -13,7 +15,6 @@ export class StorageKitWireWriter {
       ? null
       : new Uint8Array(Math.min(initialCapacity, maximumBytes));
     this.length = 0;
-    this.encoder = new TextEncoder();
   }
 
   static measuring(maximumBytes = storageKitWireLimits.maxFrameBytes) {
@@ -98,7 +99,7 @@ export class StorageKitWireWriter {
         this.length,
         this.length + byteLength
       );
-      const result = this.encoder.encodeInto(value, destination);
+      const result = utf8Encoder.encodeInto(value, destination);
       if (result.read !== value.length || result.written !== byteLength) {
         throw new Error("UTF-8 encoding length mismatch");
       }

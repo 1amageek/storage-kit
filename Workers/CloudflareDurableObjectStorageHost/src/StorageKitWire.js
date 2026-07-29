@@ -11,6 +11,8 @@ import {
 import { StorageKitWireError } from "./StorageKitWireError.js";
 import { storageKitWireLimits } from "./StorageKitWireLimits.js";
 
+const utf8Encoder = new TextEncoder();
+
 export class StorageKitWire {
   static decodeRoutingScope(bytes) {
     const reader = new StorageKitWireReader(bytes);
@@ -389,7 +391,7 @@ function writeOptionalString(
 ) {
   writer.writeBool(value !== null && value !== undefined);
   if (value !== null && value !== undefined) {
-    const byteLength = new TextEncoder().encode(value).byteLength;
+    const byteLength = utf8Encoder.encode(value).byteLength;
     if (byteLength > maximum) {
       throw StorageKitWireError.limitExceeded(field, maximum);
     }
@@ -795,8 +797,7 @@ function validateByteLength(value, maximum, field) {
 
 function boundedErrorMessage(message) {
   const value = typeof message === "string" ? message : "StorageKit host failure";
-  const encoder = new TextEncoder();
-  if (encoder.encode(value).byteLength <= storageKitWireLimits.maxErrorMessageBytes) {
+  if (utf8Encoder.encode(value).byteLength <= storageKitWireLimits.maxErrorMessageBytes) {
     return value;
   }
   return "StorageKit host failure exceeded the error message limit";

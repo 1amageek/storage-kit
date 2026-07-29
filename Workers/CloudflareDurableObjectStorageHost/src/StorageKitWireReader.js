@@ -1,6 +1,8 @@
 import { StorageKitWireError } from "./StorageKitWireError.js";
 import { storageKitWireLimits } from "./StorageKitWireLimits.js";
 
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
 export class StorageKitWireReader {
   constructor(bytes) {
     this.bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -11,7 +13,6 @@ export class StorageKitWireReader {
       );
     }
     this.offset = 0;
-    this.decoder = new TextDecoder("utf-8", { fatal: true });
   }
 
   ensureFullyRead() {
@@ -85,7 +86,7 @@ export class StorageKitWireReader {
   ) {
     const bytes = this.readBytes(maximum, field);
     try {
-      return this.decoder.decode(bytes);
+      return utf8Decoder.decode(bytes);
     } catch {
       throw StorageKitWireError.invalidUTF8();
     }

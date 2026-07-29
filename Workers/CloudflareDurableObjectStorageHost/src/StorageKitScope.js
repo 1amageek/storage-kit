@@ -2,6 +2,8 @@ import { encodeBase64URL } from "./StorageKitBase64URL.js";
 import { StorageKitWireError } from "./StorageKitWireError.js";
 import { storageKitWireLimits } from "./StorageKitWireLimits.js";
 
+const utf8Encoder = new TextEncoder();
+
 export function validateScope(scope) {
   validateComponent(scope.databaseID);
   if (scope.tenantID !== null) {
@@ -15,12 +17,11 @@ export function validateScope(scope) {
 
 export function nameForScope(scope) {
   validateScope(scope);
-  const encoder = new TextEncoder();
-  const database = encodeBase64URL(encoder.encode(scope.databaseID));
-  const tenant = scope.tenantID === null ? "_" : encodeBase64URL(encoder.encode(scope.tenantID));
-  const workspace = scope.workspaceID === null ? "_" : encodeBase64URL(encoder.encode(scope.workspaceID));
+  const database = encodeBase64URL(utf8Encoder.encode(scope.databaseID));
+  const tenant = scope.tenantID === null ? "_" : encodeBase64URL(utf8Encoder.encode(scope.tenantID));
+  const workspace = scope.workspaceID === null ? "_" : encodeBase64URL(utf8Encoder.encode(scope.workspaceID));
   const name = `storage-kit/cfdo/v1/database/${database}/tenant/${tenant}/workspace/${workspace}`;
-  if (encoder.encode(name).byteLength > storageKitWireLimits.maxCanonicalScopeNameBytes) {
+  if (utf8Encoder.encode(name).byteLength > storageKitWireLimits.maxCanonicalScopeNameBytes) {
     throw StorageKitWireError.limitExceeded(
       "Canonical storage scope name bytes",
       storageKitWireLimits.maxCanonicalScopeNameBytes
@@ -33,7 +34,7 @@ function validateComponent(value) {
   if (typeof value !== "string") {
     throw StorageKitWireError.invalidScope();
   }
-  if (new TextEncoder().encode(value).byteLength > storageKitWireLimits.maxScopeComponentBytes) {
+  if (utf8Encoder.encode(value).byteLength > storageKitWireLimits.maxScopeComponentBytes) {
     throw StorageKitWireError.limitExceeded(
       "Storage scope component bytes",
       storageKitWireLimits.maxScopeComponentBytes
