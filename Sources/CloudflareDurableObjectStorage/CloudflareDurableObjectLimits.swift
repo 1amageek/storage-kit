@@ -1,3 +1,5 @@
+import CloudflareDurableObjectStorageWire
+
 /// Configurable limits for Cloudflare Durable Object storage operations.
 public struct CloudflareDurableObjectLimits: Sendable, Hashable {
     public let maxKeyBytes: Int
@@ -37,7 +39,8 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         try Self.validate(
             maxMutationsPerCommit,
             field: "maxMutationsPerCommit",
-            maximum: 1_000
+            maximum: StorageWireLimits.cloudflareDurableObject
+                .maxMutationsPerCommit
         )
         try Self.validate(
             maxConflictRangesPerCommit,
@@ -81,7 +84,8 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         maxKeyBytes: 1_024,
         maxBoundaryBytes: 1_025,
         maxValueBytes: 1_048_576,
-        maxMutationsPerCommit: 1_000,
+        maxMutationsPerCommit: StorageWireLimits.cloudflareDurableObject
+            .maxMutationsPerCommit,
         maxConflictRangesPerCommit: 1_000,
         maxRangeLimit: 1_000,
         maxSplitPoints: 10_000,

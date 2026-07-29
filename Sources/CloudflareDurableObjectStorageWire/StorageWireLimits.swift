@@ -56,7 +56,10 @@ public struct StorageWireLimits: Sendable, Hashable {
             maxBoundaryBytes: 1_025,
             maxValueBytes: 1_048_576,
             maxVersionstampedValueOperandBytes: 1_048_580,
-            maxMutationsPerCommit: 1_000,
+            // Physical storage operations can outnumber logical database
+            // mutations because one persisted model also maintains indexes.
+            // The frame-size limit remains the aggregate byte bound.
+            maxMutationsPerCommit: 10_000,
             maxConflictRangesPerCommit: 1_000,
             maxRangeLimit: 1_000,
             maxSplitPoints: 10_000,

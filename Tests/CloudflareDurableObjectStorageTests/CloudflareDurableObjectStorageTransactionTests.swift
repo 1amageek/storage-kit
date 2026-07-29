@@ -10,6 +10,30 @@ import Testing
 
 @Suite("Cloudflare Durable Object Storage Transaction Tests")
 struct CloudflareDurableObjectStorageTransactionTests {
+    @Test func defaultLimitAllowsIndexExpandedMutationBatch() async throws {
+        let engine = try await makeEngine()
+        let mutationCount = 1_001
+
+        try await engine.withTransaction { transaction in
+            for index in 0..<mutationCount {
+                let key = ByteString([
+                    UInt8(truncatingIfNeeded: index >> 8),
+                    UInt8(truncatingIfNeeded: index),
+                ])
+                try transaction.setValue([0x01], for: key)
+            }
+        }
+
+        let finalKey = ByteString([
+            UInt8(truncatingIfNeeded: (mutationCount - 1) >> 8),
+            UInt8(truncatingIfNeeded: mutationCount - 1),
+        ])
+        let value = try await engine.withTransaction { transaction in
+            try await transaction.getValue(for: finalKey)
+        }
+        #expect(value == [0x01])
+    }
+
     @Test func nonzeroIndexKeyViewsPreserveRangeOrdering() async throws {
         let engine = try await makeEngine()
         let keySource: ByteString = [0xAA, 0x10, 0xBB]

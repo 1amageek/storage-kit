@@ -52,6 +52,47 @@ struct StorageWireValidationContractTests {
         }
     }
 
+    @Test func physicalMutationBatchAboveFormerLogicalCeilingRoundTrips() throws {
+        let mutationCount = 1_001
+        let request = StorageWireRequest.commit(
+            StorageWireCommitRequest(
+                scope: try StorageWireScope(databaseID: "main"),
+                observedReadVersion: nil,
+                mutations: Array(
+                    repeating: .clear(key: [0x01]),
+                    count: mutationCount
+                )
+            )
+        )
+
+        let decoded = try StorageWire.decodeRequest(
+            StorageWire.encode(request)
+        )
+        guard case .commit(let commit) = decoded else {
+            Issue.record("Expected a commit request")
+            return
+        }
+        #expect(commit.mutations.count == mutationCount)
+    }
+
+    @Test func mutationBatchAboveWireCeilingIsRejected() throws {
+        let limits = StorageWireLimits.cloudflareDurableObject
+        let request = StorageWireRequest.commit(
+            StorageWireCommitRequest(
+                scope: try StorageWireScope(databaseID: "main"),
+                observedReadVersion: nil,
+                mutations: Array(
+                    repeating: .clear(key: [0x01]),
+                    count: limits.maxMutationsPerCommit + 1
+                )
+            )
+        )
+
+        #expect(throws: StorageWireProtocolError.self) {
+            _ = try StorageWire.encode(request)
+        }
+    }
+
     @Test func oversizedKeyAndValueAreRejectedBeforeEncoding() throws {
         let limits = StorageWireLimits.cloudflareDurableObject
         let scope = try StorageWireScope(databaseID: "main")

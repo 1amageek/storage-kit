@@ -112,12 +112,34 @@ test("request decoder rejects oversized collections before reading elements", ()
   writer.writeBool(false);
   writer.writeBool(false);
   writer.writeBool(false);
-  writer.writeUInt32(1_001);
+  writer.writeUInt32(10_001);
 
   const host = makeHost();
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(writer.toBytes()));
   assert.equal(response.status, statusCode.invalidOperation);
   assert.match(response.message, /Mutation count/);
+});
+
+test("wire accepts physical mutation batches above the former database-level ceiling", () => {
+  const request = {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: Array.from(
+      { length: 1_001 },
+      (_, index) => ({
+        tag: 2,
+        key: bytes((index >>> 8) & 0xff, index & 0xff),
+      }),
+    ),
+    readConflictRanges: [],
+    writeConflictRanges: [],
+  };
+
+  const decoded = StorageKitWire.decodeRequest(
+    StorageKitWire.encodeRequest(request),
+  );
+  assert.equal(decoded.mutations.length, request.mutations.length);
 });
 
 test("request encoder rejects oversized keys and values", () => {
