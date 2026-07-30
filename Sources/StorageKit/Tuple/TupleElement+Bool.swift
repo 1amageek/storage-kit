@@ -1,6 +1,8 @@
 import DatabaseTypes
 
 extension Bool: TupleElement {
+    public var tupleValue: TupleValue? { .boolean(self) }
+
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(
             self

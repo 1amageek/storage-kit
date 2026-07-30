@@ -1,3 +1,4 @@
+import CloudflareDurableObjectStorage
 import CloudflareDurableObjectStorageHostTransport
 import Testing
 
@@ -22,7 +23,9 @@ struct CloudflareDurableObjectStorageHostTransportTests {
             maximumResponseBytes: 2
         )
 
-        await #expect(throws: StorageHostTransportError.self) {
+        await #expect(
+            throws: StorageTransportError.rejected(stage: .localValidation)
+        ) {
             _ = try await transport.send([1, 2, 3])
         }
     }

@@ -17,8 +17,20 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     )
 
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
+    public var compaction: StorageCompactionAccess? { nil }
     public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
     public let transactionDomain: StorageTransactionDomain
+
+    public var storageFailure: StorageError? {
+        state.withLock { state in
+            switch state.phase {
+            case .failed(let error), .commitUnknown(let error):
+                return error
+            case .open, .committing, .committed, .cancelling, .cancelled:
+                return nil
+            }
+        }
+    }
 
     private let scope: StorageWireScope
     private let client: any CloudflareDurableObjectStorageClient
@@ -594,8 +606,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         if transactionView.hasPendingMutations {
             return try await StorageRangeMetrics.exactSize(
                 getRange(
-                    begin: beginKey,
-                    end: endKey,
+                    from: .firstGreaterOrEqual(beginKey),
+                    to: .firstGreaterOrEqual(endKey),
+                    limit: 0,
+                    reverse: false,
                     snapshot: true,
                     streamingMode: .wantAll
                 )
@@ -659,8 +673,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 chunkSize: chunkSize,
                 maximumPointCount: limits.maxSplitPoints,
                 rows: getRange(
-                    begin: beginKey,
-                    end: endKey,
+                    from: .firstGreaterOrEqual(beginKey),
+                    to: .firstGreaterOrEqual(endKey),
+                    limit: 0,
+                    reverse: false,
                     snapshot: true,
                     streamingMode: .wantAll
                 )
@@ -1261,4 +1277,60 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         )
     }
 
+}
+
+extension CloudflareDurableObjectStorageTransaction {
+    public func getKey(
+        selector: KeySelector,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        try await TransactionKeySelection.resolve(
+            selector,
+            in: self,
+            snapshot: snapshot
+        )
+    }
+
+    public func getValue(for key: ByteString) async throws -> ByteString? {
+        try await getValue(for: key, snapshot: false)
+    }
+
+    public func rangeCursor(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) -> KeyValueCursor {
+        KeyValueCursor(
+            consuming: getRange(
+                from: begin,
+                to: end,
+                limit: limit,
+                reverse: reverse,
+                snapshot: snapshot,
+                streamingMode: streamingMode
+            )
+        )
+    }
+
+    public func collectRange(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) async throws -> [(ByteString, ByteString)] {
+        try await TransactionRangeCollection.collect(
+            using: self,
+            from: begin,
+            to: end,
+            limit: limit,
+            reverse: reverse,
+            snapshot: snapshot,
+            streamingMode: streamingMode
+        )
+    }
 }

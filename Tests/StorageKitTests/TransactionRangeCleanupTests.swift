@@ -209,11 +209,11 @@ private struct FinishRecordingRows: TransactionRangeResult {
     let rows: [Element]
     let iterationRecorder: RangeIterationRecorder
 
-    func makeAsyncIterator() -> Iterator {
-        Iterator(rows: rows, iterationRecorder: iterationRecorder)
+    func makeCursor() -> Cursor {
+        Cursor(rows: rows, iterationRecorder: iterationRecorder)
     }
 
-    struct Iterator: TransactionRangeIterator {
+    struct Cursor: TransactionRangeCursor {
         let rows: [Element]
         let iterationRecorder: RangeIterationRecorder
         var index = 0
@@ -296,14 +296,14 @@ private struct SuspendedRows: TransactionRangeResult {
     let iterationGate: RangeIterationGate
     let iterationRecorder: RangeIterationRecorder
 
-    func makeAsyncIterator() -> Iterator {
-        Iterator(
+    func makeCursor() -> Cursor {
+        Cursor(
             iterationGate: iterationGate,
             iterationRecorder: iterationRecorder
         )
     }
 
-    struct Iterator: TransactionRangeIterator {
+    struct Cursor: TransactionRangeCursor {
         let iterationGate: RangeIterationGate
         let iterationRecorder: RangeIterationRecorder
         var hasAdvanced = false
@@ -333,11 +333,11 @@ private struct FailingRows: TransactionRangeResult {
 
     let iterationRecorder: RangeIterationRecorder
 
-    func makeAsyncIterator() -> Iterator {
-        Iterator(iterationRecorder: iterationRecorder)
+    func makeCursor() -> Cursor {
+        Cursor(iterationRecorder: iterationRecorder)
     }
 
-    struct Iterator: TransactionRangeIterator {
+    struct Cursor: TransactionRangeCursor {
         let iterationRecorder: RangeIterationRecorder
 
         mutating func next() async throws -> Element? {

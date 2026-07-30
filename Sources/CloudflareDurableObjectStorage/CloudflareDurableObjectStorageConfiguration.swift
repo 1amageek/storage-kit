@@ -1,6 +1,5 @@
 import CloudflareDurableObjectStorageWire
 import StorageKit
-import StorageKitSystemClock
 
 /// Configuration for one Cloudflare Durable Object storage engine.
 public struct CloudflareDurableObjectStorageConfiguration: Sendable {
@@ -13,7 +12,7 @@ public struct CloudflareDurableObjectStorageConfiguration: Sendable {
         scope: StorageWireScope,
         client: any CloudflareDurableObjectStorageClient,
         limits: CloudflareDurableObjectLimits = .default,
-        monotonicClock: any StorageMonotonicClock = SystemStorageClock()
+        monotonicClock: any StorageMonotonicClock
     ) {
         self.scope = scope
         self.client = client

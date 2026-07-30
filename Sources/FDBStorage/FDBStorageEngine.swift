@@ -85,16 +85,15 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         }
     }
 
-    public func withTransaction<T: Sendable>(
-        _ operation: (any TransactionAccess) async throws -> T
-    ) async throws -> T {
+    public func executeTransaction(
+        _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
+    ) async throws {
         let tx = try createTransaction()
-        return try await ActiveTransactionScope.withActiveTransaction(
+        try await ActiveTransactionScope.withActiveTransaction(
             tx
         ) { _ in
-            let result: T
             do {
-                result = try await operation(tx)
+                try await operation(tx)
             } catch let error as FDBError {
                 let converted = FDBStorageTransaction.convertFDBError(
                     error,
@@ -109,7 +108,6 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
 
             do {
                 try await tx.commit()
-                return result
             } catch {
                 if let storageError = error as? StorageError,
                    storageError.code == .commitUnknownResult {

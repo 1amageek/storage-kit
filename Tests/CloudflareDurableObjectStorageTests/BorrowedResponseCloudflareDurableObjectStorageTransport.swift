@@ -9,7 +9,7 @@ struct BorrowedResponseCloudflareDurableObjectStorageTransport:
         .synchronous
     }
 
-    func send(_ requestBytes: ByteString) async throws -> ByteString {
+    func send(_ requestBytes: ByteString) async -> ByteString {
         _ = requestBytes
         return responseBytes
     }

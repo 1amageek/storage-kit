@@ -67,6 +67,12 @@ public func strinc(_ bytes: ByteString) throws -> ByteString {
 /// Converts each type to/from byte arrays following the FDB Tuple Layer binary format.
 /// The encoded result preserves lexicographic order matching the logical order of values.
 public protocol TupleElement: Sendable, Hashable {
+    /// The canonical decoded representation, when this is a built-in tuple value.
+    ///
+    /// Encoding-only adapters may return `nil`. Values produced by `Tuple`'s
+    /// decoder always provide a representation.
+    var tupleValue: TupleValue? { get }
+
     /// Encode this value directly into an FDB Tuple Layer sink.
     func encodeTuple(to sink: inout TupleEncodingSink)
 
@@ -79,6 +85,8 @@ public protocol TupleElement: Sendable, Hashable {
 }
 
 extension TupleElement {
+    public var tupleValue: TupleValue? { nil }
+
     /// Encode into one exactly-sized owned allocation.
     public func encodeTuple() -> ByteString {
         var measuringSink = TupleEncodingSink(measuringFrom: 0)
@@ -102,6 +110,7 @@ public enum TupleError: Error, Sendable {
     case invalidNullEscape
     case cannotIncrementKey
     case prefixMismatch
+    case elementHasNoCanonicalValue
 }
 
 /// Byte count limit table for each type (used in variable-length integer encoding).

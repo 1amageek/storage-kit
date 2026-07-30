@@ -7,7 +7,7 @@ final class TruncatedResponseCloudflareDurableObjectStorageTransport: Cloudflare
         .synchronous
     }
 
-    func send(_ requestBytes: ByteString) async throws -> ByteString {
+    func send(_ requestBytes: ByteString) async -> ByteString {
         _ = requestBytes
         return [0x01]
     }

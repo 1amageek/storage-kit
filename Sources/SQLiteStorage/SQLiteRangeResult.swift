@@ -1,7 +1,7 @@
 import DatabaseTypes
 import StorageKit
 
-/// Lazy, re-iterable SQLite range sequence.
+/// Lazy, re-iterable SQLite range result.
 ///
 /// Constructing the sequence and iterator performs no SQLite prepare, step, or
 /// row copy. The first `next()` opens the statement and advances one row.
@@ -26,16 +26,16 @@ public struct SQLiteRangeResult: TransactionRangeResult {
         self.backing = .failure(error)
     }
 
-    public func makeAsyncIterator() -> Iterator {
+    public func makeCursor() -> Cursor {
         switch backing {
         case .scan(let transaction, let plan):
-            return Iterator(transaction: transaction, plan: plan)
+            return Cursor(transaction: transaction, plan: plan)
         case .failure(let error):
-            return Iterator(error: error)
+            return Cursor(error: error)
         }
     }
 
-    public struct Iterator: TransactionRangeIterator, Sendable {
+    public struct Cursor: TransactionRangeCursor, Sendable {
         private let state: SQLiteRangeIteratorState
 
         init(

@@ -63,11 +63,13 @@ public struct CloudflareDurableObjectHTTPTransport: CloudflareDurableObjectStora
 
     public func send(
         _ requestBytes: ByteString
-    ) async throws -> ByteString {
+    ) async throws(StorageTransportError) -> ByteString {
         guard requestBytes.count <= maximumRequestBytes else {
-            throw CloudflareDurableObjectHTTPTransportError.requestTooLarge(
-                actual: requestBytes.count,
-                maximum: maximumRequestBytes
+            throw .rejected(
+                stage: CloudflareDurableObjectHTTPTransportError.requestTooLarge(
+                    actual: requestBytes.count,
+                    maximum: maximumRequestBytes
+                ).failureStage
             )
         }
         var request = URLRequest(url: endpoint, timeoutInterval: timeoutInterval)
@@ -115,18 +117,14 @@ public struct CloudflareDurableObjectHTTPTransport: CloudflareDurableObjectStora
             }
             return bytes
         } catch is CancellationError {
-            throw CancellationError()
+            throw .cancelled
         } catch let error as CloudflareDurableObjectHTTPTransportError {
-            throw error
+            throw .rejected(stage: error.failureStage)
         } catch let error as StorageError {
-            throw error
+            throw .storage(error)
         } catch {
-            throw StorageError(
-                code: .connectionFailure,
-                operation: .execute,
-                backend: .cloudflareDurableObject,
-                message: "Cloudflare Durable Object HTTP transport failed",
-                underlyingDescription: String(describing: error)
+            throw .rejected(
+                stage: .afterDispatch
             )
         }
     }

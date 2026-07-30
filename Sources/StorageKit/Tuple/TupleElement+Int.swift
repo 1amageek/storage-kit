@@ -2,6 +2,8 @@ import DatabaseTypes
 // MARK: - Int64
 
 extension Int64: TupleElement {
+    public var tupleValue: TupleValue? { .signedInteger(self) }
+
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         if self == 0 {
             sink.writeByte(TupleTypeCode.intZero.rawValue)
@@ -136,6 +138,8 @@ extension Int64: TupleElement {
 // MARK: - Int
 
 extension Int: TupleElement {
+    public var tupleValue: TupleValue? { .signedInteger(Int64(self)) }
+
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         Int64(self).encodeTuple(to: &sink)
     }
@@ -150,6 +154,8 @@ extension Int: TupleElement {
 // MARK: - Int32
 
 extension Int32: TupleElement {
+    public var tupleValue: TupleValue? { .signedInteger(Int64(self)) }
+
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         Int64(self).encodeTuple(to: &sink)
     }
@@ -164,6 +170,8 @@ extension Int32: TupleElement {
 // MARK: - UInt64
 
 extension UInt64: TupleElement {
+    public var tupleValue: TupleValue? { .unsignedInteger(self) }
+
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         if self == 0 {
             sink.writeByte(TupleTypeCode.intZero.rawValue)

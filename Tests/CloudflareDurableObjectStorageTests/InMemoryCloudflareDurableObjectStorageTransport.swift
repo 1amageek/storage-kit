@@ -25,21 +25,23 @@ final class InMemoryCloudflareDurableObjectStorageTransport:
 
     private let state = Mutex(State())
 
-    func send(_ requestBytes: ByteString) async throws -> ByteString {
+    func send(
+        _ requestBytes: ByteString
+    ) async throws(StorageTransportError) -> ByteString {
+        let request = try decodeStorageTransportRequest(requestBytes)
+        let response: StorageWireResponse
         do {
-            let request = try StorageWire.decodeRequest(requestBytes)
-            return try state.withLock { state in
-                try StorageWire.encode(handle(request, state: &state))
+            response = try state.withLock { state in
+                try handle(request, state: &state)
             }
         } catch let error as StorageError {
-            return try StorageWire.encode(
+            response =
                 .failure(status: statusCode(for: error), message: error.message)
-            )
         } catch {
-            return try StorageWire.encode(
+            response =
                 .failure(status: .invalidOperation, message: String(describing: error))
-            )
         }
+        return try encodeStorageTransportResponse(response)
     }
 
     private func handle(

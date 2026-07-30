@@ -25,7 +25,7 @@ public struct StorageHostDispatcher:
     public func dispatch(
         _ requestBytes: ByteString,
         maximumResponseBytes: Int
-    ) throws -> ByteString {
+    ) throws(StorageHostTransportError) -> ByteString {
         guard maximumResponseBytes > 0 else {
             throw StorageHostTransportError.invalidLimit
         }

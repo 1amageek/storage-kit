@@ -180,18 +180,19 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         )
     }
 
-    public func withTransaction<T: Sendable>(
-        _ operation: (any TransactionAccess) async throws -> T
-    ) async throws -> T {
+    public func executeTransaction(
+        _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
+    ) async throws {
         // Nested call — reuse the existing transaction.
         if let existing = ActiveTransactionScope.current
             as? PostgreSQLStorageTransaction,
            existing.transactionDomain === transactionDomain {
-            return try await operation(existing)
+            try await operation(existing)
+            return
         }
 
         do {
-            return try await client.withConnection { [configuration, logger] conn in
+            try await client.withConnection { [configuration, logger] conn in
                 try await conn.query(
                     PostgresQuery(unsafeSQL: configuration.beginStatement),
                     logger: logger
@@ -207,9 +208,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                 return try await ActiveTransactionScope.$current
                     .withValue(tx) {
                     do {
-                        let result: T
                         do {
-                            result = try await operation(tx)
+                            try await operation(tx)
                         } catch {
                             let operationError = Self.preserveTransactionBodyFailure(from: error)
                             do {
@@ -223,7 +223,6 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                             throw operationError
                         }
                         try await tx.commitInternal(connection: conn)
-                        return result
                     } catch {
                         throw error
                     }

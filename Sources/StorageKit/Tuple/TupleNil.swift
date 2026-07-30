@@ -3,6 +3,8 @@ import DatabaseTypes
 ///
 /// In the FDB Tuple Layer, null is encoded as a single byte with type code 0x00.
 public struct TupleNil: TupleElement, Sendable {
+    public var tupleValue: TupleValue? { .null }
+
     public init() {}
 
     public func encodeTuple(to sink: inout TupleEncodingSink) {

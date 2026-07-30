@@ -215,10 +215,7 @@ struct InMemoryEngineTests {
         _ tx: some TransactionAccess,
         begin: ByteString, end: ByteString
     ) async throws -> [(key: ByteString, value: ByteString)] {
-        let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
-        var result: [(key: ByteString, value: ByteString)] = []
-        for try await (key, value) in seq { result.append((key: key, value: value)) }
-        return result
+        try await tx.collectRange(begin: begin, end: end)
     }
 
     @Test func consistency_setClearSet() async throws {
@@ -768,12 +765,9 @@ struct InMemoryEngineTests {
         let tx = try engine.createTransaction()
         try await tx.cancel()
         do {
-            let seq = tx.getRange(begin: [0x00], end: [0xFF], limit: 0, reverse: false)
-            for try await _ in seq {
-                Issue.record("Expected error")
-            }
+            _ = try await tx.collectRange(begin: [0x00], end: [0xFF])
             Issue.record("Expected error")
-        } catch let error {
+        } catch let error as StorageError {
             guard error.code == .invalidOperation else {
                 Issue.record("Expected invalidOperation, got \(error)")
                 return

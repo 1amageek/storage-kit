@@ -10,11 +10,13 @@ actor SuspendingCloudflareDurableObjectStorageTransport: CloudflareDurableObject
     private var commitStarted = false
     private var commitStartWaiters: [CheckedContinuation<Void, Never>] = []
 
-    func send(_ requestBytes: ByteString) async throws -> ByteString {
-        let request = try StorageWire.decodeRequest(requestBytes)
+    func send(
+        _ requestBytes: ByteString
+    ) async throws(StorageTransportError) -> ByteString {
+        let request = try decodeStorageTransportRequest(requestBytes)
         switch request {
         case .readiness:
-            return try StorageWire.encode(
+            return try encodeStorageTransportResponse(
                 .readiness(
                     StorageWireReadinessResponse(
                         schemaVersion: 1,
@@ -25,12 +27,16 @@ actor SuspendingCloudflareDurableObjectStorageTransport: CloudflareDurableObject
             )
         case .commit:
             signalCommitStarted()
-            try await Task.sleep(for: .seconds(60))
-            return try StorageWire.encode(
+            do {
+                try await Task.sleep(for: .seconds(60))
+            } catch {
+                throw .cancelled
+            }
+            return try encodeStorageTransportResponse(
                 .commit(StorageWireCommitResponse(committedVersion: 1))
             )
         default:
-            return try StorageWire.encode(
+            return try encodeStorageTransportResponse(
                 .failure(status: .invalidOperation, message: "Only commit is supported")
             )
         }

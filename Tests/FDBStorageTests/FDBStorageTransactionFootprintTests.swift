@@ -273,7 +273,7 @@ struct FDBStorageTransactionFootprintTests {
         #expect(backend.cancelCount == 1)
     }
 
-    @Test("A suspended lazy range prevents commit admission until iterator cleanup")
+    @Test("A suspended lazy range prevents commit admission until cursor cleanup")
     func rangeLeasePreventsCommit() async throws {
         let gate = OperationGate()
         let backend = SizeReportingTransaction(
@@ -562,14 +562,14 @@ struct FDBStorageTransactionFootprintTests {
             transactionDomain: StorageTransactionDomain()
         )
         let rows = makeRange(from: transaction)
-        var iterator = rows.makeAsyncIterator()
+        var cursor = rows.makeCursor()
 
-        let first = try await iterator.next()
+        let first = try await cursor.next()
         #expect(first?.0 == ByteString([0x01]))
         try await transaction.cancel()
 
         do {
-            _ = try await iterator.next()
+            _ = try await cursor.next()
             Issue.record("Cached range row was returned after cancellation")
         } catch let error as StorageError {
             #expect(error.code == .transactionCancelled)
@@ -577,11 +577,11 @@ struct FDBStorageTransactionFootprintTests {
             Issue.record("Range cancellation returned an unexpected error: \(error)")
         }
 
-        try await iterator.finish()
+        try await cursor.finish()
         #expect(backend.cancelCount == 1)
     }
 
-    @Test("Range iterator aliases share one terminal state and lease")
+    @Test("Range cursor aliases share one terminal state and lease")
     func rangeIteratorAliasesShareTerminalState() async throws {
         let backend = SizeReportingTransaction(
             approximateSize: 1,
@@ -597,13 +597,13 @@ struct FDBStorageTransactionFootprintTests {
             backend,
             transactionDomain: StorageTransactionDomain()
         )
-        let iterator = makeRange(from: transaction).makeAsyncIterator()
+        let cursor = makeRange(from: transaction).makeCursor()
 
-        _ = try await iterator.next()
-        var alias = iterator
+        _ = try await cursor.next()
+        var alias = cursor
         try await alias.finish()
 
-        let rowAfterAliasFinished = try await iterator.next()
+        let rowAfterAliasFinished = try await cursor.next()
         #expect(rowAfterAliasFinished == nil)
         try await transaction.commit()
         #expect(backend.commitCount == 1)
@@ -620,19 +620,19 @@ struct FDBStorageTransactionFootprintTests {
             backend,
             transactionDomain: StorageTransactionDomain()
         )
-        let iterator = makeRange(from: transaction).makeAsyncIterator()
+        let cursor = makeRange(from: transaction).makeCursor()
 
         let readTask = Task {
-            await nextFailure(from: iterator)
+            await nextFailure(from: cursor)
         }
         try await rangeReadGate.waitUntilEntered()
 
-        let alias = iterator
+        let alias = cursor
         let finishTask = Task {
             await finishFailure(from: alias)
         }
         try await waitUntilIteratorState("range finish waiter admission") {
-            await iterator.finishWaiterCount == 1
+            await cursor.finishWaiterCount == 1
         }
 
         let busyFailure = await commitFailure(from: transaction)
@@ -645,7 +645,7 @@ struct FDBStorageTransactionFootprintTests {
         #expect(readFailure == finishFailure)
         #expect(readFailure.operation == .rangeRead)
 
-        let rowAfterFinish = try await iterator.next()
+        let rowAfterFinish = try await cursor.next()
         #expect(rowAfterFinish == nil)
         try await transaction.commit()
         #expect(backend.commitCount == 1)
@@ -662,18 +662,18 @@ struct FDBStorageTransactionFootprintTests {
             backend,
             transactionDomain: StorageTransactionDomain()
         )
-        let iterator = makeRange(from: transaction).makeAsyncIterator()
+        let cursor = makeRange(from: transaction).makeCursor()
 
         let leader = Task {
-            await nextFailure(from: iterator)
+            await nextFailure(from: cursor)
         }
         try await rangeReadGate.waitUntilEntered()
 
         let follower = Task {
-            await nextFailure(from: iterator)
+            await nextFailure(from: cursor)
         }
         try await waitUntilIteratorState("concurrent range read follower") {
-            await iterator.nextWaiterCount == 1
+            await cursor.nextWaiterCount == 1
         }
 
         #expect(backend.rangeReadCount == 1)
@@ -686,7 +686,7 @@ struct FDBStorageTransactionFootprintTests {
         #expect(leaderFailure.operation == .rangeRead)
         #expect(backend.rangeReadCount == 1)
 
-        var finishingIterator = iterator
+        var finishingIterator = cursor
         try await finishingIterator.finish()
         try await transaction.commit()
         #expect(backend.commitCount == 1)
@@ -705,19 +705,19 @@ struct FDBStorageTransactionFootprintTests {
             backend,
             transactionDomain: StorageTransactionDomain()
         )
-        let iterator = makeRange(from: transaction).makeAsyncIterator()
+        let cursor = makeRange(from: transaction).makeCursor()
 
-        _ = try await iterator.next()
+        _ = try await cursor.next()
         let busyFailure = await commitFailure(from: transaction)
         #expect(busyFailure.code == .transactionBusy)
 
-        let exhausted = try await iterator.next()
+        let exhausted = try await cursor.next()
         #expect(exhausted == nil)
         try await transaction.commit()
         #expect(backend.commitCount == 1)
     }
 
-    @Test("Dropping a range iterator releases its lease")
+    @Test("Dropping a range cursor releases its lease")
     func droppingRangeIteratorReleasesLease() async throws {
         let backend = SizeReportingTransaction(
             approximateSize: 1,
@@ -752,8 +752,8 @@ struct FDBStorageTransactionFootprintTests {
     private func readOneAndDropIterator(
         _ rows: FDBStorageRangeResult
     ) async throws {
-        let iterator = rows.makeAsyncIterator()
-        _ = try await iterator.next()
+        let cursor = rows.makeCursor()
+        _ = try await cursor.next()
     }
 
     private func waitUntil(
@@ -839,10 +839,10 @@ struct FDBStorageTransactionFootprintTests {
     private func firstRangeFailure(
         _ rows: FDBStorageRangeResult
     ) async -> StorageError? {
-        var iterator = rows.makeAsyncIterator()
+        var cursor = rows.makeCursor()
         do {
-            _ = try await iterator.next()
-            try await iterator.finish()
+            _ = try await cursor.next()
+            try await cursor.finish()
             Issue.record("Range iteration unexpectedly succeeded")
             return nil
         } catch let error as StorageError {
@@ -854,10 +854,10 @@ struct FDBStorageTransactionFootprintTests {
     }
 
     private func nextFailure(
-        from iterator: FDBStorageRangeResult.AsyncIterator
+        from cursor: FDBStorageRangeResult.Cursor
     ) async -> StorageError? {
         do {
-            _ = try await iterator.next()
+            _ = try await cursor.next()
             Issue.record("Range read unexpectedly succeeded")
             return nil
         } catch let error as StorageError {
@@ -869,11 +869,11 @@ struct FDBStorageTransactionFootprintTests {
     }
 
     private func finishFailure(
-        from iterator: FDBStorageRangeResult.AsyncIterator
+        from cursor: FDBStorageRangeResult.Cursor
     ) async -> StorageError? {
-        var iterator = iterator
+        var cursor = cursor
         do {
-            try await iterator.finish()
+            try await cursor.finish()
             Issue.record("Range finish unexpectedly succeeded")
             return nil
         } catch let error as StorageError {

@@ -2,6 +2,7 @@ import CloudflareDurableObjectStorage
 import CloudflareDurableObjectStorageTesting
 import CloudflareDurableObjectStorageWire
 import StorageKit
+import StorageKitSystemClock
 import Testing
 
 @Suite("Cloudflare Durable Object Storage Semantics Tests")
@@ -137,8 +138,10 @@ struct CloudflareDurableObjectStorageSemanticsTests {
         let transport = SuspendingCloudflareDurableObjectStorageTransport()
         let client = CloudflareDurableObjectStorageWireClient(transport: transport)
         let scope = try StorageWireScope(databaseID: "main")
-        let engine = try await CloudflareDurableObjectSharedClientRouter(client: client).engine(
-            for: scope)
+        let engine = try await CloudflareDurableObjectSharedClientRouter(
+            client: client,
+            monotonicClock: SystemStorageClock()
+        ).engine(for: scope)
         let transaction = try engine.createTransaction()
         try transaction.setValue([1], for: [0x01])
 
@@ -174,7 +177,9 @@ struct CloudflareDurableObjectStorageSemanticsTests {
     private func makeEngine() async throws -> CloudflareDurableObjectStorageEngine {
         let client = InMemoryCloudflareDurableObjectStorageClient()
         let scope = try StorageWireScope(databaseID: "main")
-        return try await CloudflareDurableObjectSharedClientRouter(client: client).engine(
-            for: scope)
+        return try await CloudflareDurableObjectSharedClientRouter(
+            client: client,
+            monotonicClock: SystemStorageClock()
+        ).engine(for: scope)
     }
 }

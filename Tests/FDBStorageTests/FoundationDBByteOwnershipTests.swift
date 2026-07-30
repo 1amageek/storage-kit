@@ -131,8 +131,8 @@ struct FoundationDBByteOwnershipTests {
         #expect(beginOwner.borrowCount == 1)
         #expect(endOwner.borrowCount == 1)
 
-        var iterator: FDBStorageRangeResult.AsyncIterator? = range.makeAsyncIterator()
-        var row = try await iterator?.next()
+        var cursor: FDBStorageRangeResult.Cursor? = range.makeCursor()
+        var row = try await cursor?.next()
 
         let rangeInvocation = try #require(backend.rangeInvocation)
         #expect(rangeInvocation.beginAddress == expectedBeginAddress)
@@ -151,8 +151,8 @@ struct FoundationDBByteOwnershipTests {
         #expect(actualKeyAddress == expectedKeyAddress)
         #expect(actualValueAddress == expectedValueAddress)
 
-        try await iterator?.finish()
-        iterator = nil
+        try await cursor?.finish()
+        cursor = nil
         row = nil
         returnedRow = (ByteString(), ByteString())
     }

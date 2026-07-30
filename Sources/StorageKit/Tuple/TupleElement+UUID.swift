@@ -1,6 +1,8 @@
 import DatabaseTypes
 
 extension DatabaseTypes.UUID: TupleElement {
+    public var tupleValue: TupleValue? { .uuid(self) }
+
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(TupleTypeCode.uuid.rawValue)
         sink.writeBytes(self)

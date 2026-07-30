@@ -1,7 +1,7 @@
 import DatabaseTypes
 import StorageKit
 
-/// A lazy, re-iterable `AsyncSequence` over a PostgreSQL range scan.
+/// A lazy, re-iterable PostgreSQL range result.
 ///
 /// `Transaction.getRange` is synchronous (a protocol constraint) but PostgreSQL
 /// I/O is async, so the scan is described by a `RangeScanPlan` and executed
@@ -9,7 +9,7 @@ import StorageKit
 /// pagination (`PostgreSQLStorageTransaction.fetchRangeBatch`), keeping memory at
 /// O(`batchSize`) regardless of how large the range is.
 ///
-/// The sequence is re-iterable: each `makeAsyncIterator()` starts a fresh scan
+/// The result is re-iterable: each `makeCursor()` starts a fresh scan
 /// from the plan. A scan whose boundaries could not be resolved is represented as
 /// a `.failure`, which throws on the first `next()` rather than silently yielding
 /// nothing.
@@ -38,20 +38,20 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
         }
     }
 
-    public func makeAsyncIterator() -> Iterator {
+    public func makeCursor() -> Cursor {
         switch backing {
         case .scan(let transaction, let plan):
-            return Iterator(transaction: transaction, plan: plan)
+            return Cursor(transaction: transaction, plan: plan)
         case .failure(let error):
-            return Iterator(failure: error)
+            return Cursor(failure: error)
         }
     }
 
     /// Keyset-pagination iterator.
     ///
     /// A value is transferred between consumers, but each instance remains a
-    /// single-consumer iterator as required by `AsyncIteratorProtocol`.
-    public struct Iterator: TransactionRangeIterator, Sendable {
+    /// single-consumer range cursor.
+    public struct Cursor: TransactionRangeCursor, Sendable {
 
         private var transaction: PostgreSQLStorageTransaction?
         private var plan: RangeScanPlan?

@@ -10,7 +10,8 @@ StorageKit provides a single `Transaction` protocol that works identically acros
 
 - **Unified API** — `StorageEngine` and `Transaction` protocols abstract away backend differences
 - **FDB-compatible semantics** — Lexicographic key ordering, range scans, `KeySelector`, Tuple Layer, Subspace, and namespace resolution
-- **Zero-copy design** — `getRange` returns backend-native `AsyncSequence` types without intermediate wrappers
+- **Zero-copy design** — backend-native range results feed an explicitly
+  cleaned-up `KeyValueCursor` without materializing intermediate row arrays
 - **Swift 6.4 concurrency** — Full `Sendable` conformance, `Mutex` for synchronization, no `@unchecked Sendable`
 - **Nested transactions** — SQLite backend detects nested calls via `@TaskLocal` and creates strictly ordered savepoint-backed child transactions
 - **Foundation-free Cloudflare protocol** — bounded StorageKit Wire v1 values, encoding, and decoding for Native, WASM, and Embedded Swift
@@ -124,16 +125,17 @@ The Cloudflare backend is split by runtime boundary:
 | `CloudflareDurableObjectStorageWire` | Foundation-free StorageKit Wire v1 values, bounded encoding, and bounded decoding |
 | `CloudflareDurableObjectStorage` | `StorageEngine`, transaction state, and typed StorageKit Wire client |
 | `CloudflareDurableObjectStorageHTTP` | URLSession transport for native clients |
-| `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch/receive/discard` transport for a WASI reactor |
+| `CloudflareDurableObjectStorageHostTransport` | Synchronous `storage_host.dispatch/receive/discard` transport for the Embedded WASM reactor |
 
 `StorageKit` itself is Foundation-free. `StorageKitFoundation` supplies the
 explicit Foundation `Date` and `UUID` Tuple Layer adapters; canonical UUID tuple
 decoding returns `DatabaseTypes.UUID`.
 
 `StorageKit` owns the monotonic clock contract but no operating-system clock.
-`StorageKitSystemClock` is the explicit adapter for runtimes that provide Swift's
-`ContinuousClock`. Embedded runtimes inject their own clock without weakening
-the storage contract.
+`StorageKitSystemClock` is the optional native adapter for runtimes that select
+Swift's `ContinuousClock`. `CloudflareDurableObjectStorage` depends only on the
+clock protocol and requires its composition root to inject a clock. The
+Embedded reactor therefore does not inherit an operating-system clock product.
 
 The storage engine and typed client use the canonical
 `CloudflareDurableObjectStorageWire` request, response, mutation, range, and
@@ -155,7 +157,9 @@ separate from database-framework's DatabaseWire query protocol. See
 
 ### Transaction
 
-All reads and writes go through `Transaction`. The protocol mirrors FDB's transaction semantics:
+All reads and writes go through `Transaction`. The protocol mirrors FDB's
+transaction semantics. Streaming callers retain `KeyValueCursor`; collection is
+an explicit ownership boundary:
 
 ```swift
 try await engine.withTransaction { tx in

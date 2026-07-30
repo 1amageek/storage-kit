@@ -3,6 +3,8 @@ import DatabaseTypes
 // MARK: - Float
 
 extension Float: TupleElement {
+    public var tupleValue: TupleValue? { .float32(self) }
+
     /// IEEE 754 big-endian encoding.
     ///
     /// Positive values: flip the sign bit so lexicographic order matches numeric order.
@@ -39,6 +41,8 @@ extension Float: TupleElement {
 // MARK: - Double
 
 extension Double: TupleElement {
+    public var tupleValue: TupleValue? { .float64(self) }
+
     /// IEEE 754 big-endian encoding (same algorithm as Float, 8 bytes).
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(TupleTypeCode.double.rawValue)

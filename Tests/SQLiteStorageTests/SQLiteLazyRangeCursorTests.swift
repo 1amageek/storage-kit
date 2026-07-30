@@ -15,7 +15,7 @@ struct SQLiteLazyRangeCursorTests {
 
         let transaction = try engine.createTransaction()
         let baseline = engine.rangeInstrumentation
-        let range = transaction.getRange(
+        let range = transaction.range(
             begin: [0x00],
             end: [0xFF],
             limit: 0,
@@ -46,20 +46,20 @@ struct SQLiteLazyRangeCursorTests {
 
         let transaction = try engine.createTransaction()
         let baseline = engine.rangeInstrumentation
-        var iterator = transaction.getRange(
+        var cursor = transaction.range(
             begin: [0x00],
             end: [0xFF]
-        ).makeAsyncIterator()
+        ).makeCursor()
 
-        let firstValue = try await iterator.next()
+        let firstValue = try await cursor.next()
         let first = try #require(firstValue)
-        let secondValue = try await iterator.next()
+        let secondValue = try await cursor.next()
         let second = try #require(secondValue)
         #expect(first.0 == [0x01])
         #expect(first.1 == [0x10, 0x11])
         #expect(second.0 == [0x02])
         #expect(second.1 == [0x20, 0x21])
-        #expect(try await iterator.next() == nil)
+        #expect(try await cursor.next() == nil)
 
         // The first row is checked again after two later sqlite3_step calls.
         #expect(first.0 == [0x01])
@@ -74,7 +74,7 @@ struct SQLiteLazyRangeCursorTests {
         try await transaction.cancel()
     }
 
-    @Test("Copied iterator values share one cursor and one advancement state")
+    @Test("Copied cursor values share one cursor and one advancement state")
     func copiedIteratorsShareOneCursor() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
         try await engine.withTransaction { transaction in
@@ -84,10 +84,10 @@ struct SQLiteLazyRangeCursorTests {
 
         let transaction = try engine.createTransaction()
         let baseline = engine.rangeInstrumentation
-        var firstIterator = transaction.getRange(
+        var firstIterator = transaction.range(
             begin: [0x00],
             end: [0xFF]
-        ).makeAsyncIterator()
+        ).makeCursor()
         var copiedIterator = firstIterator
 
         let first = try await firstIterator.next()
@@ -118,13 +118,13 @@ struct SQLiteLazyRangeCursorTests {
 
         let transaction = try engine.createTransaction()
         let baseline = engine.rangeInstrumentation
-        let iterator = transaction.getRange(
+        let cursor = transaction.range(
             begin: [0x00],
             end: [0xFF]
-        ).makeAsyncIterator()
-        var copiedIterator = iterator
+        ).makeCursor()
+        var copiedIterator = cursor
         let blockedAdvance = Task {
-            try await advanceOne(iterator)
+            try await advanceOne(cursor)
         }
         await waitForWaitingLeaseCount(1, engine: engine)
 
@@ -161,11 +161,11 @@ struct SQLiteLazyRangeCursorTests {
 
         let transaction = try engine.createTransaction()
         let baseline = engine.rangeInstrumentation
-        var iterator = transaction.getRange(
+        var cursor = transaction.range(
             begin: [0x00],
             end: [0xFF]
-        ).makeAsyncIterator()
-        let first = try await iterator.next()
+        ).makeCursor()
+        let first = try await cursor.next()
         _ = try #require(first)
 
         try await transaction.commit()
@@ -174,7 +174,7 @@ struct SQLiteLazyRangeCursorTests {
         #expect(afterCommit.openCursorCount == 0)
 
         do {
-            _ = try await iterator.next()
+            _ = try await cursor.next()
             Issue.record("Expected a terminal transaction error")
         } catch let error as StorageError {
             #expect(error.code == .invalidOperation)
@@ -195,12 +195,12 @@ struct SQLiteLazyRangeCursorTests {
 
         let transaction = try engine.createTransaction()
         let baseline = engine.rangeInstrumentation
-        var iterator = transaction.getRange(
+        var cursor = transaction.range(
             begin: [0x00],
             end: [0xFF],
             limit: 1
-        ).makeAsyncIterator()
-        let first = try await iterator.next()
+        ).makeCursor()
+        let first = try await cursor.next()
         #expect(first?.0 == [0x01])
 
         let measured = engine.rangeInstrumentation
@@ -209,7 +209,7 @@ struct SQLiteLazyRangeCursorTests {
         #expect(measured.payloadCopyCount == baseline.payloadCopyCount + 2)
         #expect(measured.finalizeCount == baseline.finalizeCount + 1)
         #expect(measured.openCursorCount == 0)
-        #expect(try await iterator.next() == nil)
+        #expect(try await cursor.next() == nil)
         try await transaction.cancel()
     }
 
@@ -223,11 +223,11 @@ struct SQLiteLazyRangeCursorTests {
 
         let transaction = try engine.createTransaction()
         let baseline = engine.rangeInstrumentation
-        var iterator = transaction.getRange(
+        var cursor = transaction.range(
             begin: [0x00],
             end: [0xFF]
-        ).makeAsyncIterator()
-        let first = try await iterator.next()
+        ).makeCursor()
+        let first = try await cursor.next()
         _ = try #require(first)
 
         try await transaction.cancel()
@@ -239,7 +239,7 @@ struct SQLiteLazyRangeCursorTests {
         #expect(afterCancellation.openCursorCount == 0)
 
         do {
-            _ = try await iterator.next()
+            _ = try await cursor.next()
             Issue.record("Expected a terminal transaction error")
         } catch let error as StorageError {
             #expect(error.code == .invalidOperation)
@@ -261,11 +261,11 @@ struct SQLiteLazyRangeCursorTests {
             try child.setValue([0xA2], for: [0x02])
 
             let baseline = engine.rangeInstrumentation
-            var iterator = child.getRange(
+            var cursor = child.range(
                 begin: [0x00],
                 end: [0xFF]
-            ).makeAsyncIterator()
-            let first = try await iterator.next()
+            ).makeCursor()
+            let first = try await cursor.next()
             _ = try #require(first)
             try await child.cancel()
 
@@ -294,15 +294,15 @@ struct SQLiteLazyRangeCursorTests {
     private func consumeExactlyOne(
         _ range: SQLiteRangeResult
     ) async throws -> (ByteString, ByteString)? {
-        var iterator = range.makeAsyncIterator()
-        return try await iterator.next()
+        var cursor = range.makeCursor()
+        return try await cursor.next()
     }
 
     private func advanceOne(
-        _ iterator: SQLiteRangeResult.Iterator
+        _ cursor: SQLiteRangeResult.Cursor
     ) async throws -> (ByteString, ByteString)? {
-        var iterator = iterator
-        return try await iterator.next()
+        var cursor = cursor
+        return try await cursor.next()
     }
 
     private func waitForWaitingLeaseCount(
@@ -318,6 +318,24 @@ struct SQLiteLazyRangeCursorTests {
         }
         Issue.record(
             "Timed out waiting for \(expectedCount) queued SQLite leases"
+        )
+    }
+}
+
+private extension SQLiteStorageTransaction {
+    func range(
+        begin: ByteString,
+        end: ByteString,
+        limit: Int = 0,
+        reverse: Bool = false
+    ) -> SQLiteRangeResult {
+        getRange(
+            from: .firstGreaterOrEqual(begin),
+            to: .firstGreaterOrEqual(end),
+            limit: limit,
+            reverse: reverse,
+            snapshot: false,
+            streamingMode: .iterator
         )
     }
 }

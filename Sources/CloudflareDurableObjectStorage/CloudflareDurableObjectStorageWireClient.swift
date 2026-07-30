@@ -97,21 +97,13 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
         let responseBytes: ByteString
         do {
             responseBytes = try await transport.send(requestBytes)
-        } catch is CancellationError {
+        } catch .cancelled {
             throw CancellationError()
-        } catch let error as any CloudflareDurableObjectStorageTransportFailure {
-            throw transportFailureError(error, operation: operation)
-        } catch let error as StorageError {
+        } catch .storage(let error) {
             throw transportError(error, operation: operation)
-        } catch {
-            throw transportError(
-                StorageError(
-                    code: .connectionFailure,
-                    operation: operation,
-                    backend: .cloudflareDurableObject,
-                    message: "Cloudflare Durable Object storage transport failed",
-                    underlyingDescription: underlyingStorageErrorDescription(error)
-                ),
+        } catch .rejected(let stage) {
+            throw transportFailureError(
+                stage: stage,
                 operation: operation
             )
         }
@@ -171,11 +163,11 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
     }
 
     private func transportFailureError(
-        _ error: any CloudflareDurableObjectStorageTransportFailure,
+        stage: CloudflareDurableObjectStorageTransportFailureStage,
         operation: StorageOperation
     ) -> StorageError {
         let code: StorageError.Code
-        switch error.failureStage {
+        switch stage {
         case .localValidation:
             code = .invalidOperation
         case .unavailable:
@@ -188,8 +180,7 @@ public struct CloudflareDurableObjectStorageWireClient: CloudflareDurableObjectS
                 code: code,
                 operation: operation,
                 backend: .cloudflareDurableObject,
-                message: "Cloudflare Durable Object storage transport failed",
-                underlyingDescription: underlyingStorageErrorDescription(error)
+                message: "Cloudflare Durable Object storage transport failed"
             ),
             operation: operation
         )

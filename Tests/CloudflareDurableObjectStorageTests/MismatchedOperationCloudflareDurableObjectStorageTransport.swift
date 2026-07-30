@@ -8,9 +8,11 @@ struct MismatchedOperationCloudflareDurableObjectStorageTransport:
         .synchronous
     }
 
-    func send(_ requestBytes: ByteString) async throws -> ByteString {
+    func send(
+        _ requestBytes: ByteString
+    ) async throws(StorageTransportError) -> ByteString {
         _ = requestBytes
-        return try StorageWire.encode(
+        return try encodeStorageTransportResponse(
             .readiness(
                 StorageWireReadinessResponse(
                     schemaVersion: 1,

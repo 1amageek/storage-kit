@@ -6,6 +6,62 @@ private enum InMemoryConflictCutSide: Sendable {
     case after
 }
 
+extension InMemoryTransaction {
+    public func getKey(
+        selector: KeySelector,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        try await TransactionKeySelection.resolve(
+            selector,
+            in: self,
+            snapshot: snapshot
+        )
+    }
+
+    public func getValue(for key: ByteString) async throws -> ByteString? {
+        try await getValue(for: key, snapshot: false)
+    }
+
+    public func rangeCursor(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) -> KeyValueCursor {
+        KeyValueCursor(
+            consuming: getRange(
+                from: begin,
+                to: end,
+                limit: limit,
+                reverse: reverse,
+                snapshot: snapshot,
+                streamingMode: streamingMode
+            )
+        )
+    }
+
+    public func collectRange(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) async throws -> [(ByteString, ByteString)] {
+        try await TransactionRangeCollection.collect(
+            using: self,
+            from: begin,
+            to: end,
+            limit: limit,
+            reverse: reverse,
+            snapshot: snapshot,
+            streamingMode: streamingMode
+        )
+    }
+}
+
 /// A position immediately before or after one exact key. Cut-based ranges
 /// represent point keys and strict KeySelector boundaries without constructing
 /// synthetic `key + 0x00` buffers.
@@ -187,17 +243,16 @@ public final class InMemoryEngine: StorageEngine, Sendable {
         }
     }
 
-    public func withTransaction<T: Sendable>(
-        _ operation: (any TransactionAccess) async throws -> T
-    ) async throws -> T {
+    public func executeTransaction(
+        _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
+    ) async throws {
         let tx = try createTransaction()
-        return try await ActiveTransactionScope.withActiveTransaction(
+        try await ActiveTransactionScope.withActiveTransaction(
             tx
         ) { _ in
             do {
-                let result = try await operation(tx)
+                try await operation(tx)
                 try await tx.commit()
-                return result
             } catch {
                 let operationError = error
                 do {
@@ -234,10 +289,18 @@ public final class InMemoryTransaction: Transaction, Sendable {
     )
 
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
+    public var compaction: StorageCompactionAccess? { nil }
 
     public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
     public var transactionDomain: StorageTransactionDomain {
         engine.transactionDomain
+    }
+
+    public var storageFailure: StorageError? {
+        _state.withLock { state in
+            guard case .failed(let error) = state.lifecycle else { return nil }
+            return error
+        }
     }
 
     private let engine: InMemoryEngine

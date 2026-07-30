@@ -3,6 +3,8 @@ import DatabaseTypes
 // MARK: - String
 
 extension String: TupleElement {
+    public var tupleValue: TupleValue? { .string(self) }
+
     /// Null-terminated encoding with 0x00 escaped as 0x00 0xFF.
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(TupleTypeCode.string.rawValue)
@@ -98,6 +100,8 @@ private extension ByteString {
 // MARK: - ByteString
 
 extension ByteString: TupleElement {
+    public var tupleValue: TupleValue? { .bytes(self) }
+
     /// Null-terminated encoding with 0x00 escaped as 0x00 0xFF (same algorithm as String).
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(TupleTypeCode.bytes.rawValue)

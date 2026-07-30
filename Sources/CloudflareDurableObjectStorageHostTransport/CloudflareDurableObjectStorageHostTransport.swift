@@ -43,25 +43,34 @@ public struct CloudflareDurableObjectStorageHostTransport:
 
     public func send(
         _ requestBytes: ByteString
-    ) async throws -> ByteString {
+    ) async throws(StorageTransportError) -> ByteString {
         guard requestBytes.count <= maximumRequestBytes else {
-            throw StorageHostTransportError.requestTooLarge(
-                actual: requestBytes.count,
-                maximum: maximumRequestBytes
+            throw .rejected(
+                stage: StorageHostTransportError.requestTooLarge(
+                    actual: requestBytes.count,
+                    maximum: maximumRequestBytes
+                ).failureStage
             )
         }
         // The synchronous WASM host import must begin from a fresh task turn.
         // This keeps the host frame budget independent of the framework call
         // depth that produced the StorageKit Wire request.
         await Task.yield()
-        let responseBytes = try dispatcher.dispatch(
-            requestBytes,
-            maximumResponseBytes: maximumResponseBytes
-        )
+        let responseBytes: ByteString
+        do {
+            responseBytes = try dispatcher.dispatch(
+                requestBytes,
+                maximumResponseBytes: maximumResponseBytes
+            )
+        } catch {
+            throw .rejected(stage: error.failureStage)
+        }
         guard responseBytes.count <= maximumResponseBytes else {
-            throw StorageHostTransportError.responseTooLarge(
-                actual: responseBytes.count,
-                maximum: maximumResponseBytes
+            throw .rejected(
+                stage: StorageHostTransportError.responseTooLarge(
+                    actual: responseBytes.count,
+                    maximum: maximumResponseBytes
+                ).failureStage
             )
         }
         return responseBytes

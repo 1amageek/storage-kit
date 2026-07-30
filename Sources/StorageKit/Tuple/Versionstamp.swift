@@ -171,6 +171,8 @@ extension Versionstamp: Comparable {
 // MARK: - TupleElement
 
 extension Versionstamp: TupleElement {
+    public var tupleValue: TupleValue? { .versionstamp(self) }
+
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(TupleTypeCode.versionstamp.rawValue)
         if let transactionVersion {

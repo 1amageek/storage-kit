@@ -7,7 +7,7 @@ struct ReversingStorageHostDispatcher:
     func dispatch(
         _ requestBytes: ByteString,
         maximumResponseBytes: Int
-    ) throws -> ByteString {
+    ) -> ByteString {
         ByteString(
             Array(requestBytes.reversed().prefix(maximumResponseBytes))
         )

@@ -5,5 +5,5 @@ public protocol StorageHostDispatching: Sendable {
     func dispatch(
         _ requestBytes: ByteString,
         maximumResponseBytes: Int
-    ) throws -> ByteString
+    ) throws(StorageHostTransportError) -> ByteString
 }

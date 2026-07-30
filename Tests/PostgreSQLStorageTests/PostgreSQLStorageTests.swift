@@ -41,10 +41,12 @@ struct PostgreSQLStorageTests {
         limit: Int = 0,
         reverse: Bool = false
     ) async throws -> [(key: ByteString, value: ByteString)] {
-        let seq = tx.getRange(begin: begin, end: end, limit: limit, reverse: reverse)
-        var result: [(key: ByteString, value: ByteString)] = []
-        for try await (key, value) in seq { result.append((key: key, value: value)) }
-        return result
+        try await tx.collectRange(
+            begin: begin,
+            end: end,
+            limit: limit,
+            reverse: reverse
+        )
     }
 
     // =========================================================================
@@ -653,15 +655,10 @@ struct PostgreSQLStorageTests {
         try await transaction.cancel()
 
         do {
-            let sequence = transaction.getRange(
+            _ = try await transaction.collectRange(
                 begin: [0x00],
-                end: [0xFF],
-                limit: 0,
-                reverse: false
+                end: [0xFF]
             )
-            for try await _ in sequence {
-                Issue.record("Should not yield any elements")
-            }
             Issue.record("Expected error")
         } catch let error as StorageError {
             guard error.code == .invalidOperation else {
@@ -961,11 +958,10 @@ struct PostgreSQLStorageTests {
 
     @Test func rangeResult_errorThrowsOnIteration() async throws {
         let result = PostgreSQLRangeResult(error: StorageError.backendError("test"))
+        var cursor = result.makeCursor()
 
         do {
-            for try await _ in result {
-                Issue.record("Should not yield any elements")
-            }
+            _ = try await cursor.next()
             Issue.record("Expected error to be thrown")
         } catch let error as StorageError {
             guard error.code == .backendFailure else {

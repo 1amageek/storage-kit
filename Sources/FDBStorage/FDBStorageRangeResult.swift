@@ -24,22 +24,22 @@ public struct FDBStorageRangeResult: TransactionRangeResult {
         self.source = .failure(error)
     }
 
-    public func makeAsyncIterator() -> AsyncIterator {
+    public func makeCursor() -> Cursor {
         switch source {
         case .sequence(let sequence, let transaction):
-            return AsyncIterator(
+            return Cursor(
                 sequence.makeAsyncIterator(),
                 transaction: transaction
             )
         case .failure(let error):
-            return AsyncIterator(error: error)
+            return Cursor(error: error)
         }
     }
 
-    /// A reference iterator whose aliases share one serialized iteration state.
-    /// Only that state may enter the FoundationDB iterator, so `next()`
+    /// A reference cursor whose aliases share one serialized iteration state.
+    /// Only that state may enter the FoundationDB cursor, so `next()`
     /// and `finish()` cannot overlap even when aliases are used concurrently.
-    public final class AsyncIterator: TransactionRangeIterator, Sendable {
+    public final class Cursor: TransactionRangeCursor, Sendable {
         private let iterationState: RangeIterationState
 
         init(
@@ -126,12 +126,12 @@ private actor RangeIterationState {
                 try await completion.waitForBoundary()
                 try Task.checkCancellation()
             case .sequence(
-                let iterator,
+                let cursor,
                 let transaction,
                 let currentLease
             ):
                 return try await readNext(
-                    iterator: iterator,
+                    cursor: cursor,
                     transaction: transaction,
                     currentLease: currentLease
                 )
@@ -151,7 +151,7 @@ private actor RangeIterationState {
             case .reading(let completion, true),
                  .finishing(let completion):
                 try await waitForFinishOperation(completion)
-            case .sequence(let iterator, let transaction, let lease):
+            case .sequence(let cursor, let transaction, let lease):
                 let completion = RangeIterationBoundary()
                 source = .finishing(completion)
                 var activeLease = lease
@@ -166,7 +166,7 @@ private actor RangeIterationState {
                     guard let activeLease else {
                         preconditionFailure("Range operation lease was not created")
                     }
-                    try await iterator.finish()
+                    try await cursor.finish()
                     activeLease.release()
                     source = .finished
                     completion.resolve(.success(()))
@@ -213,7 +213,7 @@ private actor RangeIterationState {
     }
 
     private func readNext(
-        iterator: FDB.AsyncKVSequence.AsyncIterator,
+        cursor: FDB.AsyncKVSequence.AsyncIterator,
         transaction: FDBStorageTransaction,
         currentLease: TransactionActivityLease?
     ) async throws -> (ByteString, ByteString)? {
@@ -240,13 +240,13 @@ private actor RangeIterationState {
         source = .reading(completion, finishRequested: false)
 
         do {
-            let element = try await iterator.next()
+            let element = try await cursor.next()
             try Task.checkCancellation()
             try transaction.validateOperationLease(for: .rangeRead)
 
             if finishWasRequested(for: completion) {
                 return try await completeRequestedFinish(
-                    iterator: iterator,
+                    cursor: cursor,
                     lease: lease,
                     completion: completion
                 )
@@ -260,7 +260,7 @@ private actor RangeIterationState {
             }
 
             lease.pause()
-            source = .sequence(iterator, transaction, lease)
+            source = .sequence(cursor, transaction, lease)
             completion.resolve(.success(()))
             return (element.key, element.value)
         } catch is CancellationError {
@@ -305,13 +305,13 @@ private actor RangeIterationState {
     }
 
     private func completeRequestedFinish(
-        iterator: FDB.AsyncKVSequence.AsyncIterator,
+        cursor: FDB.AsyncKVSequence.AsyncIterator,
         lease: TransactionActivityLease,
         completion: RangeIterationBoundary
     ) async throws -> (ByteString, ByteString)? {
         source = .finishing(completion)
         do {
-            try await iterator.finish()
+            try await cursor.finish()
             lease.release()
             source = .finished
             completion.resolve(.success(()))
@@ -406,7 +406,7 @@ private final class RangeIterationBoundary: Sendable {
         let waiters = state.withLock { state in
             precondition(
                 state.result == nil,
-                "Range iterator operation resolved more than once"
+                "Range cursor operation resolved more than once"
             )
             state.result = result
             let waiters = state.waiters

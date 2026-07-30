@@ -4,7 +4,7 @@ import Testing
 @Suite("Namespace Resolver Tests")
 struct NamespaceResolverTests {
     private func withDeterministicResolver<T: Sendable>(
-        _ operation: (
+        _ operation: @escaping @Sendable (
             DeterministicNamespaceResolver,
             any TransactionAccess
         ) async throws -> T

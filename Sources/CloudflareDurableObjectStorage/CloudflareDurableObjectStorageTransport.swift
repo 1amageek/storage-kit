@@ -5,5 +5,7 @@ import CloudflareDurableObjectStorageWire
 public protocol CloudflareDurableObjectStorageTransport: Sendable {
     var callExecution: CloudflareDurableObjectCallExecution { get }
 
-    func send(_ requestBytes: ByteString) async throws -> ByteString
+    func send(
+        _ requestBytes: ByteString
+    ) async throws(StorageTransportError) -> ByteString
 }

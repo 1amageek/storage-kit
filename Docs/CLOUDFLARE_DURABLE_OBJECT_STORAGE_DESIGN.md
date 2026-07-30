@@ -21,7 +21,7 @@ flowchart LR
     HTTP --> Router["Application-owned authenticated route"]
     Router --> DO["Application Durable Object"]
 
-    Reactor["Full database-framework WASI reactor"] --> HostTransport["CloudflareDurableObjectStorageHostTransport"]
+    Reactor["Full database-framework Embedded WASM reactor"] --> HostTransport["CloudflareDurableObjectStorageHostTransport"]
     HostTransport --> Import["storage_host.dispatch / receive / discard"]
     Import --> Store["StorageKitDurableObjectHost"]
 
@@ -50,9 +50,9 @@ must never leak into the public database API.
 | `StorageKitSystemClock` | StorageKit | `ContinuousClock` adapter for runtimes that provide the system clock implementation |
 | `StorageKitFoundation` | StorageKit, DatabaseTypesFoundation | Foundation `Date` and `UUID` Tuple Layer adapters |
 | `CloudflareDurableObjectStorageWire` | DatabaseTypes | Foundation-free protocol tags, request/response values, resource limits, bounded encoding, and bounded decoding |
-| `CloudflareDurableObjectStorage` | StorageKit, StorageKitSystemClock, and storage wire | Standard-WASI `StorageEngine`, transaction state machine, read-your-writes overlay, and typed StorageKit Wire client |
+| `CloudflareDurableObjectStorage` | StorageKit and storage wire | Embedded-compatible `StorageEngine`, transaction state machine, read-your-writes overlay, and typed StorageKit Wire client; the composition root injects its monotonic clock |
 | `CloudflareDurableObjectStorageHTTP` | Foundation and URLSession | Native HTTP transport only |
-| `CloudflareDurableObjectStorageHostTransport` | Cloudflare storage and storage wire | Synchronous request dispatch and response transfer for a standard WASI reactor |
+| `CloudflareDurableObjectStorageHostTransport` | Cloudflare storage and storage wire | Synchronous request dispatch and response transfer for the Embedded WASM reactor |
 
 `CloudflareDurableObjectStorageWire` and
 `CloudflareDurableObjectStorageHostTransport` are distinct products. Clients

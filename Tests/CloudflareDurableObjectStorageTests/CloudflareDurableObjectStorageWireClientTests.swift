@@ -1,6 +1,7 @@
 import CloudflareDurableObjectStorageWire
 import DatabaseTypes
 import StorageKit
+import StorageKitSystemClock
 import Testing
 
 @testable import CloudflareDurableObjectStorage
@@ -210,8 +211,10 @@ struct CloudflareDurableObjectStorageWireClientTests {
             transport: InMemoryCloudflareDurableObjectStorageTransport()
         )
         let scope = try StorageWireScope(databaseID: "main")
-        return try await CloudflareDurableObjectSharedClientRouter(client: client).engine(
-            for: scope)
+        return try await CloudflareDurableObjectSharedClientRouter(
+            client: client,
+            monotonicClock: SystemStorageClock()
+        ).engine(for: scope)
     }
 
     private func versionstampOperand(

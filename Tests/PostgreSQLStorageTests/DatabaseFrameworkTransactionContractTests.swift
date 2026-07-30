@@ -654,11 +654,11 @@ struct DatabaseFrameworkTransactionContractTests {
             let childTx = try engine.createTransaction()
             try childTx.setValue(ByteString(Array("child-write".utf8)), for: itemKey(type: "NestedRange", id: "child"))
 
-            let range = childTx.getRange(begin: [0x00], end: [0xFF])
             do {
-                for try await _ in range {
-                    Issue.record("Expected nested child range to throw")
-                }
+                _ = try await childTx.collectRange(
+                    begin: [0x00],
+                    end: [0xFF]
+                )
                 Issue.record("Expected nested child range to throw")
             } catch let error as StorageError {
                 #expect(error.code == .invalidOperation)

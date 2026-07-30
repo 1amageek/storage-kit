@@ -14,8 +14,10 @@ final class ConfiguredFailureCloudflareDurableObjectStorageTransport: Cloudflare
         self.error = error
     }
 
-    func send(_ requestBytes: ByteString) async throws -> ByteString {
+    func send(
+        _ requestBytes: ByteString
+    ) async throws(StorageTransportError) -> ByteString {
         _ = requestBytes
-        throw error
+        throw .storage(error)
     }
 }

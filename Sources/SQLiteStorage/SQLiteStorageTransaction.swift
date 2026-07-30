@@ -17,6 +17,15 @@ public final class SQLiteStorageTransaction:
 
     public static let declaredCapabilities = TransactionCapabilities.none
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
+    public var compaction: StorageCompactionAccess? {
+        StorageCompactionAccess(limits: compactionLimits) {
+            [self] maximumWorkUnits, continuation in
+            try await stageCompactionSlice(
+                maximumWorkUnits: maximumWorkUnits,
+                continuation: continuation
+            )
+        }
+    }
     public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
 
     private enum Lifecycle: Sendable {
@@ -45,6 +54,15 @@ public final class SQLiteStorageTransaction:
     private let mutationByteMeter: TransactionMutationByteMeter
     private let state = Mutex(MutableState())
     public let transactionDomain: StorageTransactionDomain
+
+    public var storageFailure: StorageError? {
+        state.withLock { state in
+            guard case .failed(let error, _) = state.lifecycle else {
+                return nil
+            }
+            return error
+        }
+    }
 
     init(
         identifier: UInt64,
@@ -935,6 +953,51 @@ public final class SQLiteStorageTransaction:
             operation: operation,
             backend: .sqlite,
             message: message
+        )
+    }
+}
+
+extension SQLiteStorageTransaction {
+    public func getValue(for key: ByteString) async throws -> ByteString? {
+        try await getValue(for: key, snapshot: false)
+    }
+
+    public func rangeCursor(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) -> KeyValueCursor {
+        KeyValueCursor(
+            consuming: getRange(
+                from: begin,
+                to: end,
+                limit: limit,
+                reverse: reverse,
+                snapshot: snapshot,
+                streamingMode: streamingMode
+            )
+        )
+    }
+
+    public func collectRange(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) async throws -> [(ByteString, ByteString)] {
+        try await TransactionRangeCollection.collect(
+            using: self,
+            from: begin,
+            to: end,
+            limit: limit,
+            reverse: reverse,
+            snapshot: snapshot,
+            streamingMode: streamingMode
         )
     }
 }

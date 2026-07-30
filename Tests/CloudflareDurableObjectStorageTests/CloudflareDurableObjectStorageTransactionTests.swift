@@ -223,9 +223,16 @@ struct CloudflareDurableObjectStorageTransactionTests {
         }
 
         let tx = try engine.createTransaction()
-        var iterator = tx.getRange(begin: [0x01], end: [0x05], limit: 0).makeAsyncIterator()
+        var cursor = tx.getRange(
+            from: .firstGreaterOrEqual([0x01]),
+            to: .firstGreaterOrEqual([0x05]),
+            limit: 0,
+            reverse: false,
+            snapshot: false,
+            streamingMode: .iterator
+        ).makeCursor()
 
-        let first = try await iterator.next()
+        let first = try await cursor.next()
 
         #expect(first?.0 == [0x01])
         #expect(pageCallCount.withLock { $0 } == 1)
@@ -310,11 +317,19 @@ struct CloudflareDurableObjectStorageTransactionTests {
         let tx = try engine.createTransaction()
         try tx.setValue([1], for: [0x01])
 
-        let sequence = tx.getRange(begin: [0x01], end: [0x02])
+        let range = tx.getRange(
+            from: .firstGreaterOrEqual([0x01]),
+            to: .firstGreaterOrEqual([0x02]),
+            limit: 0,
+            reverse: false,
+            snapshot: false,
+            streamingMode: .iterator
+        )
         try await tx.commit()
 
         await #expect(throws: StorageError.self) {
-            for try await _ in sequence {}
+            var cursor = range.makeCursor()
+            _ = try await cursor.next()
         }
     }
 
@@ -322,7 +337,10 @@ struct CloudflareDurableObjectStorageTransactionTests {
         let client = InMemoryCloudflareDurableObjectStorageClient()
         let firstScope = try StorageWireScope(databaseID: "main", tenantID: "tenant-a")
         let secondScope = try StorageWireScope(databaseID: "main", tenantID: "tenant-b")
-        let router = CloudflareDurableObjectSharedClientRouter(client: client)
+        let router = CloudflareDurableObjectSharedClientRouter(
+            client: client,
+            monotonicClock: SystemStorageClock()
+        )
         let first = try await router.engine(for: firstScope)
         let second = try await router.engine(for: secondScope)
 
@@ -877,7 +895,8 @@ struct CloudflareDurableObjectStorageTransactionTests {
         let scope = try StorageWireScope(databaseID: "main")
         return try await CloudflareDurableObjectSharedClientRouter(
             client: client,
-            limits: limits
+            limits: limits,
+            monotonicClock: SystemStorageClock()
         ).engine(for: scope)
     }
 }

@@ -11,12 +11,7 @@ struct SQLiteNestedTransactionTests {
         _ tx: some TransactionAccess,
         begin: ByteString, end: ByteString
     ) async throws -> [(key: ByteString, value: ByteString)] {
-        let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
-        var result: [(key: ByteString, value: ByteString)] = []
-        for try await (key, value) in seq {
-            result.append((key: key, value: value))
-        }
-        return result
+        try await tx.collectRange(begin: begin, end: end)
     }
 
     private func collectRange(
@@ -24,12 +19,7 @@ struct SQLiteNestedTransactionTests {
         from begin: KeySelector,
         to end: KeySelector
     ) async throws -> [(key: ByteString, value: ByteString)] {
-        let seq = tx.getRange(from: begin, to: end, limit: 0, reverse: false)
-        var result: [(key: ByteString, value: ByteString)] = []
-        for try await (key, value) in seq {
-            result.append((key: key, value: value))
-        }
-        return result
+        try await tx.collectRange(from: begin, to: end)
     }
 
     // =========================================================================
@@ -547,9 +537,10 @@ struct SQLiteNestedTransactionTests {
 
     @Test func rangeResult_errorThrowsOnIteration() async throws {
         let result = KeyValueRangeResult(error: StorageError.backendError("test"))
+        var cursor = result.makeCursor()
 
         do {
-            for try await _ in result {
+            while try await cursor.next() != nil {
                 Issue.record("Should not yield any elements")
             }
             Issue.record("Expected error to be thrown")

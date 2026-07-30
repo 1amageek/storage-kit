@@ -47,8 +47,20 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     )
 
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
+    public var compaction: StorageCompactionAccess? { nil }
     public var mutationByteLimit: Int? { mutationByteMeter.maximumBytes }
     public let transactionDomain: StorageTransactionDomain
+
+    public var storageFailure: StorageError? {
+        state.withLock { state in
+            switch state.lifecycle {
+            case .failed(let error, _), .commitUnknown(let error):
+                return error
+            case .open, .committing, .committed, .cancelling, .cancelled:
+                return nil
+            }
+        }
+    }
 
     private let isNested: Bool
     private let tableName: String
@@ -648,7 +660,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
     /// Fetch the next page of a range scan via keyset pagination.
     ///
-    /// Called by `PostgreSQLRangeResult.Iterator`. Always bounded to `batchSize`
+    /// Called by `PostgreSQLRangeResult.Cursor`. Always bounded to `batchSize`
     /// rows, so memory stays O(`batchSize`) however large the range is.
     func fetchRangeBatch(
         plan: RangeScanPlan,
@@ -1428,5 +1440,61 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             hash = hash &* 0x100000001b3
         }
         return Int64(bitPattern: hash)
+    }
+}
+
+extension PostgreSQLStorageTransaction {
+    public func getKey(
+        selector: KeySelector,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        try await TransactionKeySelection.resolve(
+            selector,
+            in: self,
+            snapshot: snapshot
+        )
+    }
+
+    public func getValue(for key: ByteString) async throws -> ByteString? {
+        try await getValue(for: key, snapshot: false)
+    }
+
+    public func rangeCursor(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) -> KeyValueCursor {
+        KeyValueCursor(
+            consuming: getRange(
+                from: begin,
+                to: end,
+                limit: limit,
+                reverse: reverse,
+                snapshot: snapshot,
+                streamingMode: streamingMode
+            )
+        )
+    }
+
+    public func collectRange(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) async throws -> [(ByteString, ByteString)] {
+        try await TransactionRangeCollection.collect(
+            using: self,
+            from: begin,
+            to: end,
+            limit: limit,
+            reverse: reverse,
+            snapshot: snapshot,
+            streamingMode: streamingMode
+        )
     }
 }

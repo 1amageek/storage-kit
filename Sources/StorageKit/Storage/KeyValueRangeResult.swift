@@ -1,5 +1,5 @@
 import DatabaseTypes
-/// Array-backed AsyncSequence for range scan results.
+/// Array-backed range result.
 ///
 /// Used by the in-memory backend, whose transaction view already exists as an
 /// owned collection. Persistent backends expose native lazy cursor sequences.
@@ -23,11 +23,11 @@ public struct KeyValueRangeResult: TransactionRangeResult {
         self.error = error
     }
 
-    public func makeAsyncIterator() -> Iterator {
-        Iterator(results: results, error: error)
+    public func makeCursor() -> Cursor {
+        Cursor(results: results, error: error)
     }
 
-    public struct Iterator: TransactionRangeIterator, Sendable {
+    public struct Cursor: TransactionRangeCursor, Sendable {
         public typealias Failure = StorageError
 
         private var results: [(key: ByteString, value: ByteString)]?

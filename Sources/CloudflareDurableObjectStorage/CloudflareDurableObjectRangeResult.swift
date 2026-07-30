@@ -5,19 +5,19 @@ import StorageKit
 public struct CloudflareDurableObjectRangeResult: TransactionRangeResult {
     public typealias Element = (ByteString, ByteString)
 
-    private let makeIteratorBody: @Sendable () -> Iterator
+    private let makeCursorBody: @Sendable () -> Cursor
 
     init(scan: @escaping @Sendable () -> CloudflareDurableObjectRangeScan) {
-        self.makeIteratorBody = {
-            Iterator(scan: scan())
+        self.makeCursorBody = {
+            Cursor(scan: scan())
         }
     }
 
-    public func makeAsyncIterator() -> Iterator {
-        makeIteratorBody()
+    public func makeCursor() -> Cursor {
+        makeCursorBody()
     }
 
-    public struct Iterator: TransactionRangeIterator, Sendable {
+    public struct Cursor: TransactionRangeCursor, Sendable {
         private var scan: any CloudflareDurableObjectRangeScanning
 
         init(scan: any CloudflareDurableObjectRangeScanning) {

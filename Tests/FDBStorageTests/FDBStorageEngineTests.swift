@@ -36,12 +36,18 @@ struct FDBStorageEngineTests {
 
     private func collectRange(
         _ tx: some TransactionAccess,
-        begin: ByteString, end: ByteString
+        begin: ByteString,
+        end: ByteString,
+        limit: Int = 0,
+        reverse: Bool = false
     ) async throws -> [(key: ByteString, value: ByteString)] {
-        let seq = tx.getRange(begin: begin, end: end, limit: 0, reverse: false)
-        var result: [(key: ByteString, value: ByteString)] = []
-        for try await (key, value) in seq { result.append((key: key, value: value)) }
-        return result
+        try await TransactionRangeCollection.collect(
+            using: tx,
+            from: .firstGreaterOrEqual(begin),
+            to: .firstGreaterOrEqual(end),
+            limit: limit,
+            reverse: reverse
+        )
     }
 
     @Test func namespaceRegistryExposesCatalogLifecycle() async throws {
@@ -127,6 +133,7 @@ struct FDBStorageEngineTests {
                 from: .firstGreaterOrEqual(key),
                 to: .firstGreaterThan(key),
                 limit: 1,
+                reverse: false,
                 snapshot: true,
                 streamingMode: .exact
             )
@@ -205,7 +212,8 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.collectRange(
+            let results = try await collectRange(
+                tx,
                 begin: prefixedKey(prefix, [0x01]),
                 end: prefixedKey(prefix, [0x06]),
                 reverse: true
@@ -228,7 +236,8 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let collected = try await tx.collectRange(
+            let collected = try await collectRange(
+                tx,
                 begin: prefixedKey(prefix, [0x01]),
                 end: prefixedKey(prefix, [0x06]),
                 limit: 2,
@@ -254,7 +263,8 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let collected = try await tx.collectRange(
+            let collected = try await collectRange(
+                tx,
                 begin: prefixedKey(prefix, [0x01]),
                 end: prefixedKey(prefix, [0x06]),
                 limit: 2
@@ -293,7 +303,8 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.collectRange(
+            let results = try await collectRange(
+                tx,
                 begin: prefix,
                 end: prefixedKey(prefix, [0xFF, 0xFF])
             )
@@ -328,7 +339,8 @@ struct FDBStorageEngineTests {
         }
 
         try await engine.withTransaction { tx in
-            let results = try await tx.collectRange(
+            let results = try await collectRange(
+                tx,
                 begin: prefix,
                 end: prefixedKey(prefix, [0xFF, 0xFF]),
                 reverse: true

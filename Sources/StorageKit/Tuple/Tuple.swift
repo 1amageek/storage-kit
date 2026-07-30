@@ -59,6 +59,15 @@ public struct Tuple: Sendable, Hashable, Equatable {
         return storedElements[index]
     }
 
+    /// Access a decoded element without runtime type casting.
+    public func value(at index: Int) throws -> TupleValue {
+        let element = try element(at: index)
+        guard let value = element.tupleValue else {
+            throw TupleError.elementHasNoCanonicalValue
+        }
+        return value
+    }
+
     /// Materializes a validated range of tuple elements without re-encoding them.
     ///
     /// Byte-backed elements remain views over their original owners. The returned
@@ -298,6 +307,8 @@ public struct Tuple: Sendable, Hashable, Equatable {
 // MARK: - TupleElement conformance for Tuple (nested)
 
 extension Tuple: TupleElement {
+    public var tupleValue: TupleValue? { .nested(self) }
+
     public func encodeTuple(to sink: inout TupleEncodingSink) {
         sink.writeByte(TupleTypeCode.nested.rawValue)
         sink.withNullEscaping { nestedSink in

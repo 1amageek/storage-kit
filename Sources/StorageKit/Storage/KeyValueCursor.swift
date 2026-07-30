@@ -12,10 +12,10 @@ public struct KeyValueCursor: Sendable {
     private let state: any KeyValueCursorState
 
     /// Erases a backend range result while retaining its native buffers.
-    public init<Sequence: TransactionRangeResult>(
-        consuming sequence: sending Sequence
+    public init<Result: TransactionRangeResult>(
+        consuming result: sending Result
     ) {
-        self.state = TypedKeyValueCursorState(sequence: sequence)
+        self.state = TypedKeyValueCursorState(result: result)
     }
 
     /// Advances this single-consumer cursor.
@@ -27,27 +27,28 @@ public struct KeyValueCursor: Sendable {
     public mutating func finish() async throws {
         try await state.finish()
     }
-}
 
-extension TransactionAccess {
-    /// Opens a streaming cursor while preserving the backend's native buffers.
-    public func rangeCursor(
-        from begin: KeySelector,
-        to end: KeySelector,
-        limit: Int = 0,
-        reverse: Bool = false,
-        snapshot: Bool = false,
-        streamingMode: StreamingMode = .wantAll
-    ) -> KeyValueCursor {
-        let sequence = getRange(
-            from: begin,
-            to: end,
-            limit: limit,
-            reverse: reverse,
-            snapshot: snapshot,
-            streamingMode: streamingMode
-        )
-        return KeyValueCursor(consuming: sequence)
+    /// Consumes the cursor and makes backend cleanup authoritative.
+    public mutating func consume(
+        _ body: (ByteString, ByteString) async throws -> Void
+    ) async throws {
+        do {
+            while let (key, value) = try await next() {
+                try await body(key, value)
+            }
+        } catch {
+            let iterationError = error
+            do {
+                try await finish()
+            } catch {
+                throw StorageRangeCleanupError(
+                    iterationError: iterationError,
+                    cleanupError: error
+                )
+            }
+            throw iterationError
+        }
+        try await finish()
     }
 }
 
@@ -56,11 +57,11 @@ private protocol KeyValueCursorState: Actor {
     func finish() async throws
 }
 
-private actor TypedKeyValueCursorState<Sequence: TransactionRangeResult>:
+private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
     KeyValueCursorState {
     private enum State {
-        case unopened(Sequence)
-        case ready(Sequence.AsyncIterator)
+        case unopened(Result)
+        case ready(Result.Cursor)
         case advancing(CursorAdvanceBoundary)
         case finishing(CursorFinishBoundary)
         case finished((any Error)?)
@@ -68,19 +69,19 @@ private actor TypedKeyValueCursorState<Sequence: TransactionRangeResult>:
 
     private var state: State
 
-    init(sequence: sending Sequence) {
-        self.state = .unopened(sequence)
+    init(result: sending Result) {
+        self.state = .unopened(result)
     }
 
     func next() async throws -> KeyValueCursor.Element? {
         try ensureStorageTaskIsActive()
 
-        var iterator: Sequence.AsyncIterator
+        var cursor: Result.Cursor
         switch state {
-        case .unopened(let sequence):
-            iterator = sequence.makeAsyncIterator()
-        case .ready(let storedIterator):
-            iterator = storedIterator
+        case .unopened(let result):
+            cursor = result.makeCursor()
+        case .ready(let storedCursor):
+            cursor = storedCursor
         case .advancing:
             throw concurrentOperationError("Concurrent cursor advance")
         case .finishing:
@@ -94,11 +95,11 @@ private actor TypedKeyValueCursorState<Sequence: TransactionRangeResult>:
 
         let element: KeyValueCursor.Element?
         do {
-            element = try await iterator.next(isolation: self)
+            element = try await cursor.next()
         } catch {
             let iterationError = error
             do {
-                try await iterator.finish(isolation: self)
+                try await cursor.finish(isolation: self)
                 state = .finished(nil)
                 boundary.resolve(.success(()))
             } catch {
@@ -114,7 +115,7 @@ private actor TypedKeyValueCursorState<Sequence: TransactionRangeResult>:
 
         if element == nil || boundary.isFinishRequested {
             do {
-                try await iterator.finish(isolation: self)
+                try await cursor.finish(isolation: self)
                 state = .finished(nil)
                 boundary.resolve(.success(()))
             } catch {
@@ -125,7 +126,7 @@ private actor TypedKeyValueCursorState<Sequence: TransactionRangeResult>:
             return element
         }
 
-        state = .ready(iterator)
+        state = .ready(cursor)
         boundary.resolve(.success(()))
         return element
     }
@@ -135,11 +136,11 @@ private actor TypedKeyValueCursorState<Sequence: TransactionRangeResult>:
         case .unopened:
             state = .finished(nil)
             return
-        case .ready(var iterator):
+        case .ready(var cursor):
             let boundary = CursorFinishBoundary()
             state = .finishing(boundary)
             do {
-                try await iterator.finish(isolation: self)
+                try await cursor.finish(isolation: self)
                 state = .finished(nil)
                 boundary.resolve(.success(()))
             } catch {

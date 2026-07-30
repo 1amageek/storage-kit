@@ -1,26 +1,28 @@
 import DatabaseTypes
-/// Backend-native range sequence with explicit asynchronous cleanup.
-public protocol TransactionRangeResult: AsyncSequence, Sendable
-where Element == (ByteString, ByteString), AsyncIterator: TransactionRangeIterator {}
+/// Backend-native range result with explicit asynchronous cleanup.
+public protocol TransactionRangeResult: Sendable {
+    associatedtype Cursor: TransactionRangeCursor
+
+    func makeCursor() -> Cursor
+}
 
 extension TransactionRangeResult {
     /// Consumes the range and always awaits backend cleanup.
     ///
-    /// `AsyncSequence` has no asynchronous early-exit hook. Transaction range
-    /// consumers must therefore use this scoped operation instead of a bare
-    /// `for await` loop whenever iteration can throw or stop before exhaustion.
+    /// Transaction range consumers use this scoped operation whenever
+    /// iteration can throw or stop before exhaustion.
     public func consumeRows(
         _ body: (ByteString, ByteString) async throws -> Void
     ) async throws {
-        var iterator = makeAsyncIterator()
+        var cursor = makeCursor()
         do {
-            while let (key, value) = try await iterator.next() {
+            while let (key, value) = try await cursor.next() {
                 try await body(key, value)
             }
         } catch {
             let iterationError = error
             do {
-                try await iterator.finish()
+                try await cursor.finish()
             } catch {
                 throw StorageRangeCleanupError(
                     iterationError: iterationError,
@@ -29,6 +31,6 @@ extension TransactionRangeResult {
             }
             throw iterationError
         }
-        try await iterator.finish()
+        try await cursor.finish()
     }
 }

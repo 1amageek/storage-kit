@@ -68,17 +68,16 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
         )
     }
 
-    public func withTransaction<T: Sendable>(
-        _ operation: (any TransactionAccess) async throws -> T
-    ) async throws -> T {
+    public func executeTransaction(
+        _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
+    ) async throws {
         let transaction = try createTransaction()
-        return try await ActiveTransactionScope.withActiveTransaction(
+        try await ActiveTransactionScope.withActiveTransaction(
             transaction
         ) { _ in
             do {
-                let result = try await operation(transaction)
+                try await operation(transaction)
                 try await transaction.commit()
-                return result
             } catch {
                 let operationError = error
                 do {

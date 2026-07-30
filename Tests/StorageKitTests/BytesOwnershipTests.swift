@@ -250,11 +250,11 @@ private struct OwnershipRows: TransactionRangeResult {
 
     let rows: [Element]
 
-    func makeAsyncIterator() -> Iterator {
-        Iterator(rows: rows)
+    func makeCursor() -> Cursor {
+        Cursor(rows: rows)
     }
 
-    struct Iterator: TransactionRangeIterator {
+    struct Cursor: TransactionRangeCursor {
         let rows: [Element]
         var index = 0
 
@@ -278,14 +278,14 @@ private struct NextCountingRows: TransactionRangeResult {
     let rows: [Element]
     let nextInvocationCounter: IteratorNextCounter
 
-    func makeAsyncIterator() -> Iterator {
-        Iterator(
+    func makeCursor() -> Cursor {
+        Cursor(
             rows: rows,
             nextInvocationCounter: nextInvocationCounter
         )
     }
 
-    struct Iterator: TransactionRangeIterator {
+    struct Cursor: TransactionRangeCursor {
         let rows: [Element]
         let nextInvocationCounter: IteratorNextCounter
         var index = 0

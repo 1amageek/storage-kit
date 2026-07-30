@@ -3,6 +3,7 @@ import DatabaseTypes
 import FoundationNetworking
 #endif
 import Foundation
+import CloudflareDurableObjectStorage
 import CloudflareDurableObjectStorageWire
 import Testing
 @testable import CloudflareDurableObjectStorageHTTP
@@ -16,10 +17,8 @@ struct CloudflareDurableObjectHTTPTransportTests {
         do {
             _ = try await transport.send([0x01, 0x02, 0x03])
             Issue.record("Expected request size validation failure")
-        } catch let error as CloudflareDurableObjectHTTPTransportError {
-            #expect(
-                error == .requestTooLarge(actual: 3, maximum: 2)
-            )
+        } catch let error {
+            #expect(error == .rejected(stage: .localValidation))
         }
         #expect(
             ScriptedCloudflareDurableObjectURLProtocol.capturedRequests.isEmpty
@@ -40,10 +39,8 @@ struct CloudflareDurableObjectHTTPTransportTests {
         do {
             _ = try await transport.send([0x01])
             Issue.record("Expected declared response size validation failure")
-        } catch let error as CloudflareDurableObjectHTTPTransportError {
-            #expect(
-                error == .responseTooLarge(actual: 5, maximum: 4)
-            )
+        } catch let error {
+            #expect(error == .rejected(stage: .afterDispatch))
         }
     }
 
@@ -61,10 +58,8 @@ struct CloudflareDurableObjectHTTPTransportTests {
         do {
             _ = try await transport.send([0x01])
             Issue.record("Expected streamed response size validation failure")
-        } catch let error as CloudflareDurableObjectHTTPTransportError {
-            #expect(
-                error == .responseTooLarge(actual: 5, maximum: 4)
-            )
+        } catch let error {
+            #expect(error == .rejected(stage: .afterDispatch))
         }
     }
 
@@ -80,10 +75,8 @@ struct CloudflareDurableObjectHTTPTransportTests {
         do {
             _ = try await transport.send([0x01])
             Issue.record("Expected response media type validation failure")
-        } catch let error as CloudflareDurableObjectHTTPTransportError {
-            #expect(
-                error == .unexpectedResponseMediaType(actual: "text/plain")
-            )
+        } catch let error {
+            #expect(error == .rejected(stage: .afterDispatch))
         }
     }
 
@@ -96,10 +89,8 @@ struct CloudflareDurableObjectHTTPTransportTests {
         do {
             _ = try await transport.send([0x01])
             Issue.record("Expected missing response media type failure")
-        } catch let error as CloudflareDurableObjectHTTPTransportError {
-            #expect(
-                error == .unexpectedResponseMediaType(actual: nil)
-            )
+        } catch let error {
+            #expect(error == .rejected(stage: .afterDispatch))
         }
     }
 
@@ -157,14 +148,17 @@ struct CloudflareDurableObjectHTTPTransportTests {
         )
         let transport = try makeTransport()
 
-        let result: Result<ByteString, any Error> = await Task {
+        let result: Result<ByteString, StorageTransportError> = await Task {
             withUnsafeCurrentTask { task in
                 task?.cancel()
             }
             do {
                 return .success(try await transport.send([0x01]))
-            } catch {
+            } catch let error as StorageTransportError {
                 return .failure(error)
+            } catch {
+                Issue.record("Transport returned an unexpected failure type")
+                return .failure(.rejected(stage: .afterDispatch))
             }
         }.value
 
@@ -172,7 +166,7 @@ struct CloudflareDurableObjectHTTPTransportTests {
         case .success:
             Issue.record("Expected cancellation")
         case .failure(let error):
-            #expect(error is CancellationError)
+            #expect(error == .cancelled)
         }
         #expect(
             ScriptedCloudflareDurableObjectURLProtocol.capturedRequests.isEmpty
@@ -203,8 +197,10 @@ struct CloudflareDurableObjectHTTPTransportTests {
         do {
             _ = try await task.value
             Issue.record("Expected cancellation")
+        } catch let error as StorageTransportError {
+            #expect(error == .cancelled)
         } catch {
-            #expect(error is CancellationError)
+            Issue.record("Transport returned an unexpected failure type")
         }
         for _ in 0..<10_000 {
             if ScriptedCloudflareDurableObjectURLProtocol.stopCount > 0 {

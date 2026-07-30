@@ -13,9 +13,15 @@ public struct SystemStorageClock: StorageMonotonicClock {
         )
     }
 
-    public func sleep(until deadline: StorageInstant) async throws {
+    public func sleep(
+        until deadline: StorageInstant
+    ) async throws(StorageClockError) {
         let remaining = now.duration(to: deadline)
         guard remaining > .zero else { return }
-        try await Self.clock.sleep(for: remaining)
+        do {
+            try await Self.clock.sleep(for: remaining)
+        } catch {
+            throw .cancelled
+        }
     }
 }

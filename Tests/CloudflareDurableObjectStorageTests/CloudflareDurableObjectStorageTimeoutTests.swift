@@ -7,20 +7,16 @@ import Testing
 
 @Suite("Cloudflare Durable Object Storage Timeout Tests")
 struct CloudflareDurableObjectStorageTimeoutTests {
-    private enum ClockFailure: Error, CustomStringConvertible {
-        case unavailable
-
-        var description: String { "Clock unavailable" }
-    }
-
     private struct FailingClock: StorageMonotonicClock {
         var now: StorageInstant {
             StorageInstant(durationSinceReference: .zero)
         }
 
-        func sleep(until deadline: StorageInstant) async throws {
+        func sleep(
+            until deadline: StorageInstant
+        ) async throws(StorageClockError) {
             _ = deadline
-            throw ClockFailure.unavailable
+            throw .unavailable
         }
     }
 
@@ -60,13 +56,20 @@ struct CloudflareDurableObjectStorageTimeoutTests {
         try transaction.setOption(
             forOption: .timeout(milliseconds: 25)
         )
-        var iterator =
+        var cursor =
             transaction
-            .getRange(begin: [0x01], end: [0x02])
-            .makeAsyncIterator()
+            .getRange(
+                from: .firstGreaterOrEqual([0x01]),
+                to: .firstGreaterOrEqual([0x02]),
+                limit: 0,
+                reverse: false,
+                snapshot: false,
+                streamingMode: .iterator
+            )
+            .makeCursor()
 
         do {
-            _ = try await iterator.next()
+            _ = try await cursor.next()
             Issue.record("Expected the range page to time out")
         } catch let error as StorageError {
             #expect(error.code == .transactionTimedOut)
