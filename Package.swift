@@ -29,7 +29,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/1amageek/database-types.git",
-            from: "26.0728.2"
+            from: "26.0729.3"
         ),
         .package(
             url: "https://github.com/1amageek/fdb-swift-bindings.git",
@@ -98,7 +98,6 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
-                "StorageKitSystemClock",
                 "CloudflareDurableObjectStorageWire",
             ]
         ),
