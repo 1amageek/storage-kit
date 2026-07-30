@@ -1,13 +1,13 @@
 {
-  "originHash" : "7c2c38c95d810c6dc2f72e8ec5a477987da8104104ace6e0e57f4647b37143b9",
+  "originHash" : "c0a32b7d52f3986b4f61dace436b7f553a7fa22555a290a1639730f337f9a1bc",
   "pins" : [
     {
       "identity" : "database-types",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/database-types.git",
       "state" : {
-        "revision" : "0d88ffda8afe260bf05c781c020f6da5e2227285",
-        "version" : "26.728.2"
+        "revision" : "4b0c81a9c322cbfa5628e411ee1fa931c2890e5d",
+        "version" : "26.730.0"
       }
     },
     {

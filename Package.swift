@@ -29,7 +29,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/1amageek/database-types.git",
-            from: "26.0729.3"
+            from: "26.0730.0"
         ),
         .package(
             url: "https://github.com/1amageek/fdb-swift-bindings.git",
