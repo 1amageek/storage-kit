@@ -451,14 +451,20 @@ struct InMemoryTransactionContractTests {
     // MARK: - InMemoryEngine shutdown
     // =========================================================================
 
-    @Test func shutdown_isNoOp() async throws {
+    @Test func shutdownTerminatesAdmissionWithoutDiscardingStoredState() async throws {
         let engine = InMemoryEngine()
         try await engine.withTransaction { tx in
             try tx.setValue([42], for: [0x01])
         }
-        // Default shutdown is no-op; should not throw or affect state
-        engine.shutdown()
+        await engine.shutdown()
         #expect(engine.count == 1)
+
+        do {
+            _ = try engine.createTransaction()
+            Issue.record("Expected shutdown engine to reject new transactions")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+        }
     }
 
     // =========================================================================

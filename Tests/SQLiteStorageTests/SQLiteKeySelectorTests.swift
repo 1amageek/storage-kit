@@ -8,7 +8,7 @@ struct SQLiteKeySelectorTests {
     @Test("Selector reads materialize one key and no value payload")
     func selectorReadCopiesOnlyTheSelectedKey() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         try await engine.withTransaction { transaction in
             try transaction.setValue(
                 ByteString([UInt8](repeating: 0xA5, count: 1_048_576)),
@@ -34,7 +34,7 @@ struct SQLiteKeySelectorTests {
     @Test("Selector matrix matches the canonical in-memory implementation")
     func selectorMatrixMatchesCanonicalSemantics() async throws {
         let sqliteEngine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { sqliteEngine.shutdown() }
+        defer { sqliteEngine.requestShutdown() }
         let memoryEngine = InMemoryEngine()
         let sqliteTransaction = try sqliteEngine.createTransaction()
         let memoryTransaction = try memoryEngine.createTransaction()
@@ -93,7 +93,7 @@ struct SQLiteKeySelectorTests {
     @Test("Standard selectors resolve against buffered writes")
     func standardSelectorsResolveAgainstBufferedWrites() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let transaction = try engine.createTransaction()
         for key: UInt8 in 1 ... 4 {
             try transaction.setValue([key], for: [key])
@@ -122,7 +122,7 @@ struct SQLiteKeySelectorTests {
     @Test("Arbitrary positive and negative offsets preserve FDB semantics")
     func arbitraryOffsetsPreserveSemantics() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let transaction = try engine.createTransaction()
         for key: UInt8 in 1 ... 4 {
             try transaction.setValue([key], for: [key])
@@ -151,7 +151,7 @@ struct SQLiteKeySelectorTests {
     @Test("Selectors return nil beyond either keyspace boundary")
     func selectorsReturnNilBeyondBoundaries() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let transaction = try engine.createTransaction()
         try transaction.setValue([1], for: [1])
         try transaction.setValue([2], for: [2])
@@ -171,7 +171,7 @@ struct SQLiteKeySelectorTests {
     @Test("Selector resolution does not assume FF is the final key")
     func selectorSupportsKeysAfterFF() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let transaction = try engine.createTransaction()
         try transaction.setValue([1], for: [])
         try transaction.setValue([2], for: [0xFF])
@@ -192,7 +192,7 @@ struct SQLiteKeySelectorTests {
     @Test("Unrepresentable offsets fail without poisoning the transaction")
     func unrepresentableOffsetIsTypedAndNonfatal() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let transaction = try engine.createTransaction()
 
         do {
@@ -219,7 +219,7 @@ struct SQLiteKeySelectorTests {
     @Test("Terminal transactions reject selector reads with a typed error")
     func terminalTransactionRejectsSelectorRead() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let transaction = try engine.createTransaction()
         try await transaction.cancel()
 

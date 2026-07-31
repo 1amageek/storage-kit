@@ -60,6 +60,35 @@ using the wire product do not inherit Foundation or URLSession. Mutation
 evaluation, selector resolution, and read-your-writes behavior belong to
 `StorageKit`; the wire product only represents and validates protocol data.
 
+## Engine and Cursor Lifecycle
+
+The StorageKit engine contract separates synchronous admission closure from
+asynchronous backend cleanup:
+
+```mermaid
+stateDiagram-v2
+    [*] --> active
+    active --> shuttingDown: requestShutdown()
+    shuttingDown --> shutdown: backend cleanup complete
+    active --> active: transaction admitted atomically
+    shuttingDown --> rejected: new transaction
+    shutdown --> rejected: new transaction
+```
+
+`requestShutdown()` is safe at synchronous destruction boundaries. Callers that
+need cleanup completion await `waitUntilShutdown()` or `shutdown()`. A cursor
+that escapes a transaction must retain the operation owner with the shared
+`KeyValueCursor` lifetime; terminal cursor cleanup releases that owner after
+backend resources are abandoned or finished. This preserves zero-copy key/value
+views while preventing Durable Object or WASM host resources from being closed
+before an admitted operation reaches its terminal state.
+
+Cloudflare storage itself has no independent in-process engine resource to close;
+its lifecycle transition closes admission. The Durable Object owns the transport
+and SQLite host lifecycle. The Swift storage engine therefore never interprets a
+shutdown request as a successful storage mutation or as permission to bypass
+the host transaction boundary.
+
 ## Storage Scope
 
 One logical scope routes to exactly one Durable Object:

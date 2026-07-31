@@ -22,8 +22,8 @@ struct SQLiteStorageEngineTests {
         let first = try SQLiteStorageEngine(configuration: .file(path))
         let second = try SQLiteStorageEngine(configuration: .file(path))
         defer {
-            first.shutdown()
-            second.shutdown()
+            first.requestShutdown()
+            second.requestShutdown()
         }
 
         let held = try first.createTransaction()
@@ -41,6 +41,8 @@ struct SQLiteStorageEngineTests {
         }
         try await contending.cancel()
         try await held.cancel()
+        await first.shutdown()
+        await second.shutdown()
     }
 
     // =========================================================================
@@ -621,7 +623,7 @@ struct SQLiteStorageEngineTests {
 
     @Test func closeThenCreateTransaction_throws() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        engine.close()
+        await engine.shutdown()
         do {
             _ = try engine.createTransaction()
             Issue.record("Expected error after close")
@@ -655,7 +657,7 @@ struct SQLiteStorageEngineTests {
             try await engine.withTransaction { tx in
                 try tx.setValue([1, 2, 3], for: [0x01])
             }
-            engine.close()
+            await engine.shutdown()
         }
 
         do {
@@ -664,7 +666,7 @@ struct SQLiteStorageEngineTests {
                 let persistedData = try await tx.getValue(for: [0x01])
                 #expect(persistedData == [1, 2, 3])
             }
-            engine.close()
+            await engine.shutdown()
         }
     }
 
@@ -901,7 +903,7 @@ struct SQLiteStorageEngineTests {
             try await queued.getValue(for: [0x00])
         }
         await waitForWaitingLeaseCount(1, engine: engine)
-        engine.shutdown()
+        engine.requestShutdown()
 
         do {
             _ = try await blockedRead.value
@@ -911,6 +913,7 @@ struct SQLiteStorageEngineTests {
         }
         try await queued.cancel()
         try await first.cancel()
+        await engine.waitUntilShutdown()
     }
 
     @Test func leaseReleasedAfterMultipleErrorsInSequence() async throws {

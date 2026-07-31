@@ -166,6 +166,75 @@ struct TransactionRangeCleanupTests {
         #expect(iterationRecorder.finishCount == 1)
     }
 
+    @Test func cursorConsumptionDoesNotNestAnExistingCleanupFailure() async {
+        let iterationRecorder = RangeIterationRecorder(finishError: .finish)
+        var cursor = KeyValueCursor(
+            consuming: FailingRows(iterationRecorder: iterationRecorder)
+        )
+
+        do {
+            try await cursor.consume { _, _ in }
+            Issue.record("Expected combined failure")
+        } catch let error as StorageRangeCleanupError {
+            #expect(error.iterationError as? RangeCleanupFailure == .body)
+            #expect(error.cleanupError as? RangeCleanupFailure == .finish)
+        } catch {
+            Issue.record("Expected StorageRangeCleanupError, got \(error)")
+        }
+
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
+    @Test func cursorRetainsOwnerUntilNaturalExhaustion() async throws {
+        let iterationRecorder = RangeIterationRecorder()
+        let lifetimeRecorder = CursorLifetimeRecorder()
+        var cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [([0x01], [0x11])],
+                iterationRecorder: iterationRecorder
+            )
+        ).retainingLifetime(
+            of: CursorLifetimeOwner(recorder: lifetimeRecorder)
+        )
+
+        #expect(lifetimeRecorder.releaseCount == 0)
+        _ = try await cursor.next()
+        #expect(lifetimeRecorder.releaseCount == 0)
+        _ = try await cursor.next()
+
+        #expect(iterationRecorder.finishCount == 1)
+        #expect(lifetimeRecorder.releaseCount == 1)
+    }
+
+    @Test func cursorAliasesShareRetainedOwnerUntilTerminalCleanup() async throws {
+        let iterationRecorder = RangeIterationRecorder()
+        let lifetimeRecorder = CursorLifetimeRecorder()
+        let original = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [([0x01], [0x11])],
+                iterationRecorder: iterationRecorder
+            )
+        )
+        var alias = original
+        var retained = original.retainingLifetime(
+            of: CursorLifetimeOwner(recorder: lifetimeRecorder)
+        )
+
+        _ = try await retained.next()
+        retained = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [],
+                iterationRecorder: RangeIterationRecorder()
+            )
+        )
+        #expect(lifetimeRecorder.releaseCount == 0)
+
+        try await alias.finish()
+
+        #expect(iterationRecorder.finishCount == 1)
+        #expect(lifetimeRecorder.releaseCount == 1)
+    }
+
 }
 
 private enum RangeCleanupFailure: Error, Equatable, Sendable {
@@ -200,6 +269,30 @@ private final class RangeIterationRecorder: Sendable {
 
     func recordFinish() {
         state.withLock { $0.finishCount += 1 }
+    }
+}
+
+private final class CursorLifetimeRecorder: Sendable {
+    private let releases = Mutex(0)
+
+    var releaseCount: Int {
+        releases.withLock { $0 }
+    }
+
+    func recordRelease() {
+        releases.withLock { $0 += 1 }
+    }
+}
+
+private final class CursorLifetimeOwner: Sendable {
+    private let recorder: CursorLifetimeRecorder
+
+    init(recorder: CursorLifetimeRecorder) {
+        self.recorder = recorder
+    }
+
+    deinit {
+        recorder.recordRelease()
     }
 }
 

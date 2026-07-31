@@ -93,6 +93,7 @@ private actor RangeIterationState {
         )
         case finishing(RangeIterationBoundary)
         case failure(StorageError)
+        case finishFailed(RangeIterationBoundaryFailure)
         case finished
     }
 
@@ -117,7 +118,7 @@ private actor RangeIterationState {
             case .failure(let error):
                 source = .finished
                 throw error
-            case .finished:
+            case .finishFailed, .finished:
                 return nil
             case .reading(let completion, _),
                  .finishing(let completion):
@@ -145,6 +146,8 @@ private actor RangeIterationState {
             case .failure, .finished:
                 source = .finished
                 return
+            case .finishFailed(let failure):
+                try failure.throwAtBoundary()
             case .reading(let completion, false):
                 source = .reading(completion, finishRequested: true)
                 try await waitForFinishOperation(completion)
@@ -173,7 +176,7 @@ private actor RangeIterationState {
                     return
                 } catch is CancellationError {
                     activeLease?.release()
-                    source = .finished
+                    source = .finishFailed(.cancelled)
                     completion.resolve(.failure(.cancelled))
                     throw CancellationError()
                 } catch let error as FDBError {
@@ -182,12 +185,12 @@ private actor RangeIterationState {
                         operation: .rangeRead
                     )
                     activeLease?.release()
-                    source = .finished
+                    source = .finishFailed(.storage(converted))
                     completion.resolve(.failure(.storage(converted)))
                     throw converted
                 } catch let error as StorageError {
                     activeLease?.release()
-                    source = .finished
+                    source = .finishFailed(.storage(error))
                     completion.resolve(.failure(.storage(error)))
                     throw error
                 } catch {
@@ -196,7 +199,7 @@ private actor RangeIterationState {
                         operation: .rangeRead
                     )
                     activeLease?.release()
-                    source = .finished
+                    source = .finishFailed(.storage(converted))
                     completion.resolve(.failure(.storage(converted)))
                     throw converted
                 }
@@ -265,7 +268,10 @@ private actor RangeIterationState {
             return (element.key, element.value)
         } catch is CancellationError {
             lease.release()
-            source = .finished
+            source = terminalSource(
+                for: .cancelled,
+                completion: completion
+            )
             completion.resolveIfPending(.failure(.cancelled))
             throw CancellationError()
         } catch let error as FDBError {
@@ -274,12 +280,18 @@ private actor RangeIterationState {
                 operation: .rangeRead
             )
             lease.release()
-            source = .finished
+            source = terminalSource(
+                for: .storage(converted),
+                completion: completion
+            )
             completion.resolveIfPending(.failure(.storage(converted)))
             throw converted
         } catch let error as StorageError {
             lease.release()
-            source = .finished
+            source = terminalSource(
+                for: .storage(error),
+                completion: completion
+            )
             completion.resolveIfPending(.failure(.storage(error)))
             throw error
         } catch {
@@ -288,7 +300,10 @@ private actor RangeIterationState {
                 operation: .rangeRead
             )
             lease.release()
-            source = .finished
+            source = terminalSource(
+                for: .storage(converted),
+                completion: completion
+            )
             completion.resolveIfPending(.failure(.storage(converted)))
             throw converted
         }
@@ -302,6 +317,15 @@ private actor RangeIterationState {
             return false
         }
         return requested
+    }
+
+    private func terminalSource(
+        for failure: RangeIterationBoundaryFailure,
+        completion: RangeIterationBoundary
+    ) -> Source {
+        finishWasRequested(for: completion)
+            ? .finishFailed(failure)
+            : .finished
     }
 
     private func completeRequestedFinish(
@@ -318,7 +342,7 @@ private actor RangeIterationState {
             return nil
         } catch is CancellationError {
             lease.release()
-            source = .finished
+            source = .finishFailed(.cancelled)
             completion.resolve(.failure(.cancelled))
             throw CancellationError()
         } catch let error as FDBError {
@@ -327,12 +351,12 @@ private actor RangeIterationState {
                 operation: .rangeRead
             )
             lease.release()
-            source = .finished
+            source = .finishFailed(.storage(converted))
             completion.resolve(.failure(.storage(converted)))
             throw converted
         } catch let error as StorageError {
             lease.release()
-            source = .finished
+            source = .finishFailed(.storage(error))
             completion.resolve(.failure(.storage(error)))
             throw error
         } catch {
@@ -341,7 +365,7 @@ private actor RangeIterationState {
                 operation: .rangeRead
             )
             lease.release()
-            source = .finished
+            source = .finishFailed(.storage(converted))
             completion.resolve(.failure(.storage(converted)))
             throw converted
         }

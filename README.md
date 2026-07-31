@@ -68,6 +68,40 @@ try await engine.withTransaction { tx in
 }
 ```
 
+### Lifecycle and ownership
+
+Engine shutdown has two explicit phases. `requestShutdown()` synchronously
+closes admission for new transactions and starts backend cleanup. `shutdown()`
+requests the same transition and asynchronously waits for the authoritative
+cleanup completion. Concurrent shutdown callers share one completion; cleanup is
+never started twice.
+
+```swift
+let engine = try SQLiteStorageEngine(configuration: .inMemory)
+defer { engine.requestShutdown() } // synchronous safety boundary
+
+try await engine.withTransaction { transaction in
+    // Transaction and cursor resources remain owned by this operation.
+}
+await engine.waitUntilShutdown() // use when cleanup completion matters
+```
+
+Transaction creation is admitted atomically with the engine lifecycle. Once
+shutdown admission closes, new transaction creation fails with a typed
+`StorageError`; a transaction admitted before the transition retains the
+backend resources required by its own terminal commit or cancellation contract.
+FoundationDB transfers its database handle to each admitted transaction so
+namespace operations can finish after the engine releases its handle. The
+FoundationDB client network is process-global and is intentionally not stopped
+by an individual storage engine.
+
+Range cursors are single-consumer, zero-copy views over backend-owned buffers.
+Call `finish()` when iteration stops early. `finish()` is terminal and repeated
+calls reproduce the same cleanup outcome. If a cursor escapes a transaction,
+the caller must retain the operation owner with
+`cursor.retainingLifetime(of:)`; the shared lifetime is released only after the
+cursor reaches terminal cleanup.
+
 ## Backends
 
 All backends conform to `StorageEngine` with a unified `init(configuration:)` pattern.

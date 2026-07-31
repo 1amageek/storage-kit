@@ -11,14 +11,11 @@ final class NamespaceRegistry:
     NamespaceCatalog,
     Sendable {
 
-    private let database: any DatabaseProtocol
     private let transactionDomain: StorageTransactionDomain
 
     init(
-        database: any DatabaseProtocol,
         transactionDomain: StorageTransactionDomain
     ) {
-        self.database = database
         self.transactionDomain = transactionDomain
     }
 
@@ -30,8 +27,8 @@ final class NamespaceRegistry:
             transaction,
             writes: true,
             operation: .write
-        ) { fdbTransaction in
-            let directoryLayer = DirectoryLayer(database: self.database)
+        ) { database, fdbTransaction in
+            let directoryLayer = DirectoryLayer(database: database)
             let directory = try await directoryLayer.createOrOpen(
                 path: path,
                 transaction: fdbTransaction
@@ -50,8 +47,8 @@ final class NamespaceRegistry:
             transaction,
             writes: false,
             operation: .read
-        ) { fdbTransaction in
-            let directoryLayer = DirectoryLayer(database: self.database)
+        ) { database, fdbTransaction in
+            let directoryLayer = DirectoryLayer(database: database)
             let directory = try await directoryLayer.open(
                 path: path,
                 transaction: fdbTransaction
@@ -70,8 +67,8 @@ final class NamespaceRegistry:
             transaction,
             writes: false,
             operation: .read
-        ) { fdbTransaction in
-            let directoryLayer = DirectoryLayer(database: self.database)
+        ) { database, fdbTransaction in
+            let directoryLayer = DirectoryLayer(database: database)
             return try await directoryLayer.list(
                 path: path,
                 transaction: fdbTransaction
@@ -87,8 +84,8 @@ final class NamespaceRegistry:
             transaction,
             writes: true,
             operation: .delete
-        ) { fdbTransaction in
-            let directoryLayer = DirectoryLayer(database: self.database)
+        ) { database, fdbTransaction in
+            let directoryLayer = DirectoryLayer(database: database)
             try await directoryLayer.remove(
                 path: path,
                 transaction: fdbTransaction
@@ -104,8 +101,8 @@ final class NamespaceRegistry:
             transaction,
             writes: false,
             operation: .read
-        ) { fdbTransaction in
-            let directoryLayer = DirectoryLayer(database: self.database)
+        ) { database, fdbTransaction in
+            let directoryLayer = DirectoryLayer(database: database)
             return try await directoryLayer.exists(
                 path: path,
                 transaction: fdbTransaction
@@ -117,7 +114,10 @@ final class NamespaceRegistry:
         _ transaction: any StorageKit.TransactionAccess,
         writes: Bool,
         operation: StorageOperation,
-        _ body: (any TransactionProtocol) async throws -> T
+        _ body: (
+            any DatabaseProtocol,
+            any TransactionProtocol
+        ) async throws -> T
     ) async throws -> T {
         guard let transaction = transaction as? FDBStorageTransaction else {
             throw StorageError(
@@ -127,13 +127,16 @@ final class NamespaceRegistry:
                 message: "FoundationDB directory operations require an FDB storage transaction"
             )
         }
+        let database = try transaction.retainedDatabaseForNamespaceOperation(
+            operation: operation
+        )
         return try await transaction.withNamespaceOperation(
             transactionDomain: transactionDomain,
             writes: writes,
             operation: operation
         ) { fdbTransaction in
             do {
-                return try await body(fdbTransaction)
+                return try await body(database, fdbTransaction)
             } catch let error as FDBError {
                 throw FDBStorageTransaction.convertFDBError(
                     error,

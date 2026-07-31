@@ -2,12 +2,13 @@ import CloudflareDurableObjectStorageWire
 import StorageKit
 
 /// StorageKit engine facade for one Cloudflare Durable Object scope.
-public struct CloudflareDurableObjectStorageEngine: StorageEngine {
+public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable {
     public typealias Configuration = CloudflareDurableObjectStorageConfiguration
     public typealias TransactionType = CloudflareDurableObjectStorageTransaction
 
     public let configuration: CloudflareDurableObjectStorageConfiguration
     private let transactionDomain: StorageTransactionDomain
+    private let storageLifecycle = StorageEngineLifecycle()
 
     public var monotonicClock: any StorageMonotonicClock {
         configuration.monotonicClock
@@ -32,13 +33,26 @@ public struct CloudflareDurableObjectStorageEngine: StorageEngine {
     }
 
     public func createTransaction() throws -> CloudflareDurableObjectStorageTransaction {
-        CloudflareDurableObjectStorageTransaction(
-            scope: configuration.scope,
-            client: configuration.client,
-            limits: configuration.limits,
-            monotonicClock: configuration.monotonicClock,
-            transactionDomain: transactionDomain
-        )
+        try storageLifecycle.withActiveAdmission(
+            backend: .cloudflareDurableObject,
+            operation: .beginTransaction
+        ) {
+            CloudflareDurableObjectStorageTransaction(
+                scope: configuration.scope,
+                client: configuration.client,
+                limits: configuration.limits,
+                monotonicClock: configuration.monotonicClock,
+                transactionDomain: transactionDomain
+            )
+        }
     }
 
+    public func requestShutdown() {
+        storageLifecycle.requestShutdown()
+    }
+
+    public func waitUntilShutdown() async {
+        requestShutdown()
+        await storageLifecycle.waitUntilShutdown()
+    }
 }

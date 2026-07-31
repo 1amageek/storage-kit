@@ -2,7 +2,6 @@ import StorageKit
 import PostgresNIO
 import NIOCore
 import Logging
-import Synchronization
 
 /// PostgreSQL backend StorageEngine implementation.
 ///
@@ -46,7 +45,7 @@ import Synchronization
 /// try await engine.withTransaction { tx in
 ///     tx.setValue([1, 2, 3], for: [0, 1])
 /// }
-/// engine.shutdown()
+/// await engine.shutdown()
 /// ```
 public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
 
@@ -60,8 +59,9 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     let client: PostgresClient
     private let configuration: PostgreSQLConfiguration
     private let logger: Logger
-    private let runTask: Mutex<Task<Void, Never>?>
+    private let runTask: Task<Void, Never>
     private let transactionDomain = StorageTransactionDomain()
+    private let storageLifecycle = StorageEngineLifecycle()
 
     public init(configuration: PostgreSQLConfiguration) async throws {
         // Validate the table name before constructing any SQL. The name is
@@ -81,9 +81,15 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         // the first query below blocks until the pool is ready rather than
         // racing it — no warm-up yield is needed.
         let client = self.client
-        self.runTask = Mutex(Task { await client.run() })
+        self.runTask = Task { await client.run() }
 
-        try await initializeSchema()
+        do {
+            try await initializeSchema()
+        } catch {
+            requestShutdown()
+            await waitUntilShutdown()
+            throw error
+        }
     }
 
     // MARK: - Table Name Validation
@@ -165,24 +171,33 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     /// If called within an existing `ActiveTransactionScope`, returns a nested
     /// transaction that reuses the parent's connection.
     public func createTransaction() throws -> PostgreSQLStorageTransaction {
-        if let existing = ActiveTransactionScope.current
-            as? PostgreSQLStorageTransaction,
-           existing.transactionDomain === transactionDomain {
-            return PostgreSQLStorageTransaction(parent: existing, logger: logger)
-        }
+        try storageLifecycle.withActiveAdmission(
+            backend: .postgreSQL,
+            operation: .beginTransaction
+        ) {
+            if let existing = ActiveTransactionScope.current
+                as? PostgreSQLStorageTransaction,
+               existing.transactionDomain === transactionDomain {
+                return PostgreSQLStorageTransaction(parent: existing, logger: logger)
+            }
 
-        return PostgreSQLStorageTransaction(
-            client: client,
-            beginStatement: configuration.beginStatement,
-            tableName: configuration.tableName,
-            logger: logger,
-            transactionDomain: transactionDomain
-        )
+            return PostgreSQLStorageTransaction(
+                client: client,
+                beginStatement: configuration.beginStatement,
+                tableName: configuration.tableName,
+                logger: logger,
+                transactionDomain: transactionDomain
+            )
+        }
     }
 
     public func executeTransaction(
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
+        try storageLifecycle.requireActive(
+            backend: .postgreSQL,
+            operation: .execute
+        )
         // Nested call — reuse the existing transaction.
         if let existing = ActiveTransactionScope.current
             as? PostgreSQLStorageTransaction,
@@ -235,13 +250,25 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
 
     // Namespace resolution uses the deterministic default implementation.
 
-    public func shutdown() {
-        let task = runTask.withLock { task -> Task<Void, Never>? in
-            let runningTask = task
-            task = nil
-            return runningTask
-        }
-        task?.cancel()
+    public func requestShutdown() {
+        let runTask = runTask
+        storageLifecycle.requestShutdown(
+            prepare: {
+                runTask.cancel()
+            },
+            cleanup: {
+                await runTask.value
+            }
+        )
+    }
+
+    public func waitUntilShutdown() async {
+        requestShutdown()
+        await storageLifecycle.waitUntilShutdown()
+    }
+
+    deinit {
+        requestShutdown()
     }
 
     /// Verify that PostgreSQL is reachable and that the configured KV table exists.
@@ -250,6 +277,10 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     /// maps backend failures into `StorageError` so callers get the same retryable
     /// classification as normal storage operations.
     public func checkReadiness() async throws -> PostgreSQLReadinessReport {
+        try storageLifecycle.requireActive(
+            backend: .postgreSQL,
+            operation: .read
+        )
         do {
             try await client.withConnection { [configuration, logger] conn in
                 _ = try await conn.query(PostgresQuery(unsafeSQL: "SELECT 1"), logger: logger)

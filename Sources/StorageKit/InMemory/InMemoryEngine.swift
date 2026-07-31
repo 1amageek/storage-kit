@@ -215,26 +215,32 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     /// transaction can never observe a version that belongs to another state.
     let _store: Mutex<StoreState>
     let transactionDomain = StorageTransactionDomain()
+    private let storageLifecycle = StorageEngineLifecycle()
 
     public init(configuration: Configuration = .init()) {
         self._store = Mutex(StoreState())
     }
 
     public func createTransaction() throws -> InMemoryTransaction {
-        let snapshot = try _store.withLock { state in
-            let transactionIdentifier = try state.registerTransaction()
-            return (
-                store: SortedKeyValueStore(state.store.entries),
-                version: state.version,
-                transactionIdentifier: transactionIdentifier
+        try storageLifecycle.withActiveAdmission(
+            backend: .inMemory,
+            operation: .beginTransaction
+        ) {
+            let snapshot = try _store.withLock { state in
+                let transactionIdentifier = try state.registerTransaction()
+                return (
+                    store: SortedKeyValueStore(state.store.entries),
+                    version: state.version,
+                    transactionIdentifier: transactionIdentifier
+                )
+            }
+            return InMemoryTransaction(
+                engine: self,
+                snapshot: snapshot.store,
+                snapshotVersion: snapshot.version,
+                transactionIdentifier: snapshot.transactionIdentifier
             )
         }
-        return InMemoryTransaction(
-            engine: self,
-            snapshot: snapshot.store,
-            snapshotVersion: snapshot.version,
-            transactionIdentifier: snapshot.transactionIdentifier
-        )
     }
 
     fileprivate func releaseTransaction(_ identifier: UInt64) {
@@ -271,6 +277,15 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     /// Current store size (for testing).
     public var count: Int {
         _store.withLock { $0.store.count }
+    }
+
+    public func requestShutdown() {
+        storageLifecycle.requestShutdown()
+    }
+
+    public func waitUntilShutdown() async {
+        requestShutdown()
+        await storageLifecycle.waitUntilShutdown()
     }
 }
 

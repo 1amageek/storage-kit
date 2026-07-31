@@ -49,6 +49,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     }
 
     let fdbTransaction: any TransactionProtocol
+    private let database: (any DatabaseProtocol)?
     private let commitRequestLimit: CommitRequestLimit
     private let state = Mutex(MutableState())
     private let mutationByteMeter = TransactionMutationByteMeter()
@@ -110,10 +111,12 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     init(
         _ fdbTransaction: any TransactionProtocol,
+        database: (any DatabaseProtocol)? = nil,
         transactionDomain: StorageTransactionDomain,
         commitRequestLimit: CommitRequestLimit = .default
     ) throws {
         self.fdbTransaction = fdbTransaction
+        self.database = database
         self.transactionDomain = transactionDomain
         self.commitRequestLimit = commitRequestLimit
         do {
@@ -169,6 +172,20 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             finishNamespaceOperation(token)
         }
         return try await body(fdbTransaction)
+    }
+
+    func retainedDatabaseForNamespaceOperation(
+        operation: StorageOperation
+    ) throws -> any DatabaseProtocol {
+        guard let database else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: operation,
+                backend: .foundationDB,
+                message: "FoundationDB namespace operations require a transaction created by FDBStorageEngine"
+            )
+        }
+        return database
     }
 
     // MARK: - Type Conversion

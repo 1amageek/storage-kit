@@ -494,7 +494,7 @@ struct SQLiteNestedTransactionTests {
             try tx.setValue([42], for: [0x01])
         }
 
-        engine.shutdown()
+        await engine.shutdown()
 
         // After shutdown, createTransaction should throw
         do {
@@ -510,13 +510,13 @@ struct SQLiteNestedTransactionTests {
 
     @Test func shutdown_idempotent() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        engine.shutdown()
-        engine.shutdown() // Second call should not crash
+        await engine.shutdown()
+        await engine.shutdown()
     }
 
     @Test func close_thenWithTransaction_throws() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        engine.close()
+        await engine.shutdown()
 
         do {
             try await engine.withTransaction { tx in
@@ -560,6 +560,6 @@ struct SQLiteNestedTransactionTests {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
         #expect(engine.namespaceResolver is DeterministicNamespaceResolver)
         #expect(engine.namespaceCatalog == nil)
-        engine.close()
+        await engine.shutdown()
     }
 }

@@ -10,12 +10,29 @@ public struct KeyValueCursor: Sendable {
     public typealias Element = (ByteString, ByteString)
 
     private let state: any KeyValueCursorState
+    private let lifetime: KeyValueCursorLifetime
 
     /// Erases a backend range result while retaining its native buffers.
     public init<Result: TransactionRangeResult>(
         consuming result: sending Result
     ) {
-        self.state = TypedKeyValueCursorState(result: result)
+        let lifetime = KeyValueCursorLifetime()
+        self.state = TypedKeyValueCursorState(
+            result: result,
+            lifetime: lifetime
+        )
+        self.lifetime = lifetime
+    }
+
+    /// Returns a cursor that keeps `owner` alive until terminal cursor cleanup.
+    ///
+    /// This changes only the control-flow lifetime. Backend-owned key and value
+    /// buffers continue through the same cursor state without materialization.
+    public consuming func retainingLifetime<Owner: Sendable>(
+        of owner: consuming Owner
+    ) -> KeyValueCursor {
+        lifetime.retain(owner)
+        return self
     }
 
     /// Advances this single-consumer cursor.
@@ -32,21 +49,42 @@ public struct KeyValueCursor: Sendable {
     public mutating func consume(
         _ body: (ByteString, ByteString) async throws -> Void
     ) async throws {
-        do {
-            while let (key, value) = try await next() {
-                try await body(key, value)
-            }
-        } catch {
-            let iterationError = error
+        while true {
+            let element: Element?
             do {
-                try await finish()
+                element = try await next()
+            } catch let cleanupError as StorageRangeCleanupError {
+                // `next()` has already performed terminal cleanup and preserved
+                // both failures. Do not wrap the same cleanup failure again.
+                throw cleanupError
             } catch {
-                throw StorageRangeCleanupError(
-                    iterationError: iterationError,
-                    cleanupError: error
-                )
+                let iterationError = error
+                do {
+                    try await finish()
+                } catch {
+                    throw StorageRangeCleanupError(
+                        iterationError: iterationError,
+                        cleanupError: error
+                    )
+                }
+                throw iterationError
             }
-            throw iterationError
+
+            guard let (key, value) = element else { break }
+            do {
+                try await body(key, value)
+            } catch {
+                let bodyError = error
+                do {
+                    try await finish()
+                } catch {
+                    throw StorageRangeCleanupError(
+                        iterationError: bodyError,
+                        cleanupError: error
+                    )
+                }
+                throw bodyError
+            }
         }
         try await finish()
     }
@@ -68,9 +106,21 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
     }
 
     private var state: State
+    private let lifetime: KeyValueCursorLifetime
 
-    init(result: sending Result) {
+    init(
+        result: sending Result,
+        lifetime: KeyValueCursorLifetime
+    ) {
         self.state = .unopened(result)
+        self.lifetime = lifetime
+    }
+
+    deinit {
+        // Releasing the backend result/cursor first preserves its synchronous
+        // abandonment cleanup before any attached lifetime owner can disappear.
+        state = .finished(nil)
+        lifetime.end()
     }
 
     func next() async throws -> KeyValueCursor.Element? {
@@ -87,6 +137,7 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
         case .finishing:
             throw concurrentOperationError("Cursor cleanup is in progress")
         case .finished:
+            lifetime.end()
             return nil
         }
 
@@ -101,9 +152,11 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
             do {
                 try await cursor.finish(isolation: self)
                 state = .finished(nil)
+                lifetime.end()
                 boundary.resolve(.success(()))
             } catch {
                 state = .finished(error)
+                lifetime.end()
                 boundary.resolve(.failure(error))
                 throw StorageRangeCleanupError(
                     iterationError: iterationError,
@@ -117,9 +170,11 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
             do {
                 try await cursor.finish(isolation: self)
                 state = .finished(nil)
+                lifetime.end()
                 boundary.resolve(.success(()))
             } catch {
                 state = .finished(error)
+                lifetime.end()
                 boundary.resolve(.failure(error))
                 throw error
             }
@@ -135,6 +190,7 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
         switch state {
         case .unopened:
             state = .finished(nil)
+            lifetime.end()
             return
         case .ready(var cursor):
             let boundary = CursorFinishBoundary()
@@ -142,9 +198,11 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
             do {
                 try await cursor.finish(isolation: self)
                 state = .finished(nil)
+                lifetime.end()
                 boundary.resolve(.success(()))
             } catch {
                 state = .finished(error)
+                lifetime.end()
                 boundary.resolve(.failure(error))
                 throw error
             }
@@ -153,6 +211,7 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
         case .finishing(let boundary):
             try await boundary.wait()
         case .finished(let error):
+            lifetime.end()
             if let error {
                 throw error
             }
@@ -165,6 +224,53 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
             operation: .rangeRead,
             message: message
         )
+    }
+}
+
+private final class KeyValueCursorLifetime: Sendable {
+    private struct State: Sendable {
+        var isEnded = false
+        var owners: [any KeyValueCursorLifetimeOwner] = []
+    }
+
+    private let state = Mutex(State())
+
+    func retain<Owner: Sendable>(_ owner: consuming Owner) {
+        let retainedOwner = RetainedKeyValueCursorLifetimeOwner(owner: owner)
+        let wasRetained = state.withLock { state in
+            guard !state.isEnded else { return false }
+            state.owners.append(retainedOwner)
+            return true
+        }
+        if !wasRetained {
+            // Keep rejection-side destruction outside the lifecycle lock. The
+            // owner's deinit may re-enter a database lifecycle.
+            withExtendedLifetime(retainedOwner) {}
+        }
+    }
+
+    func end() {
+        let owners = state.withLock { state in
+            guard !state.isEnded else {
+                return [any KeyValueCursorLifetimeOwner]()
+            }
+            state.isEnded = true
+            let owners = state.owners
+            state.owners.removeAll(keepingCapacity: false)
+            return owners
+        }
+        _ = owners
+    }
+}
+
+private protocol KeyValueCursorLifetimeOwner: Sendable {}
+
+private final class RetainedKeyValueCursorLifetimeOwner<Owner: Sendable>:
+    KeyValueCursorLifetimeOwner {
+    private let owner: Owner
+
+    init(owner: consuming Owner) {
+        self.owner = owner
     }
 }
 

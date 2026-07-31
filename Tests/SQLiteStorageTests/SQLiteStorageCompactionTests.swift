@@ -13,7 +13,7 @@ struct SQLiteStorageCompactionTests {
 
     @Test func advertisesCompactionOnTransactionOnly() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         #expect(!((engine as Any) is any StorageCompactionTransaction))
         let transaction = try engine.createTransaction()
@@ -23,7 +23,7 @@ struct SQLiteStorageCompactionTests {
 
     @Test func newDatabaseUsesIncrementalAutoVacuum() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let result = try await compact(
             engine: engine,
@@ -41,7 +41,7 @@ struct SQLiteStorageCompactionTests {
         let path = temporaryDatabasePath()
         defer { removeTemporaryDatabase(path) }
         let engine = try SQLiteStorageEngine(configuration: .file(path))
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         try await populateAndDeleteRecords(engine: engine, count: 2_000, valueSize: 4_096)
 
@@ -83,7 +83,7 @@ struct SQLiteStorageCompactionTests {
         unconfiguredConnection.close()
 
         let engine = try SQLiteStorageEngine(configuration: .file(path))
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         do {
             _ = try await compact(
@@ -102,7 +102,7 @@ struct SQLiteStorageCompactionTests {
 
     @Test func rejectsZeroWorkLimit() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         do {
             _ = try await compact(
@@ -121,7 +121,7 @@ struct SQLiteStorageCompactionTests {
 
     @Test func rejectsWorkLimitAboveBackendMaximum() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let maximum = SQLiteStorageTransaction.maximumCompactionWorkUnitsPerSlice
 
         do {
@@ -141,7 +141,7 @@ struct SQLiteStorageCompactionTests {
 
     @Test func rejectsCompactionOnNestedTransaction() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         try await engine.withTransaction { _ in
             let nested = try engine.createTransaction()
@@ -163,7 +163,7 @@ struct SQLiteStorageCompactionTests {
         let path = temporaryDatabasePath()
         defer { removeTemporaryDatabase(path) }
         let engine = try SQLiteStorageEngine(configuration: .file(path))
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         try await populateAndDeleteRecords(engine: engine, count: 2_000, valueSize: 4_096)
         let before = try databasePageMetrics(path: path)
@@ -193,7 +193,7 @@ struct SQLiteStorageCompactionTests {
         }
         #expect(marker == nil)
 
-        engine.shutdown()
+        await engine.shutdown()
         let after = try databasePageMetrics(path: path)
         #expect(after.freelistCount == before.freelistCount)
         #expect(after.pageCount == before.pageCount)
@@ -201,7 +201,7 @@ struct SQLiteStorageCompactionTests {
 
     @Test func rejectsMalformedContinuation() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let continuation = StorageCompactionContinuation(bytes: [0x00])
 
         do {
@@ -218,7 +218,7 @@ struct SQLiteStorageCompactionTests {
 
     @Test func rejectsUnknownContinuationVersion() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let continuation = StorageCompactionContinuation(bytes: [
             0x53, 0x43, 0x4D, 0x50,
             0x02, 0x01, 0x01, 0x00,
@@ -238,7 +238,7 @@ struct SQLiteStorageCompactionTests {
 
     @Test func rejectsContinuationForAnotherBackend() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
         let continuation = StorageCompactionContinuation(bytes: [
             0x53, 0x43, 0x4D, 0x50,
             0x01, 0x7F, 0x01, 0x00,

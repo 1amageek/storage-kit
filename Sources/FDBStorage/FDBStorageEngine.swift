@@ -1,5 +1,6 @@
 import StorageKit
 import FoundationDB
+import Synchronization
 
 /// FoundationDB backend StorageEngine implementation.
 ///
@@ -58,30 +59,44 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
 
     public typealias TransactionType = FDBStorageTransaction
 
-    public let database: any DatabaseProtocol
+    private let database: Mutex<(any DatabaseProtocol)?>
     private let transactionDomain = StorageTransactionDomain()
     private let commitRequestLimit: CommitRequestLimit
+    private let storageLifecycle = StorageEngineLifecycle()
 
     public init(configuration: Configuration) async throws {
-        if !FDBClient.isInitialized {
-            try await Self.clientStartup.ensureInitialized()
+        let database: any DatabaseProtocol
+        if let configuredDatabase = configuration.database {
+            database = configuredDatabase
+        } else {
+            if !FDBClient.isInitialized {
+                try await Self.clientStartup.ensureInitialized()
+            }
+            database = try FDBClient.openDatabase()
         }
-        self.database = try configuration.database ?? FDBClient.openDatabase()
+        self.database = Mutex(database)
         self.commitRequestLimit = configuration.commitRequestLimit
     }
 
     public func createTransaction() throws -> FDBStorageTransaction {
-        do {
-            let fdbTx = try database.createTransaction()
-            return try FDBStorageTransaction(
-                fdbTx,
-                transactionDomain: transactionDomain,
-                commitRequestLimit: commitRequestLimit
-            )
-        } catch let error as FDBError {
-            throw FDBStorageTransaction.convertFDBError(error, operation: .beginTransaction)
-        } catch {
-            throw FDBStorageTransaction.convertBackendError(error, operation: .beginTransaction)
+        try storageLifecycle.withActiveAdmission(
+            backend: .foundationDB,
+            operation: .beginTransaction
+        ) {
+            let database = try retainedDatabase(operation: .beginTransaction)
+            do {
+                let fdbTx = try database.createTransaction()
+                return try FDBStorageTransaction(
+                    fdbTx,
+                    database: database,
+                    transactionDomain: transactionDomain,
+                    commitRequestLimit: commitRequestLimit
+                )
+            } catch let error as FDBError {
+                throw FDBStorageTransaction.convertFDBError(error, operation: .beginTransaction)
+            } catch {
+                throw FDBStorageTransaction.convertBackendError(error, operation: .beginTransaction)
+            }
         }
     }
 
@@ -135,15 +150,49 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
 
     public var namespaceResolver: any NamespaceResolver {
         NamespaceRegistry(
-            database: database,
             transactionDomain: transactionDomain
         )
     }
 
     public var namespaceCatalog: (any NamespaceCatalog)? {
         NamespaceRegistry(
-            database: database,
             transactionDomain: transactionDomain
         )
+    }
+
+    public func requestShutdown() {
+        storageLifecycle.requestShutdown { [self] in
+            releaseDatabase()
+        }
+    }
+
+    public func waitUntilShutdown() async {
+        requestShutdown()
+        await storageLifecycle.waitUntilShutdown()
+    }
+
+    private func retainedDatabase(
+        operation: StorageOperation
+    ) throws -> any DatabaseProtocol {
+        try database.withLock { database in
+            guard let database else {
+                throw StorageError(
+                    code: .invalidOperation,
+                    operation: operation,
+                    backend: .foundationDB,
+                    message: "Storage engine shutdown has been requested"
+                )
+            }
+            return database
+        }
+    }
+
+    private func releaseDatabase() {
+        let releasedDatabase = database.withLock { database in
+            let releasedDatabase = database
+            database = nil
+            return releasedDatabase
+        }
+        withExtendedLifetime(releasedDatabase) {}
     }
 }

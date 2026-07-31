@@ -11,7 +11,7 @@
 /// ```
 /// Non-async backends satisfy the `async throws` requirement
 /// without actually suspending or throwing.
-public protocol StorageEngine: Sendable {
+public protocol StorageEngine: AnyObject, Sendable {
     /// Backend-specific configuration type.
     associatedtype Configuration: Sendable
 
@@ -43,12 +43,22 @@ public protocol StorageEngine: Sendable {
     /// namespace metadata.
     var namespaceCatalog: (any NamespaceCatalog)? { get }
 
-    /// Release resources held by this engine.
+    /// Atomically closes admission for new work and starts backend cleanup.
     ///
-    /// Called when the engine is no longer needed.
-    /// Implementations should be idempotent (safe to call multiple times).
-    /// Default implementation is a no-op.
-    func shutdown()
+    /// This synchronous entry point is suitable for `deinit` and other
+    /// boundaries that cannot suspend. It is idempotent, but it does not claim
+    /// that asynchronous backend cleanup has completed. Work admitted before
+    /// the lifecycle transition may finish and may retain resources whose
+    /// ownership was transferred to its transaction.
+    func requestShutdown()
+
+    /// Waits until the engine's backend-specific shutdown work has completed.
+    ///
+    /// Implementations must also request shutdown when no prior request exists,
+    /// so this method is safe to call directly. Concurrent callers share one
+    /// authoritative completion. Transaction-owned resources follow the
+    /// transaction and cursor lifetime contracts rather than the engine object.
+    func waitUntilShutdown() async
 
     /// Execute one transaction and own its commit or cancellation lifecycle.
     ///
@@ -88,7 +98,11 @@ extension StorageEngine {
 
     public var namespaceCatalog: (any NamespaceCatalog)? { nil }
 
-    public func shutdown() {}
+    /// Requests shutdown and awaits authoritative backend cleanup.
+    public func shutdown() async {
+        requestShutdown()
+        await waitUntilShutdown()
+    }
 
     public func createOwnedTransaction() throws -> any Transaction {
         try createTransaction()

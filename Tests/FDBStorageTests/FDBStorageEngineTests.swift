@@ -103,6 +103,67 @@ struct FDBStorageEngineTests {
         }
     }
 
+    @Test func shutdownTransfersDatabaseLifetimeToAdmittedTransaction() async throws {
+        let bootstrapEngine = try await makeEngine()
+        await bootstrapEngine.shutdown()
+
+        var database: FDBDatabase? = try FDBClient.openDatabase()
+        weak let observedDatabase = database
+        var engine: FDBStorageEngine? = try await FDBStorageEngine(
+            configuration: .init(database: try #require(database))
+        )
+        let namespaceResolver = try #require(engine).namespaceResolver
+        var transaction: FDBStorageTransaction? = try #require(engine)
+            .createTransaction()
+        let path = [
+            "storage-kit-lifecycle-\(Foundation.UUID().uuidString)"
+        ]
+
+        database = nil
+        await engine?.shutdown()
+        engine = nil
+
+        #expect(observedDatabase != nil)
+        do {
+            let admittedTransaction = try #require(transaction)
+            _ = try await namespaceResolver.resolveOrCreate(
+                path: path,
+                transaction: admittedTransaction
+            )
+            try await admittedTransaction.commit()
+        }
+        transaction = nil
+        #expect(observedDatabase == nil)
+
+        let cleanupEngine = try await makeEngine()
+        try await cleanupEngine.withTransaction { transaction in
+            let catalog = try #require(cleanupEngine.namespaceCatalog)
+            try await catalog.removeNamespace(
+                path: path,
+                transaction: transaction
+            )
+        }
+        await cleanupEngine.shutdown()
+    }
+
+    @Test func shutdownRequestRejectsNewTransactions() async throws {
+        let engine = try await makeEngine()
+        engine.requestShutdown()
+
+        do {
+            _ = try engine.createTransaction()
+            Issue.record("Expected FoundationDB engine to reject new transactions")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+            #expect(error.operation == .beginTransaction)
+            #expect(error.backend == .foundationDB)
+        } catch {
+            Issue.record("Expected StorageError, got \(error)")
+        }
+
+        await engine.waitUntilShutdown()
+    }
+
     @Test func fdbResultsRemainBorrowedUntilExplicitDetach() async throws {
         let engine = try await makeEngine()
         let prefix = testPrefix()

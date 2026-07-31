@@ -644,6 +644,10 @@ struct FDBStorageTransactionFootprintTests {
         let finishFailure = try #require(await finishTask.value)
         #expect(readFailure == finishFailure)
         #expect(readFailure.operation == .rangeRead)
+        let repeatedFinishFailure = try #require(
+            await self.finishFailure(from: cursor)
+        )
+        #expect(repeatedFinishFailure == finishFailure)
 
         let rowAfterFinish = try await cursor.next()
         #expect(rowAfterFinish == nil)

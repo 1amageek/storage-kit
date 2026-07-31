@@ -136,7 +136,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// `try await transaction.commit()`
     @Test func transactionRunner_createCommitPattern() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "User", id: "user-001")
         let value = serializeItem(name: "Alice", email: "alice@example.com")
@@ -164,7 +164,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// On error → `transaction.cancel()` → retry
     @Test func transactionRunner_cancelOnError() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "User", id: "user-002")
         let value = serializeItem(name: "Bob", email: "bob@example.com")
@@ -196,7 +196,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// read:  transaction.getValue(for: key, snapshot: snapshot)
     @Test func itemStorage_writeReadPattern() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let users: [(id: String, name: String, email: String)] = [
             ("u1", "Alice", "alice@test.com"),
@@ -233,7 +233,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// Second setValue for the same key overwrites the value.
     @Test func itemStorage_overwritePattern() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "User", id: "u-overwrite")
 
@@ -266,7 +266,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// - Set-based diff: clear removed keys, set new keys
     @Test func indexMaintenance_diffBasedUpdate() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let userId = "user-idx-001"
         let itemKeyBytes = itemKey(type: "User", id: userId)
@@ -323,7 +323,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// collectRange(from: .firstGreaterOrEqual(begin), to: .firstGreaterOrEqual(end))
     @Test func collectRange_indexScanPattern() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         // Create multiple items with index entries
         let tx1 = try engine.createTransaction()
@@ -360,7 +360,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// Mirrors DatabaseDataStore count operation with collectRange.
     @Test func collectRange_countPattern() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let tx1 = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(tx1) {
@@ -390,7 +390,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// Mirrors DatabaseDataStore reverse scan with limit.
     @Test func collectRange_reverseScanWithLimit() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let tx1 = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(tx1) {
@@ -430,7 +430,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// Clear all items and indexes of a type using subspace range.
     @Test func bulkDeletion_clearAllTypeData() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         // Write items + indexes for two types
         let tx1 = try engine.createTransaction()
@@ -485,7 +485,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// clearAllBlobs(for: key) + clear(key: key)
     @Test func itemStorage_deletePattern() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "User", id: "user-delete")
 
@@ -540,7 +540,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// a nested transaction reusing the parent connection.
     @Test func nestedTransaction_reuseParentConnection() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let outerKey = itemKey(type: "Outer", id: "o-1")
         let innerKey = itemKey(type: "Inner", id: "i-1")
@@ -574,7 +574,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// Mirrors nested transaction cancel: inner cancel discards inner writes only.
     @Test func nestedTransaction_innerCancelDoesNotAffectOuter() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let outerKey = itemKey(type: "Outer", id: "o-2")
         let innerKey = itemKey(type: "Inner", id: "i-2")
@@ -601,7 +601,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
     @Test func nestedTransaction_childSeesParentBufferedWrite() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "NestedVisibility", id: "parent-buffer")
         let value = ByteString(Array("parent-buffered".utf8))
@@ -621,7 +621,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
     @Test func nestedTransaction_childCommitPreservesParentBeforeChildOrderWithLeasedParent() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "NestedOrdering", id: "ordered-key")
 
@@ -647,7 +647,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
     @Test func nestedTransaction_rangeWithUncommittedChildWritesThrows() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let parentTx = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(parentTx) {
@@ -686,7 +686,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// }
     @Test func transactionRunner_retryLoop() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         var attempts = 0
         let maxRetries = 3
@@ -731,7 +731,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// ItemStorage.write(data, for: key) then ItemStorage.read(for: key)
     @Test func readYourWrites_withinTransaction() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "User", id: "ryw-1")
         let value = serializeItem(name: "ReadYourWrites", email: "ryw@test.com")
@@ -754,7 +754,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// DatabaseDataStore reads old value, writes new value, then may read again.
     @Test func readYourWrites_overwriteWithinTransaction() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "User", id: "ryw-2")
 
@@ -790,7 +790,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// Mirrors AggregationIndex atomicOp(.add) usage for counters.
     @Test func atomicAdd_counterPattern() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let counterKey: ByteString = [SubspacePrefix.indexes, 0x10, 0x01] // Aggregation counter key
 
@@ -844,7 +844,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// context.delete(item) → context.save() (delete item + clear indexes)
     @Test func fullCRUDLifecycle() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let userId = "lifecycle-001"
         let itemKeyBytes = itemKey(type: "User", id: userId)
@@ -923,7 +923,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// (no connection acquired = no-op commit).
     @Test func lazyConnection_readOnlyNoOp() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         // Pre-populate
         let setup = try engine.createTransaction()
@@ -941,7 +941,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// Verifies that createTransaction with no operations at all commits as no-op.
     @Test func lazyConnection_emptyCommit() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         // No reads, no writes — should be a pure no-op
         let tx = try engine.createTransaction()
@@ -957,7 +957,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// has its own subspace. Operations on one type do not affect another.
     @Test func multiType_subspaceIsolation() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let tx = try engine.createTransaction()
         try await ActiveTransactionScope.$current.withValue(tx) {
@@ -1005,7 +1005,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// at init time (nil for lazy parent) and could not acquire a connection.
     @Test func nestedTransaction_lazyParent_readDelegation() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "LazyNested", id: "ln-1")
 
@@ -1037,7 +1037,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// the parent has not acquired a connection yet.
     @Test func nestedTransaction_lazyParent_writeTransfer() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "LazyNested", id: "ln-2")
 
@@ -1063,7 +1063,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// in the same transaction.
     @Test func nestedTransaction_lazyParent_readThenWrite() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let readKey = itemKey(type: "LazyNested", id: "ln-3-read")
         let writeKey = itemKey(type: "LazyNested", id: "ln-3-write")
@@ -1103,7 +1103,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// a connection is a clean no-op (no crash, no leak).
     @Test func cancel_lazyTransaction_noConnection() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let tx = try engine.createTransaction()
         try tx.setValue(ByteString(Array("data".utf8)), for: [0xF0, 0x01])
@@ -1124,7 +1124,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// a connection properly rolls back and releases it.
     @Test func cancel_lazyTransaction_withConnection() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "CancelTest", id: "ct-1")
 
@@ -1153,7 +1153,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// param to an absent key yields exactly those 3 bytes (zero + param).
     @Test func atomicOp_addThreeByteParam_appliesLittleEndian() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let counterKey: ByteString = [SubspacePrefix.schema, 0xF0, 0x01]
 
@@ -1176,7 +1176,7 @@ struct DatabaseFrameworkTransactionContractTests {
     /// without double-ROLLBACK issues.
     @Test func withTransaction_operationError_cleanRollback() async throws {
         let engine = try await makeEngine()
-        defer { engine.shutdown() }
+        defer { engine.requestShutdown() }
 
         let key = itemKey(type: "RollbackTest", id: "rb-1")
 

@@ -35,6 +35,7 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     private let coordinator: SQLiteTransactionCoordinator
     private let transactionDomain = StorageTransactionDomain()
     private let state = Mutex(EngineState())
+    private let storageLifecycle = StorageEngineLifecycle()
 
     public init(configuration: Configuration) throws {
         let connection = try SQLiteConnectionHandle(path: configuration.path)
@@ -48,24 +49,26 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     }
 
     public func createTransaction() throws -> SQLiteStorageTransaction {
-        guard !lifetime.isClosed else {
-            throw Self.closedError(operation: .beginTransaction)
-        }
-        let identifier = try allocateTransactionIdentifier()
+        try storageLifecycle.withActiveAdmission(
+            backend: .sqlite,
+            operation: .beginTransaction
+        ) {
+            let identifier = try allocateTransactionIdentifier()
 
-        if let existing = ActiveTransactionScope.current
-            as? SQLiteStorageTransaction,
-           existing.transactionDomain === transactionDomain {
-            return try existing.makeChild(identifier: identifier)
-        }
+            if let existing = ActiveTransactionScope.current
+                as? SQLiteStorageTransaction,
+               existing.transactionDomain === transactionDomain {
+                return try existing.makeChild(identifier: identifier)
+            }
 
-        return SQLiteStorageTransaction(
-            identifier: identifier,
-            coordinator: coordinator,
-            connection: connection,
-            lifetime: lifetime,
-            transactionDomain: transactionDomain
-        )
+            return SQLiteStorageTransaction(
+                identifier: identifier,
+                coordinator: coordinator,
+                connection: connection,
+                lifetime: lifetime,
+                transactionDomain: transactionDomain
+            )
+        }
     }
 
     public func executeTransaction(
@@ -93,19 +96,28 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
         }
     }
 
-    /// Closes the connection and wakes every queued lease waiter with a typed
-    /// failure. Closing is idempotent.
-    public func close() {
-        guard lifetime.close() else { return }
-        connection.close()
+    public func requestShutdown() {
+        let lifetime = lifetime
         let coordinator = coordinator
-        Task {
-            await coordinator.shutdown()
-        }
+        let connection = connection
+        storageLifecycle.requestShutdown(
+            prepare: {
+                _ = lifetime.close()
+            },
+            cleanup: {
+                await coordinator.shutdown()
+                connection.close()
+            }
+        )
     }
 
-    public func shutdown() {
-        close()
+    public func waitUntilShutdown() async {
+        requestShutdown()
+        await storageLifecycle.waitUntilShutdown()
+    }
+
+    deinit {
+        requestShutdown()
     }
 
     var rangeInstrumentation: SQLiteRangeInstrumentation {

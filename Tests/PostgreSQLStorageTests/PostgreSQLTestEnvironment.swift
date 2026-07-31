@@ -26,7 +26,8 @@ enum PostgreSQLTestEnvironment {
 
     /// Create a fresh engine. Each call creates a new engine and connection pool.
     ///
-    /// NOTE: Callers MUST call `engine.shutdown()` when done to release the pool.
+    /// NOTE: Callers must await `engine.shutdown()` when completion matters or
+    /// call `requestShutdown()` from a synchronous cleanup boundary.
     static func makeEngine() async throws -> PostgreSQLStorageEngine {
         guard let host = ProcessInfo.processInfo.environment["POSTGRES_TEST_HOST"] else {
             throw PostgreSQLTestEnvironmentError.hostNotConfigured
