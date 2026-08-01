@@ -102,6 +102,13 @@ the caller must retain the operation owner with
 `cursor.retainingLifetime(of:)`; the shared lifetime is released only after the
 cursor reaches terminal cleanup.
 
+PostgreSQL query bindings are an explicit ownership boundary rather than a
+zero-copy cursor. PostgresNIO may retain a parameter after the synchronous
+`ByteString` borrow returns, so each bound key or value is copied directly once
+into its final independently owned `ByteBuffer`. The binding helper and its
+borrow-counting test enforce one source borrow, distinct backing addresses, and
+byte-for-byte equivalence without an intermediate array.
+
 ## Backends
 
 All backends conform to `StorageEngine` with a unified `init(configuration:)` pattern.

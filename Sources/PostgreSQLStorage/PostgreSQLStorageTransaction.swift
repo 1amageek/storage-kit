@@ -573,7 +573,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         do {
             let connection = try await ensureConnection()
             var bindings = PostgresBindings()
-            bindings.append(ByteBuffer(bytes: key), context: .default)
+            bindings.append(
+                PostgreSQLBindingBytes.copyToOwnedBuffer(key),
+                context: .default
+            )
             let sql = "SELECT value FROM \(tableName) WHERE key = $1"
             let rows = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
             for try await (value) in rows.decode(ByteBuffer.self) {
@@ -697,7 +700,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
             var bindings = PostgresBindings()
             for value in bindValues {
-                bindings.append(ByteBuffer(bytes: value), context: .default)
+                bindings.append(
+                    PostgreSQLBindingBytes.copyToOwnedBuffer(value),
+                    context: .default
+                )
             }
             let rows = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
             var results: [(ByteString, ByteString)] = []
@@ -1353,8 +1359,14 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             for entry in deduped[start..<end] {
                 tuples.append("($\(parameterIndex + 1), $\(parameterIndex + 2))")
                 parameterIndex += 2
-                bindings.append(ByteBuffer(bytes: entry.key), context: .default)
-                bindings.append(ByteBuffer(bytes: entry.value), context: .default)
+                bindings.append(
+                    PostgreSQLBindingBytes.copyToOwnedBuffer(entry.key),
+                    context: .default
+                )
+                bindings.append(
+                    PostgreSQLBindingBytes.copyToOwnedBuffer(entry.value),
+                    context: .default
+                )
             }
             let sql = "INSERT INTO \(tableName) (key, value) VALUES \(tuples.joined(separator: ", ")) "
                 + "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
@@ -1374,7 +1386,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             for key in keys[start..<end] {
                 placeholders.append("$\(parameterIndex + 1)")
                 parameterIndex += 1
-                bindings.append(ByteBuffer(bytes: key), context: .default)
+                bindings.append(
+                    PostgreSQLBindingBytes.copyToOwnedBuffer(key),
+                    context: .default
+                )
             }
             let sql = "DELETE FROM \(tableName) WHERE key IN (\(placeholders.joined(separator: ", ")))"
             try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
@@ -1384,8 +1399,14 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
     private func deleteRange(connection: PostgresConnection, begin: ByteString, end: ByteString) async throws {
         var bindings = PostgresBindings()
-        bindings.append(ByteBuffer(bytes: begin), context: .default)
-        bindings.append(ByteBuffer(bytes: end), context: .default)
+        bindings.append(
+            PostgreSQLBindingBytes.copyToOwnedBuffer(begin),
+            context: .default
+        )
+        bindings.append(
+            PostgreSQLBindingBytes.copyToOwnedBuffer(end),
+            context: .default
+        )
         let sql = "DELETE FROM \(tableName) WHERE key >= $1 AND key < $2"
         try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
     }
@@ -1402,7 +1423,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         try await lockAtomicKey(connection: connection, key: key)
 
         var selectBindings = PostgresBindings()
-        selectBindings.append(ByteBuffer(bytes: key), context: .default)
+        selectBindings.append(
+            PostgreSQLBindingBytes.copyToOwnedBuffer(key),
+            context: .default
+        )
         let selectSQL = "SELECT value FROM \(tableName) WHERE key = $1 FOR UPDATE"
         let rows = try await connection.query(
             PostgresQuery(unsafeSQL: selectSQL, binds: selectBindings),
