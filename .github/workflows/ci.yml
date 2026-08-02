@@ -21,6 +21,7 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 45
     env:
+      FDB_VERSION: "7.3.69"
       XCODE_TEST_RESULT_DIRECTORY: /tmp/storage-kit-postgresql-results
       POSTGRES_TEST_HOST: localhost
       POSTGRES_TEST_PORT: "5432"
@@ -53,6 +54,16 @@ jobs:
         run: |
           swift --version
           xcrun --toolchain "$TOOLCHAINS" swiftc --version
+
+      - name: Install FoundationDB SDK
+        run: |
+          fdb_package="$RUNNER_TEMP/FoundationDB-${FDB_VERSION}_arm64.pkg"
+          curl -fL --retry 3 -o "$fdb_package" \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/FoundationDB-${FDB_VERSION}_arm64.pkg"
+          sudo installer -pkg "$fdb_package" -target /
+          sudo launchctl unload /Library/LaunchDaemons/com.foundationdb.fdbmonitor.plist 2>/dev/null || true
+          test -f /usr/local/include/foundationdb/fdb_c.h
+          test -f /usr/local/lib/libfdb_c.dylib
 
       - name: Install PostgreSQL 16
         run: |
