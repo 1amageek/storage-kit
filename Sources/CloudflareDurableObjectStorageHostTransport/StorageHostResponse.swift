@@ -2,6 +2,20 @@ import DatabaseTypes
 
 /// Materializes one host-owned response directly into its final Swift storage.
 enum StorageHostResponse {
+    static func addressableByteCount(
+        _ byteCount: UInt32,
+        maximumAddressableByteCount: Int = Int.max,
+        discard: () -> Void
+    ) throws(StorageHostTransportError) -> Int {
+        guard maximumAddressableByteCount >= 0,
+              UInt64(byteCount) <= UInt64(maximumAddressableByteCount),
+              let result = Int(exactly: byteCount) else {
+            discard()
+            throw .responseLengthOverflow
+        }
+        return result
+    }
+
     static func receive(
         byteCount: Int,
         maximumResponseBytes: Int,

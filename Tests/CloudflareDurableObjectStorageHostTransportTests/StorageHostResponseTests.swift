@@ -64,4 +64,22 @@ struct StorageHostResponseTests {
         #expect(copyCount == 0)
         #expect(discardCount == 0)
     }
+
+    @Test("unaddressable response length is discarded exactly once")
+    func rejectsUnaddressableResponseLength() {
+        var discardCount = 0
+
+        #expect(throws: StorageHostTransportError.responseLengthOverflow) {
+            _ = try StorageHostResponse.addressableByteCount(
+                UInt32.max,
+                maximumAddressableByteCount: Int(Int32.max),
+                discard: { discardCount += 1 }
+            )
+        }
+        #expect(discardCount == 1)
+        #expect(
+            StorageHostTransportError.responseLengthOverflow.failureStage
+                == .afterDispatch
+        )
+    }
 }

@@ -42,8 +42,15 @@ public struct StorageHostDispatcher:
         guard responseByteCount > 0 else {
             throw StorageHostTransportError.hostReturnedNoResponse
         }
+        let addressableResponseByteCount = try StorageHostResponse
+            .addressableByteCount(
+                responseByteCount,
+                discard: {
+                    discardStorageResponse()
+                }
+            )
         return try StorageHostResponse.receive(
-            byteCount: Int(responseByteCount),
+            byteCount: addressableResponseByteCount,
             maximumResponseBytes: maximumResponseBytes,
             discard: {
                 discardStorageResponse()

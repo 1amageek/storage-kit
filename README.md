@@ -1,8 +1,8 @@
 # StorageKit
 
 A unified key-value storage abstraction for Swift, with pluggable backends for
-**FoundationDB**, **SQLite**, **Cloudflare Durable Object SQLite**, and
-**in-memory** storage.
+**FoundationDB**, **SQLite**, **PostgreSQL**, **Cloudflare Durable Object
+SQLite**, and **in-memory** storage.
 
 StorageKit provides a single `Transaction` protocol that works identically across all backends. Write your data access code once, then swap the backend without changing application logic.
 
@@ -23,8 +23,8 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/database-types.git", from: "26.0727.5"),
-    .package(url: "https://github.com/1amageek/storage-kit.git", from: "26.0727.2"),
+    .package(url: "https://github.com/1amageek/database-types.git", from: "26.0730.0"),
+    .package(url: "https://github.com/1amageek/storage-kit.git", from: "26.0731.0"),
 ]
 ```
 
@@ -43,6 +43,7 @@ Then add the targets you need:
         // Pick one (or more) backends:
         .product(name: "SQLiteStorage", package: "storage-kit"),
         .product(name: "FDBStorage", package: "storage-kit"),
+        .product(name: "PostgreSQLStorage", package: "storage-kit"),
         .product(name: "CloudflareDurableObjectStorage", package: "storage-kit"),
     ]
 )
@@ -156,6 +157,29 @@ fdb-swift-bindings
         ↑
      FDBStorage
 ```
+
+### PostgreSQL
+
+PostgreSQL uses PostgresNIO connection pooling and `BYTEA` key/value columns.
+The default isolation level is `SERIALIZABLE`; higher database layers own
+whole-transaction retry. TCP, Unix-domain socket, and Cloud SQL socket
+configurations use the same engine.
+
+```swift
+let configuration = PostgreSQLConfiguration(
+    host: "127.0.0.1",
+    username: "app",
+    password: password,
+    database: "app"
+)
+let engine = try await PostgreSQLStorageEngine(
+    configuration: configuration
+)
+```
+
+Each bound key or value crosses into PostgresNIO with one required copy into
+its final independently owned `ByteBuffer`. Range results remain lazy and use
+keyset pagination rather than materializing the full range.
 
 ### Cloudflare Durable Object SQLite
 
@@ -313,24 +337,14 @@ never treated as a successful no-op.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Application Code                      │
-│         (uses StorageEngine + Transaction protocols)     │
-├─────────────────────────────────────────────────────────┤
-│                       StorageKit                         │
-│  ┌──────────┐  ┌────────────┐  ┌──────────────────────┐ │
-│  │ Engine   │  │Transaction │  │ Tuple Layer          │ │
-│  │ Protocol │  │ Protocol   │  │ Tuple, Subspace,     │ │
-│  │          │  │            │  │ KeySelector,         │ │
-│  │          │  │            │  │ NamespaceResolver    │ │
-│  │          │  │            │  │ NamespaceCatalog?    │ │
-│  └──────────┘  └────────────┘  └──────────────────────┘ │
-├─────────────┬───────────────┬───────────────────────────┤
-│  InMemory   │ SQLiteStorage │ FDBStorage │ Cloudflare DO │
-│ Sorted array│ WITHOUT ROWID │ Native FDB │ DO SQLite     │
-│ + snapshot  │ + serialized  │ + retry    │ + conflicts   │
-└─────────────┴───────────────┴────────────┴───────────────┘
+```mermaid
+flowchart TB
+    App["Application code"] --> Contract["StorageKit<br/>StorageEngine + Transaction<br/>Tuple + Subspace + Namespace capabilities"]
+    Contract --> Memory["InMemory<br/>snapshot reference backend"]
+    Contract --> SQLite["SQLiteStorage<br/>local/native"]
+    Contract --> PostgreSQL["PostgreSQLStorage<br/>server/Cloud SQL"]
+    Contract --> FDB["FDBStorage<br/>distributed"]
+    Contract --> Cloudflare["CloudflareDurableObjectStorage<br/>Embedded reactor → DO SQLite"]
 ```
 
 ### Key Internal Types
@@ -341,7 +355,7 @@ never treated as a successful no-op.
 | `KeyValueRangeResult` | StorageKit | Array-backed reference result for the in-memory backend |
 | `SQLiteRangeResult` | SQLiteStorage | Lazy cursor-backed result with explicit finish and ownership handling |
 | `compareBytes` | StorageKit | `memcmp`-based lexicographic byte comparison (hot path) |
-| `ActiveTransactionScope` | StorageKit | `@TaskLocal` for nested transaction detection in SQLite |
+| `ActiveTransactionScope` | StorageKit | `@TaskLocal` transaction ownership used by SQL adapters and common execution |
 
 ## Requirements
 

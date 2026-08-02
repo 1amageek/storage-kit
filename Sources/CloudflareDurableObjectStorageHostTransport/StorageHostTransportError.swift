@@ -8,6 +8,7 @@ public enum StorageHostTransportError:
     case limitExceedsProtocolMaximum(actual: Int, maximum: Int)
     case requestTooLarge(actual: Int, maximum: Int)
     case requestLengthOverflow
+    case responseLengthOverflow
     case hostReturnedNoResponse
     case responseTooLarge(actual: Int, maximum: Int)
 
@@ -20,7 +21,9 @@ public enum StorageHostTransportError:
             return .localValidation
         case .unavailable:
             return .unavailable
-        case .hostReturnedNoResponse, .responseTooLarge:
+        case .hostReturnedNoResponse,
+             .responseLengthOverflow,
+             .responseTooLarge:
             return .afterDispatch
         }
     }
