@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 @testable import PostgreSQLStorage
 @testable import StorageKit
 import Testing
@@ -14,41 +15,74 @@ enum SerializedPostgreSQLStorageTests {}
 /// Configuration and engine creation for PostgreSQL integration tests.
 enum PostgreSQLTestEnvironment {
 
-    /// Whether a PostgreSQL test host is configured in the environment.
+    /// Whether a non-empty PostgreSQL test host is configured.
     ///
-    /// DB-requiring suites gate on this via `.enabled(if:)` so they are cleanly
-    /// skipped — not failed — when `POSTGRES_TEST_HOST` is unset. Swift Testing
-    /// treats a thrown error as a failure, so a skip cannot be expressed by
-    /// throwing; it must be a condition trait evaluated before the test runs.
+    /// Behavioral suites use this condition so ordinary package discovery does
+    /// not attempt network access. The always-enabled environment contract test
+    /// prevents an explicitly selected PostgreSQL test target from succeeding
+    /// when every behavioral suite is skipped.
     static var isConfigured: Bool {
-        ProcessInfo.processInfo.environment["POSTGRES_TEST_HOST"] != nil
+        isConfigured(environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func isConfigured(environment: [String: String]) -> Bool {
+        guard let host = environment["POSTGRES_TEST_HOST"] else {
+            return false
+        }
+        return !host.isEmpty
     }
 
     /// Create a fresh engine. Each call creates a new engine and connection pool.
     ///
-    /// NOTE: Callers must await `engine.shutdown()` when completion matters or
-    /// call `requestShutdown()` from a synchronous cleanup boundary.
+    /// Callers must await `engine.waitUntilShutdown()` before the test ends so
+    /// a later test never overlaps this engine's connection-pool cleanup.
     static func makeEngine() async throws -> PostgreSQLStorageEngine {
-        guard let host = ProcessInfo.processInfo.environment["POSTGRES_TEST_HOST"] else {
+        let configuration = try makeConfiguration()
+        return try await PostgreSQLStorageEngine(configuration: configuration)
+    }
+
+    static func makeConfiguration(
+        backgroundLogger: Logger = Logger(label: "PostgreSQLStorage")
+    ) throws -> PostgreSQLConfiguration {
+        try makeConfiguration(
+            environment: ProcessInfo.processInfo.environment,
+            backgroundLogger: backgroundLogger
+        )
+    }
+
+    static func makeConfiguration(
+        environment: [String: String],
+        backgroundLogger: Logger = Logger(label: "PostgreSQLStorage")
+    ) throws -> PostgreSQLConfiguration {
+        guard let host = environment["POSTGRES_TEST_HOST"],
+              !host.isEmpty else {
             throw PostgreSQLTestEnvironmentError.hostNotConfigured
         }
-        let port = ProcessInfo.processInfo.environment["POSTGRES_TEST_PORT"]
-            .flatMap(Int.init) ?? 5432
-        let user = ProcessInfo.processInfo.environment["POSTGRES_TEST_USER"] ?? "postgres"
-        let password = ProcessInfo.processInfo.environment["POSTGRES_TEST_PASSWORD"] ?? ""
-        let database = ProcessInfo.processInfo.environment["POSTGRES_TEST_DB"] ?? "storage_kit_test"
+        let port: Int
+        if let portValue = environment["POSTGRES_TEST_PORT"] {
+            guard let parsedPort = Int(portValue), (1...65_535).contains(parsedPort) else {
+                throw PostgreSQLTestEnvironmentError.invalidPort(portValue)
+            }
+            port = parsedPort
+        } else {
+            port = 5_432
+        }
+        let user = environment["POSTGRES_TEST_USER"] ?? "postgres"
+        let password = environment["POSTGRES_TEST_PASSWORD"] ?? ""
+        let database = environment["POSTGRES_TEST_DB"] ?? "storage_kit_test"
 
-        let config = PostgreSQLConfiguration(
+        return PostgreSQLConfiguration(
             host: host,
             port: port,
             username: user,
             password: password,
-            database: database
+            database: database,
+            backgroundLogger: backgroundLogger
         )
-        return try await PostgreSQLStorageEngine(configuration: config)
     }
 }
 
-enum PostgreSQLTestEnvironmentError: Error {
+enum PostgreSQLTestEnvironmentError: Error, Equatable {
     case hostNotConfigured
+    case invalidPort(String)
 }

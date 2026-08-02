@@ -87,6 +87,11 @@ try await engine.withTransaction { transaction in
 await engine.waitUntilShutdown() // use when cleanup completion matters
 ```
 
+Integration tests and other asynchronous ownership scopes await
+`waitUntilShutdown()` directly. `requestShutdown()` alone is reserved for
+synchronous destruction boundaries; it does not prevent the next test or owner
+from overlapping the previous backend's asynchronous cleanup.
+
 Transaction creation is admitted atomically with the engine lifecycle. Once
 shutdown admission closes, new transaction creation fails with a typed
 `StorageError`; a transaction admitted before the transition retains the
@@ -180,6 +185,24 @@ let engine = try await PostgreSQLStorageEngine(
 Each bound key or value crosses into PostgresNIO with one required copy into
 its final independently owned `ByteBuffer`. Range results remain lazy and use
 keyset pagination rather than materializing the full range.
+
+The PostgreSQL release gate uses an isolated PostgreSQL 16 database and the
+pinned Swift 6.4 snapshot:
+
+```bash
+TOOLCHAINS=org.swift.64202607231a \
+POSTGRES_TEST_HOST=database.test \
+POSTGRES_TEST_PORT=5432 \
+POSTGRES_TEST_USER=postgres \
+POSTGRES_TEST_PASSWORD=test \
+POSTGRES_TEST_DB=storage_kit_test \
+scripts/postgresql-test-harness
+```
+
+The harness requires exactly 128 successful integration tests, then repeats the
+same target without service variables and verifies that a missing endpoint is
+an explicit failure rather than an all-skipped success. Static Musl portability
+is checked separately with the command documented in `AGENTS.md`.
 
 ### Cloudflare Durable Object SQLite
 

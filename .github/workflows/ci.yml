@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TOOLCHAINS: org.swift.64202607231a
+  SWIFT_SNAPSHOT: swift-6.4.x-DEVELOPMENT-SNAPSHOT-2026-07-23-a
+  SWIFT_SNAPSHOT_URL: https://download.swift.org/swift-6.4.x-branch/xcode/swift-6.4.x-DEVELOPMENT-SNAPSHOT-2026-07-23-a/swift-6.4.x-DEVELOPMENT-SNAPSHOT-2026-07-23-a-osx.pkg
+
+jobs:
+  postgresql:
+    name: PostgreSQL storage contract (macOS)
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      XCODE_TEST_RESULT_DIRECTORY: ${{ runner.temp }}/storage-kit-postgresql-results
+      POSTGRES_TEST_HOST: localhost
+      POSTGRES_TEST_PORT: "5432"
+      POSTGRES_TEST_USER: postgres
+      POSTGRES_TEST_PASSWORD: test
+      POSTGRES_TEST_DB: storage_kit_test
+    steps:
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Swift toolchain
+        run: |
+          toolchain_package="$RUNNER_TEMP/${SWIFT_SNAPSHOT}-osx.pkg"
+          toolchain_root="$HOME/Library/Developer/Toolchains/${SWIFT_SNAPSHOT}.xctoolchain"
+          curl -fL --retry 3 -o "$toolchain_package" "$SWIFT_SNAPSHOT_URL"
+          installer -pkg "$toolchain_package" -target CurrentUserHomeDirectory
+          test -x "$toolchain_root/usr/bin/swift"
+          echo "$toolchain_root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Report Swift version
+        run: |
+          swift --version
+          xcrun --toolchain "$TOOLCHAINS" swiftc --version
+
+      - name: Install PostgreSQL 16
+        run: |
+          brew install postgresql@16
+          echo "/opt/homebrew/opt/postgresql@16/bin" >> "$GITHUB_PATH"
+
+      - name: Start PostgreSQL service
+        run: |
+          brew services start postgresql@16
+          for attempt in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "Waiting for PostgreSQL ($attempt/30)"
+            sleep 1
+          done
+          brew services info postgresql@16 || true
+          tail -200 "$(brew --prefix)/var/log/postgresql@16.log" || true
+          exit 1
+
+      - name: Provision isolated test database
+        run: |
+          psql -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'postgres') THEN
+              CREATE ROLE postgres WITH SUPERUSER LOGIN PASSWORD 'test';
+            ELSE
+              ALTER ROLE postgres WITH SUPERUSER LOGIN PASSWORD 'test';
+            END IF;
+          END
+          $$;
+          SQL
+          if ! psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'storage_kit_test'" | grep -q 1; then
+            psql -d postgres -v ON_ERROR_STOP=1 \
+              -c "CREATE DATABASE storage_kit_test OWNER postgres;"
+          fi
+
+      - name: Test PostgreSQL storage contract
+        timeout-minutes: 30
+        run: scripts/postgresql-test-harness
+
+      - name: Upload PostgreSQL results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgresql-xcresults
+          path: ${{ runner.temp }}/storage-kit-postgresql-results
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL service
+        if: always()
+        run: brew services stop postgresql@16 || true

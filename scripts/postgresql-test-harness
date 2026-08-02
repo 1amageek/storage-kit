@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCHEME="storage-kit-Package"
+DESTINATION="platform=macOS,arch=arm64"
+EXPECTED_TEST_COUNT=128
+EXPECTED_MISSING_ENVIRONMENT_PASSED_COUNT=33
+EXPECTED_MISSING_ENVIRONMENT_SKIPPED_COUNT=94
+BUILD_TIMEOUT_SECONDS="${XCODE_TEST_BUILD_TIMEOUT_SECONDS:-1200}"
+TEST_TIMEOUT_SECONDS="${XCODE_TEST_TIMEOUT_SECONDS:-1200}"
+RESULT_DIRECTORY="${XCODE_TEST_RESULT_DIRECTORY:-${TMPDIR:-/tmp}/storage-kit-postgresql-results}"
+WORK_ROOT=""
+
+timeout_command() {
+  local seconds="$1"
+  shift
+  perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+}
+
+cleanup() {
+  if [[ -z "$WORK_ROOT" || ! -d "$WORK_ROOT" ]]; then
+    return
+  fi
+  local expected_prefix="${TMPDIR:-/tmp}/storage-kit-postgresql-test."
+  if [[ "$WORK_ROOT" != "$expected_prefix"* ]]; then
+    echo "error: refusing to remove unexpected harness path: $WORK_ROOT" >&2
+    return
+  fi
+  rm -rf -- "$WORK_ROOT"
+}
+
+trap cleanup EXIT
+
+set_plist_string() {
+  local plist="$1"
+  local dictionary_path="$2"
+  local key="$3"
+  local value="$4"
+  local value_path="$dictionary_path.$key"
+
+  if ! plutil -extract "$dictionary_path" xml1 -o /dev/null \
+      "$plist" >/dev/null 2>&1; then
+    plutil -insert "$dictionary_path" -xml '<dict/>' "$plist"
+  fi
+  if plutil -extract "$value_path" raw "$plist" >/dev/null 2>&1; then
+    plutil -replace "$value_path" -string "$value" "$plist"
+  else
+    plutil -insert "$value_path" -string "$value" "$plist"
+  fi
+}
+
+prepend_library_path() {
+  local plist="$1"
+  local dictionary_path="$2"
+  local library_path="$3"
+  local value_path="$dictionary_path.DYLD_LIBRARY_PATH"
+  local existing_value=""
+
+  if ! plutil -extract "$dictionary_path" xml1 -o /dev/null \
+      "$plist" >/dev/null 2>&1; then
+    plutil -insert "$dictionary_path" -xml '<dict/>' "$plist"
+  fi
+  if existing_value="$(plutil -extract "$value_path" raw "$plist" 2>/dev/null)"; then
+    plutil -replace "$value_path" \
+      -string "$library_path:$existing_value" "$plist"
+  else
+    plutil -insert "$value_path" -string "$library_path" "$plist"
+  fi
+}
+
+inject_test_environment() {
+  local plist="$1"
+  local include_postgresql="$2"
+  local swiftc
+  local toolchain_root
+  local testing_library_path
+  local target_count=0
+  local configuration_index=0
+
+  swiftc="$(xcrun --toolchain "$TOOLCHAINS" --find swiftc)"
+  toolchain_root="$(cd "$(dirname "$swiftc")/../.." && pwd)"
+  testing_library_path="$toolchain_root/usr/lib/swift/macosx/testing"
+  if [[ ! -f "$testing_library_path/libTesting.dylib" ]]; then
+    echo "error: libTesting.dylib is missing from $testing_library_path" >&2
+    return 1
+  fi
+
+  while plutil -extract "TestConfigurations.$configuration_index.Name" raw \
+      "$plist" >/dev/null 2>&1; do
+    local target_index=0
+    while plutil -extract \
+        "TestConfigurations.$configuration_index.TestTargets.$target_index.BlueprintName" \
+        raw "$plist" >/dev/null 2>&1; do
+      local target_path="TestConfigurations.$configuration_index.TestTargets.$target_index"
+      prepend_library_path \
+        "$plist" "$target_path.TestingEnvironmentVariables" "$testing_library_path"
+      if [[ "$include_postgresql" == true ]]; then
+        local key
+        local value
+        for key in \
+            POSTGRES_TEST_HOST \
+            POSTGRES_TEST_PORT \
+            POSTGRES_TEST_USER \
+            POSTGRES_TEST_PASSWORD \
+            POSTGRES_TEST_DB; do
+          value="$(printenv "$key")"
+          set_plist_string "$plist" "$target_path.EnvironmentVariables" "$key" "$value"
+        done
+      fi
+      target_count=$((target_count + 1))
+      target_index=$((target_index + 1))
+    done
+    configuration_index=$((configuration_index + 1))
+  done
+
+  local top_level_key
+  while IFS= read -r top_level_key; do
+    if ! plutil -extract "$top_level_key.BlueprintName" raw \
+        "$plist" >/dev/null 2>&1; then
+      continue
+    fi
+    prepend_library_path \
+      "$plist" "$top_level_key.TestingEnvironmentVariables" "$testing_library_path"
+    if [[ "$include_postgresql" == true ]]; then
+      local key
+      local value
+      for key in \
+          POSTGRES_TEST_HOST \
+          POSTGRES_TEST_PORT \
+          POSTGRES_TEST_USER \
+          POSTGRES_TEST_PASSWORD \
+          POSTGRES_TEST_DB; do
+        value="$(printenv "$key")"
+        set_plist_string "$plist" "$top_level_key.EnvironmentVariables" "$key" "$value"
+      done
+    fi
+    target_count=$((target_count + 1))
+  done < <(
+    plutil -p "$plist" \
+      | sed -n 's/^  "\([^"]*\)" => {$/\1/p'
+  )
+
+  if (( target_count == 0 )); then
+    echo "error: no test targets found in $plist" >&2
+    return 1
+  fi
+}
+
+reject_internal_tool_errors() {
+  local log_path="$1"
+  if rg -n 'Internal Error:|LLVM Profile Error:' "$log_path" >&2; then
+    echo "error: internal tool failure detected in $log_path" >&2
+    return 1
+  fi
+}
+
+summary_number() {
+  local summary="$1"
+  local key="$2"
+  printf '%s' "$summary" | jq -er ".${key}"
+}
+
+for command in jq xcodebuild xcrun plutil perl rg tee; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    echo "error: required command not found: $command" >&2
+    exit 1
+  fi
+done
+
+if [[ -z "${TOOLCHAINS:-}" ]]; then
+  echo "error: TOOLCHAINS must identify the pinned Swift snapshot" >&2
+  exit 2
+fi
+if [[ -z "${POSTGRES_TEST_HOST:-}" ]]; then
+  echo "error: POSTGRES_TEST_HOST must identify an isolated PostgreSQL server" >&2
+  exit 2
+fi
+if ! [[ "${POSTGRES_TEST_PORT:-}" =~ ^[0-9]+$ ]] \
+    || (( POSTGRES_TEST_PORT < 1 || POSTGRES_TEST_PORT > 65535 )); then
+  echo "error: POSTGRES_TEST_PORT must be between 1 and 65535" >&2
+  exit 2
+fi
+for key in POSTGRES_TEST_USER POSTGRES_TEST_PASSWORD POSTGRES_TEST_DB; do
+  if ! printenv "$key" >/dev/null; then
+    echo "error: $key must be explicitly configured" >&2
+    exit 2
+  fi
+done
+
+WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/storage-kit-postgresql-test.XXXXXX")"
+derived_data="$WORK_ROOT/DerivedData"
+mkdir -p "$derived_data" "$RESULT_DIRECTORY"
+run_identifier="$(date -u +%Y%m%d-%H%M%S)-$$"
+build_result="$RESULT_DIRECTORY/Build-$run_identifier.xcresult"
+test_result="$RESULT_DIRECTORY/Test-$run_identifier.xcresult"
+missing_environment_result="$RESULT_DIRECTORY/MissingEnvironment-$run_identifier.xcresult"
+build_log="$RESULT_DIRECTORY/Build-$run_identifier.log"
+test_log="$RESULT_DIRECTORY/Test-$run_identifier.log"
+missing_environment_log="$RESULT_DIRECTORY/MissingEnvironment-$run_identifier.log"
+
+set +e
+(
+  cd "$ROOT_DIR"
+  timeout_command "$BUILD_TIMEOUT_SECONDS" xcodebuild build-for-testing \
+    -scheme "$SCHEME" \
+    -destination "$DESTINATION" \
+    -derivedDataPath "$derived_data" \
+    -resultBundlePath "$build_result" \
+    -enableCodeCoverage NO \
+    -onlyUsePackageVersionsFromResolvedFile \
+    -skipPackageUpdates \
+    -only-testing:PostgreSQLStorageTests \
+    2>&1 | tee "$build_log"
+)
+build_status=$?
+set -e
+reject_internal_tool_errors "$build_log"
+if (( build_status != 0 )); then
+  echo "error: build-for-testing exited with status $build_status" >&2
+  exit "$build_status"
+fi
+
+xctestrun_paths="$(find "$derived_data/Build/Products" -maxdepth 1 \
+  -type f -name '*.xctestrun' -print)"
+xctestrun_count="$(printf '%s\n' "$xctestrun_paths" | sed '/^$/d' | wc -l | tr -d ' ')"
+if [[ "$xctestrun_count" != 1 ]]; then
+  echo "error: expected one xctestrun file, found $xctestrun_count" >&2
+  printf '%s\n' "$xctestrun_paths" >&2
+  exit 1
+fi
+
+configured_xctestrun="$(dirname "$xctestrun_paths")/.configured-$run_identifier.xctestrun"
+runtime_only_xctestrun="$(dirname "$xctestrun_paths")/.runtime-only-$run_identifier.xctestrun"
+cp "$xctestrun_paths" "$configured_xctestrun"
+cp "$xctestrun_paths" "$runtime_only_xctestrun"
+if ! inject_test_environment "$configured_xctestrun" true; then
+  exit 1
+fi
+if ! inject_test_environment "$runtime_only_xctestrun" false; then
+  exit 1
+fi
+
+set +e
+timeout_command "$TEST_TIMEOUT_SECONDS" xcodebuild test-without-building \
+  -xctestrun "$configured_xctestrun" \
+  -destination "$DESTINATION" \
+  -resultBundlePath "$test_result" \
+  -enableCodeCoverage NO \
+  -only-testing:PostgreSQLStorageTests \
+  2>&1 | tee "$test_log"
+test_status=$?
+set -e
+reject_internal_tool_errors "$test_log"
+if (( test_status != 0 )); then
+  echo "error: configured PostgreSQL tests exited with status $test_status" >&2
+  exit "$test_status"
+fi
+
+summary="$(xcrun xcresulttool get test-results summary \
+  --path "$test_result" --format json)"
+total_count="$(summary_number "$summary" totalTestCount)"
+failed_count="$(summary_number "$summary" failedTests)"
+skipped_count="$(summary_number "$summary" skippedTests)"
+expected_failure_count="$(summary_number "$summary" expectedFailures)"
+runtime_warning_count="$(printf '%s' "$summary" | jq -er '.runtimeWarnings | length')"
+if (( total_count != EXPECTED_TEST_COUNT \
+    || failed_count != 0 \
+    || skipped_count != 0 \
+    || expected_failure_count != 0 \
+    || runtime_warning_count != 0 )); then
+  printf '%s\n' "$summary" >&2
+  echo "error: configured PostgreSQL result did not meet the strict contract" >&2
+  exit 1
+fi
+if rg -n 'Trying to lease connection from `PostgresClient`|run\(\) hasn.t been called yet' \
+    "$test_log" >&2; then
+  echo "error: PostgresClient was leased before its run loop started" >&2
+  exit 1
+fi
+
+set +e
+timeout_command "$TEST_TIMEOUT_SECONDS" xcodebuild test-without-building \
+  -xctestrun "$runtime_only_xctestrun" \
+  -destination "$DESTINATION" \
+  -resultBundlePath "$missing_environment_result" \
+  -enableCodeCoverage NO \
+  -only-testing:PostgreSQLStorageTests \
+  2>&1 | tee "$missing_environment_log"
+missing_environment_status=$?
+set -e
+reject_internal_tool_errors "$missing_environment_log"
+missing_environment_summary="$(xcrun xcresulttool get test-results summary \
+  --path "$missing_environment_result" --format json)"
+missing_environment_total="$(
+  summary_number "$missing_environment_summary" totalTestCount
+)"
+missing_environment_passed="$(
+  summary_number "$missing_environment_summary" passedTests
+)"
+missing_environment_failures="$(
+  summary_number "$missing_environment_summary" failedTests
+)"
+missing_environment_skipped="$(
+  summary_number "$missing_environment_summary" skippedTests
+)"
+missing_environment_expected_failures="$(
+  summary_number "$missing_environment_summary" expectedFailures
+)"
+missing_environment_runtime_warnings="$(
+  printf '%s' "$missing_environment_summary" | jq -er '.runtimeWarnings | length'
+)"
+if (( missing_environment_status == 0 \
+    || missing_environment_total != EXPECTED_TEST_COUNT \
+    || missing_environment_passed != EXPECTED_MISSING_ENVIRONMENT_PASSED_COUNT \
+    || missing_environment_failures != 1 \
+    || missing_environment_skipped != EXPECTED_MISSING_ENVIRONMENT_SKIPPED_COUNT \
+    || missing_environment_expected_failures != 0 \
+    || missing_environment_runtime_warnings != 0 )); then
+  printf '%s\n' "$missing_environment_summary" >&2
+  echo "error: missing PostgreSQL environment result did not meet the strict contract" >&2
+  exit 1
+fi
+if ! rg -q 'Set POSTGRES_TEST_HOST before running PostgreSQLStorageTests' \
+    "$missing_environment_log"; then
+  echo "error: missing-environment failure did not identify POSTGRES_TEST_HOST" >&2
+  exit 1
+fi
+
+printf '%s\n' "$summary"
+echo "Configured PostgreSQL tests: $total_count passed"
+echo "Missing-environment guard: $missing_environment_passed passed, 1 failed, $missing_environment_skipped skipped"
+echo "Result directory: $RESULT_DIRECTORY"

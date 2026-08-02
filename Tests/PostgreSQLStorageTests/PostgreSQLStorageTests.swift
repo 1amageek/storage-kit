@@ -55,7 +55,7 @@ struct PostgreSQLStorageTests {
 
     @Test func basicSetAndGet() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let key: ByteString = [0x01, 0x02, 0x03]
         let value: ByteString = [0xAA, 0xBB, 0xCC]
@@ -74,7 +74,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearKey() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let key: ByteString = [0x10]
         let value: ByteString = [0x20]
@@ -95,7 +95,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearRange() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([1], for: [0x01])
@@ -123,7 +123,7 @@ struct PostgreSQLStorageTests {
 
     @Test func rangeQuery() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x0A])
@@ -154,7 +154,7 @@ struct PostgreSQLStorageTests {
 
     @Test func setThenClear_clearWins() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x01])
@@ -166,7 +166,7 @@ struct PostgreSQLStorageTests {
 
     @Test func setThenClearThenSet_lastSetWins() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x01])
@@ -179,7 +179,7 @@ struct PostgreSQLStorageTests {
 
     @Test func setThenClearRange_clearRangeWins() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x02])
@@ -191,7 +191,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearRangeThenSet_setWins() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.clearRange(beginKey: [0x01], endKey: [0x05])
@@ -203,7 +203,7 @@ struct PostgreSQLStorageTests {
 
     @Test func multipleOverwrites_lastWins() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x01])
@@ -216,7 +216,7 @@ struct PostgreSQLStorageTests {
 
     @Test func setClearRangeSetClearRange_lastClearRangeWins() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x02])
@@ -230,7 +230,7 @@ struct PostgreSQLStorageTests {
 
     @Test func bufferOverridesPersistedValue() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x01])
@@ -245,7 +245,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearInBufferHidesPersistedValue() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x01])
@@ -260,7 +260,7 @@ struct PostgreSQLStorageTests {
 
     @Test func noMatchInBufferFallsThroughToPostgreSQL() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x01])
@@ -283,7 +283,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearRange_beginInclusive() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x02])
@@ -295,7 +295,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearRange_endExclusive() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x05])
@@ -307,7 +307,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearRange_justBeforeEnd() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x04])
@@ -319,7 +319,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearRange_justBeforeBegin() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([1], for: [0x01])
@@ -331,7 +331,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearRange_multiByteKeyBoundary() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let results = try await engine.withTransaction { tx -> (ByteString?, ByteString?) in
             try tx.setValue([1], for: [0x01, 0xFF])
@@ -349,7 +349,7 @@ struct PostgreSQLStorageTests {
 
     @Test func clearRange_boundaryOnPersistedData() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([1], for: [0x01])
@@ -387,7 +387,7 @@ struct PostgreSQLStorageTests {
 
     @Test func flush_getValueAfterFlushReadsPostgreSQL() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             // Buffer has set(0x01, [10])
@@ -404,7 +404,7 @@ struct PostgreSQLStorageTests {
 
     @Test func flush_writesAfterFlushAreBuffered() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x01])
@@ -426,7 +426,7 @@ struct PostgreSQLStorageTests {
 
     @Test func flush_multipleFlushesAreIdempotent() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x01])
@@ -447,7 +447,7 @@ struct PostgreSQLStorageTests {
 
     @Test func flush_clearAfterFlushThenGetRange() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x01])
@@ -469,7 +469,7 @@ struct PostgreSQLStorageTests {
 
     @Test func consistency_setClearSet() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([1], for: [0x01])
@@ -487,7 +487,7 @@ struct PostgreSQLStorageTests {
 
     @Test func consistency_clearRangeThenSet() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x01])
@@ -516,7 +516,7 @@ struct PostgreSQLStorageTests {
 
     @Test func consistency_overwriteAndClearRange() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([10], for: [0x01])
@@ -543,7 +543,7 @@ struct PostgreSQLStorageTests {
 
     @Test func readYourWritesWithinTransaction() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let result = try await engine.withTransaction { tx -> ByteString? in
             try tx.setValue([0xFF], for: [0x42])
@@ -554,7 +554,7 @@ struct PostgreSQLStorageTests {
 
     @Test func readYourWritesClearWithinTransaction() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([1], for: [0x50])
@@ -576,7 +576,7 @@ struct PostgreSQLStorageTests {
 
     @Test func commitPersistsAcrossTransactions() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([42], for: [0x01])
@@ -590,7 +590,7 @@ struct PostgreSQLStorageTests {
 
     @Test func withTransaction_errorCausesRollback() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
         struct TransactionBodyFailure: Error {}
 
         do {
@@ -608,7 +608,7 @@ struct PostgreSQLStorageTests {
 
     @Test func cancelledTransactionRejectsCommitAndDropsWrites() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
         let transaction = try engine.createTransaction()
         try transaction.setValue([42], for: [0x01])
         try await transaction.cancel()
@@ -633,7 +633,7 @@ struct PostgreSQLStorageTests {
 
     @Test func cancelledTransactionThrowsOnRead() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
         let transaction = try engine.createTransaction()
         try await transaction.cancel()
 
@@ -650,7 +650,7 @@ struct PostgreSQLStorageTests {
 
     @Test func cancelledTransactionReturnsErrorOnGetRange() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
         let transaction = try engine.createTransaction()
         try await transaction.cancel()
 
@@ -670,7 +670,7 @@ struct PostgreSQLStorageTests {
 
     @Test func sequentialTransactions() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         for i: UInt8 in 0..<10 {
             try await engine.withTransaction { tx in
@@ -690,7 +690,7 @@ struct PostgreSQLStorageTests {
 
     @Test func getRange_reverseThenLimit() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
@@ -711,7 +711,7 @@ struct PostgreSQLStorageTests {
 
     @Test func getRange_limitForward() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             for i: UInt8 in 1...5 {
@@ -730,7 +730,7 @@ struct PostgreSQLStorageTests {
 
     @Test func getRange_emptyResult() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let collected = try await engine.withTransaction { tx in
             try await collectRange(tx, begin: [0x01], end: [0x05])
@@ -744,7 +744,7 @@ struct PostgreSQLStorageTests {
 
     @Test func byteOrdering() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         // Verify BYTEA comparison matches lexicographic ordering
         try await engine.withTransaction { tx in
@@ -766,7 +766,7 @@ struct PostgreSQLStorageTests {
 
     @Test func blobOrderingMatchesLexicographic() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             // Insert keys that test BYTEA ordering
@@ -792,7 +792,7 @@ struct PostgreSQLStorageTests {
 
     @Test func subspaceRangeIsolation() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
         let spaceA = Subspace("alpha")
         let spaceB = Subspace("beta")
 
@@ -815,7 +815,7 @@ struct PostgreSQLStorageTests {
 
     @Test func nestedTransactionReuse() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { tx in
             try tx.setValue([1], for: [0x60])
@@ -838,7 +838,7 @@ struct PostgreSQLStorageTests {
 
     @Test func nestedWithTransaction_innerSeesOuterWrites() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { outerTx in
             try outerTx.setValue([10], for: [0x01])
@@ -859,7 +859,7 @@ struct PostgreSQLStorageTests {
 
     @Test func nestedWithTransaction_errorInInner_propagatesToOuter() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
         struct NestedTransactionBodyFailure: Error {}
 
         do {
@@ -887,7 +887,7 @@ struct PostgreSQLStorageTests {
 
     @Test func multipleSequentialNestedTransactions() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         try await engine.withTransaction { outerTx in
             try outerTx.setValue([10], for: [0x01])
@@ -929,7 +929,7 @@ struct PostgreSQLStorageTests {
 
     @Test func readinessCheckVerifiesConnectionAndTable() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let report = try await engine.checkReadiness()
         #expect(report.tableName == "kv_store")
@@ -942,7 +942,7 @@ struct PostgreSQLStorageTests {
 
     @Test func namespaceResolutionIsDeterministic() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let subspace1 = try await engine.resolveOrCreateNamespace(path: ["app", "users"])
         let subspace2 = try await engine.resolveExistingNamespace(path: ["app", "users"])
@@ -981,7 +981,7 @@ struct PostgreSQLStorageTests {
     @Test(.timeLimit(.minutes(1)))
     func concurrentTransactions_noBlocking() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         // Multiple concurrent withTransaction calls must all complete
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -1004,7 +1004,7 @@ struct PostgreSQLStorageTests {
     @Test(.timeLimit(.minutes(1)))
     func concurrentTransactions_differentKeys() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         // Concurrent writes to different keys should not interfere
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -1031,7 +1031,7 @@ struct PostgreSQLStorageTests {
     @Test(.timeLimit(.minutes(1)))
     func concurrentReadAndWrite() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         // Seed data
         try await engine.withTransaction { tx in
@@ -1067,7 +1067,7 @@ struct PostgreSQLStorageTests {
 
     @Test func errorRecovery_transactionFailThenSucceed() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
         struct TransactionBodyFailure: Error {}
 
         // Three consecutive failing transactions
@@ -1097,7 +1097,7 @@ struct PostgreSQLStorageTests {
 
     @Test func atomicOp_addOnNewKey() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         // atomicOp(.add) on non-existent key: should create entry
         // Param = 5 as little-endian Int64
@@ -1121,7 +1121,7 @@ struct PostgreSQLStorageTests {
 
     @Test func atomicOp_addOnExistingKey() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         // Set initial value = 10 as little-endian Int64
         var initial: Int64 = 10
@@ -1151,7 +1151,7 @@ struct PostgreSQLStorageTests {
 
     @Test func atomicOp_addAccumulates() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         // Multiple sequential adds
         for i: Int64 in 1...5 {
@@ -1174,7 +1174,7 @@ struct PostgreSQLStorageTests {
 
     @Test func atomicOp_maxMinBitwiseApply() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         // The PostgreSQL backend implements every non-versionstamp mutation via a
         // row-locked read-modify-write that delegates to MutationType.apply. This
@@ -1215,7 +1215,7 @@ struct PostgreSQLStorageTests {
 
     @Test func atomicOp_versionstampThrows() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         do {
             try await engine.withTransaction { tx in
@@ -1260,7 +1260,7 @@ struct PostgreSQLStorageTests {
 
     @Test func largeValue() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let key: ByteString = [0x01]
         let value: ByteString = ByteString([UInt8](repeating: 0xAB, count: 100_000))
@@ -1277,7 +1277,7 @@ struct PostgreSQLStorageTests {
 
     @Test func manyKeys() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let count = 100
         // Use a dedicated prefix (0x50) to avoid collisions with other test suites
@@ -1297,7 +1297,7 @@ struct PostgreSQLStorageTests {
 
     @Test func batchedSetCrossesMaxBindRowsBoundary() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let count = PostgreSQLStorageTransaction.maxBindRows + 1
         let prefix: UInt8 = 0x51
@@ -1319,7 +1319,7 @@ struct PostgreSQLStorageTests {
 
     @Test func batchedClearCrossesMaxBindRowsBoundary() async throws {
         let engine = try await makeEngine()
-        defer { engine.requestShutdown() }
+        defer { await engine.waitUntilShutdown() }
 
         let count = PostgreSQLStorageTransaction.maxBindRows + 1
         let prefix: UInt8 = 0x52

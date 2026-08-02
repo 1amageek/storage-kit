@@ -23,3 +23,28 @@
 - Do not silently downgrade a storage failure, conflict, cancellation, unsupported primitive, or malformed host frame to an empty value or success.
 - Platform dependencies must remain in their adapter products and out of the platform-neutral core.
 - This is version 1. Remove duplicate storage protocols and compatibility adapters.
+
+## PostgreSQL Test Harness
+
+- Run PostgreSQL integration coverage with `scripts/postgresql-test-harness`.
+- Set `TOOLCHAINS=org.swift.64202607231a` and explicitly provide
+  `POSTGRES_TEST_HOST`, `POSTGRES_TEST_PORT`, `POSTGRES_TEST_USER`,
+  `POSTGRES_TEST_PASSWORD`, and `POSTGRES_TEST_DB` for an isolated PostgreSQL
+  16 database.
+- The harness uses the `storage-kit-Package` Xcode scheme, selects only the
+  `PostgreSQLStorageTests` target, injects the snapshot
+  testing runtime and service environment into `.xctestrun`, and requires 128
+  tests with zero failures, skips, expected failures, runtime warnings, and
+  PostgresClient startup-order warnings.
+- The harness also runs the same target without service variables and requires
+  the exact 128-test result: 33 passed environment-independent tests, 94
+  skipped service-dependent tests, and exactly one explicit failure from
+  `PostgreSQLIntegrationEnvironmentTests.endpointIsConfigured()`. An
+  all-skipped or successful result is a false-green defect.
+- Every raw engine test awaits `waitUntilShutdown()` before its test boundary
+  ends. `requestShutdown()` alone is not complete cleanup for the asynchronous
+  PostgreSQL connection pool.
+- Compile the PostgreSQL product for the pinned static Linux SDK with
+  `swift build --swift-sdk swift-6.4.x-DEVELOPMENT-SNAPSHOT-2026-07-23-a_static-linux-0.1.0 --triple aarch64-swift-linux-musl --product PostgreSQLStorage -c release -debug-info-format none`.
+  This is a compile/link gate; the real PostgreSQL behavioral gate remains the
+  Xcode harness above.

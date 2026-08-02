@@ -76,12 +76,14 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
             backgroundLogger: configuration.backgroundLogger
         )
 
-        // Start the connection pool's run loop (required by PostgresNIO). The
-        // pool queues connection requests issued before run() is scheduled, so
-        // the first query below blocks until the pool is ready rather than
-        // racing it — no warm-up yield is needed.
+        // Start the connection pool's run loop (required by PostgresNIO). On
+        // runtimes that provide synchronous task start, run() reaches its first
+        // suspension before this initializer proceeds. That establishes the
+        // client's running state before initializeSchema() leases a connection.
+        // Older Apple runtimes use PostgresNIO's documented queued-lease
+        // behavior because Task.immediate is not back-deployable there.
         let client = self.client
-        self.runTask = Task { await client.run() }
+        self.runTask = Self.startClientRunLoop(client)
 
         do {
             try await initializeSchema()
@@ -90,6 +92,22 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
             await waitUntilShutdown()
             throw error
         }
+    }
+
+    private static func startClientRunLoop(
+        _ client: PostgresClient
+    ) -> Task<Void, Never> {
+        if #available(
+            macOS 26.0,
+            iOS 26.0,
+            tvOS 26.0,
+            watchOS 26.0,
+            visionOS 26.0,
+            *
+        ) {
+            return Task.immediate { await client.run() }
+        }
+        return Task { await client.run() }
     }
 
     // MARK: - Table Name Validation
