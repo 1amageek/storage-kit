@@ -222,8 +222,8 @@ set +e
     -onlyUsePackageVersionsFromResolvedFile \
     -skipPackageUpdates \
     -only-testing:PostgreSQLStorageTests \
-    "HEADER_SEARCH_PATHS=$FDB_SDK_INCLUDE_DIRECTORY" \
-    "LIBRARY_SEARCH_PATHS=$FDB_SDK_LIBRARY_DIRECTORY" \
+    "HEADER_SEARCH_PATHS=\$(inherited) $FDB_SDK_INCLUDE_DIRECTORY" \
+    "LIBRARY_SEARCH_PATHS=\$(inherited) $FDB_SDK_LIBRARY_DIRECTORY" \
     2>&1 | tee "$build_log"
 )
 build_status=$?
