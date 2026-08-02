@@ -21,7 +21,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     env:
-      XCODE_TEST_RESULT_DIRECTORY: ${{ runner.temp }}/storage-kit-postgresql-results
+      XCODE_TEST_RESULT_DIRECTORY: /tmp/storage-kit-postgresql-results
       POSTGRES_TEST_HOST: localhost
       POSTGRES_TEST_PORT: "5432"
       POSTGRES_TEST_USER: postgres
@@ -96,7 +96,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: postgresql-xcresults
-          path: ${{ runner.temp }}/storage-kit-postgresql-results
+          path: /tmp/storage-kit-postgresql-results
           if-no-files-found: error
 
       - name: Stop PostgreSQL service
