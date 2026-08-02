@@ -34,7 +34,10 @@ jobs:
           xcode-version: latest-stable
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Install verification tools
+        run: brew install ripgrep
 
       - name: Install pinned Swift toolchain
         run: |
@@ -93,7 +96,7 @@ jobs:
 
       - name: Upload PostgreSQL results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: postgresql-xcresults
           path: /tmp/storage-kit-postgresql-results
