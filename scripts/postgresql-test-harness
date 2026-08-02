@@ -188,6 +188,17 @@ for key in POSTGRES_TEST_USER POSTGRES_TEST_PASSWORD POSTGRES_TEST_DB; do
   fi
 done
 
+FDB_SDK_INCLUDE_DIRECTORY="${FDB_SDK_INCLUDE_DIRECTORY:-/usr/local/include}"
+FDB_SDK_LIBRARY_DIRECTORY="${FDB_SDK_LIBRARY_DIRECTORY:-/usr/local/lib}"
+if [[ ! -f "$FDB_SDK_INCLUDE_DIRECTORY/foundationdb/fdb_c.h" ]]; then
+  echo "error: FoundationDB C header not found under $FDB_SDK_INCLUDE_DIRECTORY" >&2
+  exit 2
+fi
+if [[ ! -f "$FDB_SDK_LIBRARY_DIRECTORY/libfdb_c.dylib" ]]; then
+  echo "error: FoundationDB client library not found under $FDB_SDK_LIBRARY_DIRECTORY" >&2
+  exit 2
+fi
+
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/storage-kit-postgresql-test.XXXXXX")"
 derived_data="$WORK_ROOT/DerivedData"
 mkdir -p "$derived_data" "$RESULT_DIRECTORY"
@@ -211,6 +222,8 @@ set +e
     -onlyUsePackageVersionsFromResolvedFile \
     -skipPackageUpdates \
     -only-testing:PostgreSQLStorageTests \
+    "HEADER_SEARCH_PATHS=$FDB_SDK_INCLUDE_DIRECTORY" \
+    "LIBRARY_SEARCH_PATHS=$FDB_SDK_LIBRARY_DIRECTORY" \
     2>&1 | tee "$build_log"
 )
 build_status=$?

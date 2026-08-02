@@ -36,6 +36,10 @@
   testing runtime and service environment into `.xctestrun`, and requires 128
   tests with zero failures, skips, expected failures, runtime warnings, and
   PostgresClient startup-order warnings.
+- The Xcode package scheme compiles every package target before applying the
+  test selection. Install the FoundationDB C SDK and keep its header and client
+  library available under `/usr/local/include` and `/usr/local/lib`, or set
+  `FDB_SDK_INCLUDE_DIRECTORY` and `FDB_SDK_LIBRARY_DIRECTORY` explicitly.
 - The harness also runs the same target without service variables and requires
   the exact 128-test result: 33 passed environment-independent tests, 94
   skipped service-dependent tests, and exactly one explicit failure from
