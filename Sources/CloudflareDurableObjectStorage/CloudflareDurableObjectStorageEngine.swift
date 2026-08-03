@@ -55,4 +55,8 @@ public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable
         requestShutdown()
         await storageLifecycle.waitUntilShutdown()
     }
+
+    deinit {
+        requestShutdown()
+    }
 }

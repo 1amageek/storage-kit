@@ -171,6 +171,10 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         await storageLifecycle.waitUntilShutdown()
     }
 
+    deinit {
+        requestShutdown()
+    }
+
     private func retainedDatabase(
         operation: StorageOperation
     ) throws -> any DatabaseProtocol {
