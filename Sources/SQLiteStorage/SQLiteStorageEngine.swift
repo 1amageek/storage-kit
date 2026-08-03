@@ -11,12 +11,32 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     public struct Configuration: Sendable {
         public var path: String
 
-        public init(path: String) {
+        /// SQLite-level wait budget for acquiring the database write lock,
+        /// applied as `PRAGMA busy_timeout`.
+        ///
+        /// This absorbs only micro-contention between connections (typically
+        /// separate engines or processes sharing one database file). Beyond
+        /// the budget the engine still fails fast with the typed
+        /// `StorageError.transactionBusy`, whose `retryDisposition == .safe`
+        /// lets transaction runners replay with asynchronous backoff.
+        /// The value is deliberately small: the coordinator executes SQLite's
+        /// synchronous C calls, so this bounds how long one of those calls may
+        /// block. Set `0` to fail immediately on any contention.
+        public var busyTimeoutMilliseconds: Int32
+
+        public init(path: String, busyTimeoutMilliseconds: Int32 = 100) {
             self.path = path
+            self.busyTimeoutMilliseconds = busyTimeoutMilliseconds
         }
 
-        public static func file(_ path: String) -> Configuration {
-            Configuration(path: path)
+        public static func file(
+            _ path: String,
+            busyTimeoutMilliseconds: Int32 = 100
+        ) -> Configuration {
+            Configuration(
+                path: path,
+                busyTimeoutMilliseconds: busyTimeoutMilliseconds
+            )
         }
 
         public static var inMemory: Configuration {
@@ -38,7 +58,10 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     private let storageLifecycle = StorageEngineLifecycle()
 
     public init(configuration: Configuration) throws {
-        let connection = try SQLiteConnectionHandle(path: configuration.path)
+        let connection = try SQLiteConnectionHandle(
+            path: configuration.path,
+            busyTimeoutMilliseconds: configuration.busyTimeoutMilliseconds
+        )
         let lifetime = SQLiteStorageLifetime()
         self.connection = connection
         self.lifetime = lifetime

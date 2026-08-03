@@ -10,9 +10,11 @@ import Synchronization
 final class SQLiteConnectionHandle: Sendable {
     private let connection: Mutex<SQLiteConnection?>
 
-    init(path: String) throws {
+    init(path: String, busyTimeoutMilliseconds: Int32 = 100) throws {
         let connection = try SQLiteConnection(path: path)
-        try connection.initialize()
+        try connection.initialize(
+            busyTimeoutMilliseconds: busyTimeoutMilliseconds
+        )
         self.connection = Mutex(connection)
     }
 

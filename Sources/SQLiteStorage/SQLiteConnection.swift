@@ -40,8 +40,16 @@ final class SQLiteConnection {
         self.db = opened
     }
 
-    /// Creates the KV table and enables WAL mode.
-    func initialize() throws {
+    /// Creates the KV table, enables WAL mode, and sets the busy timeout.
+    func initialize(busyTimeoutMilliseconds: Int32 = 100) throws {
+        guard busyTimeoutMilliseconds >= 0 else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: .open,
+                backend: .sqlite,
+                message: "busyTimeoutMilliseconds must be non-negative, got \(busyTimeoutMilliseconds)"
+            )
+        }
         let applicationTableCount = try scalarInt64(
             "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )
@@ -50,6 +58,7 @@ final class SQLiteConnection {
             try execute("PRAGMA auto_vacuum=INCREMENTAL")
         }
         try execute("PRAGMA journal_mode=WAL")
+        try execute("PRAGMA busy_timeout=\(busyTimeoutMilliseconds)")
         try execute("""
             CREATE TABLE IF NOT EXISTS kv_store (
                 key BLOB NOT NULL PRIMARY KEY,
