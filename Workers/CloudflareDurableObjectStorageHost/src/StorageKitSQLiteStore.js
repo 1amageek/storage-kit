@@ -10,8 +10,24 @@ import { storageKitWireLimits } from "./StorageKitWireLimits.js";
 import { materializeMutation } from "./StorageKitVersionstamp.js";
 
 const schemaVersion = 1;
+// Retention invariant: with consecutive commit versions the window bounds the
+// retained history at conflictVersionWindow * maximumPersistedConflictRangesPerCommit
+// entries (4096 * 256 = 1,048,576 = storageKitWireLimits.maxConflictEntries).
+// Byte retention has no such structural bound (ranges carry up to ~2KB of key
+// bytes each), so pruneConflictRanges must also enforce
+// storageKitWireLimits.maxConflictEntries / maxConflictBytes as hard limits.
+// Pruning is always safe: verifyReadConflicts conservatively rejects any
+// commit whose observed read version predates the retained history.
 const conflictVersionWindow = 4096n;
 const responseOverheadReserve = 16 * 1024;
+const maximumPersistedConflictRangesPerCommit = 256;
+const requiredMetadataKeys = Object.freeze([
+  "schemaVersion",
+  "commitVersion",
+  "conflictEntryCount",
+  "conflictByteCount",
+  "minimumConflictVersion",
+]);
 
 export class StorageKitSQLiteStore {
   constructor(sql, transactionSync) {
@@ -26,6 +42,10 @@ export class StorageKitSQLiteStore {
   }
 
   migrate() {
+    if (this.hasCurrentSchema()) {
+      this.initialized = true;
+      return;
+    }
     this.transactionSync(() => {
       this.exec("CREATE TABLE IF NOT EXISTS storagekit_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
       this.exec("CREATE TABLE IF NOT EXISTS storagekit_kv(key BLOB PRIMARY KEY, value BLOB NOT NULL)");
@@ -51,6 +71,28 @@ export class StorageKitSQLiteStore {
       }
     });
     this.initialized = true;
+  }
+
+  hasCurrentSchema() {
+    let metadataRows;
+    try {
+      metadataRows = this.all("SELECT key, value FROM storagekit_metadata");
+    } catch (error) {
+      if (isMissingMetadataTable(error)) {
+        return false;
+      }
+      throw error;
+    }
+
+    const metadata = new Map(metadataRows.map((row) => [row.key, row.value]));
+    const storedSchemaVersion = Number(metadata.get("schemaVersion"));
+    if (metadata.has("schemaVersion")
+        && storedSchemaVersion !== schemaVersion) {
+      throw StorageKitWireError.invalidOperation(
+        "Unsupported StorageKit Durable Object schema version"
+      );
+    }
+    return requiredMetadataKeys.every((key) => metadata.has(key));
   }
 
   dispatch(request) {
@@ -257,7 +299,13 @@ export class StorageKitSQLiteStore {
       for (const mutation of mutations) {
         this.applyWrite(mutation);
       }
-      this.recordConflictRanges(writeConflictRanges, committedVersion);
+      this.recordConflictRanges(
+        coalesceConflictRangesForPersistence(
+          writeConflictRanges,
+          maximumPersistedConflictRangesPerCommit
+        ),
+        committedVersion
+      );
       this.setMetadata("commitVersion", committedVersion.toString());
       this.pruneConflictRanges(committedVersion);
       return {
@@ -484,20 +532,36 @@ export class StorageKitSQLiteStore {
 
   pruneConflictRanges(committedVersion) {
     const pruneThrough = committedVersion - conflictVersionWindow;
-    if (pruneThrough > this.minimumRetainedConflictVersion()) {
-      this.pruneConflictVersionsThrough(pruneThrough);
-    }
-    while (this.metadataInteger("conflictEntryCount") > storageKitWireLimits.maxConflictEntries
-        || this.metadataInteger("conflictByteCount") > storageKitWireLimits.maxConflictBytes) {
+    // Prune oldest versions until the window and both retention limits hold.
+    // A single-version step per commit cannot converge: one commit may add
+    // maximumPersistedConflictRangesPerCommit entries while the evicted oldest
+    // version held only one, so the limits would stop being hard bounds.
+    while (true) {
+      const retainedEntryCount = this.metadataInteger("conflictEntryCount");
+      const retainedByteCount = this.metadataInteger("conflictByteCount");
       const oldest = this.first(
         "SELECT version_hi, version_lo FROM storagekit_conflict_versions ORDER BY version_hi ASC, version_lo ASC LIMIT 1"
       );
       if (oldest === null) {
-        throw StorageKitWireError.invalidOperation(
-          "Conflict retention metadata is inconsistent"
-        );
+        if (retainedEntryCount !== 0 || retainedByteCount !== 0) {
+          throw StorageKitWireError.invalidOperation(
+            "Conflict retention metadata is inconsistent"
+          );
+        }
+        return;
       }
-      this.pruneConflictVersionsThrough(joinVersion(oldest.version_hi, oldest.version_lo));
+      const oldestVersion = joinVersion(oldest.version_hi, oldest.version_lo);
+      if (oldestVersion >= committedVersion) {
+        // Never prune the version recorded by the current commit.
+        return;
+      }
+      const exceedsRetentionTarget =
+        retainedEntryCount > storageKitWireLimits.maxConflictEntries
+        || retainedByteCount > storageKitWireLimits.maxConflictBytes;
+      if (oldestVersion > pruneThrough && !exceedsRetentionTarget) {
+        return;
+      }
+      this.pruneConflictVersionsThrough(oldestVersion);
     }
   }
 
@@ -632,6 +696,14 @@ export class StorageKitSQLiteStore {
   exec(statement, ...bindings) {
     this.sql.exec(statement, ...bindings);
   }
+}
+
+function isMissingMetadataTable(error) {
+  return typeof error === "object"
+    && error !== null
+    && "message" in error
+    && typeof error.message === "string"
+    && /no such table:\s*(?:main\.)?storagekit_metadata\b/i.test(error.message);
 }
 
 function rangeQuery(bounds, cursorKey, reverse) {
@@ -859,6 +931,20 @@ function mergeConflictRanges(ranges) {
     previous.end = maximumEnd(previous.end, range.end);
   }
   return merged;
+}
+
+function coalesceConflictRangesForPersistence(ranges, maximumRangeCount) {
+  if (ranges.length <= maximumRangeCount) {
+    return ranges;
+  }
+  const rangesPerGroup = Math.ceil(ranges.length / maximumRangeCount);
+  const coalesced = [];
+  for (let start = 0; start < ranges.length; start += rangesPerGroup) {
+    const first = ranges[start];
+    const last = ranges[Math.min(start + rangesPerGroup, ranges.length) - 1];
+    coalesced.push({ begin: first.begin, end: last.end });
+  }
+  return coalesced;
 }
 
 function compareRangeBegins(left, right) {

@@ -16,6 +16,10 @@ export const storageKitWireLimits = Object.freeze({
   maxRangeLimit: 1_000,
   maxSplitPoints: 10_000,
   maxSelectorResolutionSteps: 10_000n,
-  maxConflictEntries: 65_536,
-  maxConflictBytes: 32 * 1024 * 1024,
+  // Hard bounds on retained write-conflict history, enforced by
+  // StorageKitSQLiteStore.pruneConflictRanges. maxConflictEntries equals
+  // conflictVersionWindow (4096) * maximumPersistedConflictRangesPerCommit
+  // (256); change them together.
+  maxConflictEntries: 1_048_576,
+  maxConflictBytes: 256 * 1024 * 1024,
 });

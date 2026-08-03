@@ -5,6 +5,7 @@ import { StorageKitDurableObjectHost } from "../src/StorageKitDurableObjectHost.
 import { nameForScope } from "../src/StorageKitScope.js";
 import { StorageKitWire } from "../src/StorageKitWire.js";
 import { mutationType, operation, protocolVersion, statusCode } from "../src/StorageKitWireConstants.js";
+import { storageKitWireLimits } from "../src/StorageKitWireLimits.js";
 import { InMemorySQLiteStorage } from "./InMemorySQLiteStorage.js";
 
 const scope = Object.freeze({
@@ -95,6 +96,66 @@ test("migration and CRUD do not depend on unavailable SQLite PRAGMAs", () => {
   });
 
   assert.deepEqual([...readValue(host, 0x01)], [0x41]);
+});
+
+test("migration reopens an initialized store without SQL writes", () => {
+  const sql = new InMemorySQLiteStorage();
+  const firstHost = new StorageKitDurableObjectHost(
+    sql,
+    (operation) => sql.transactionSync(operation)
+  );
+  firstHost.migrate();
+  send(firstHost, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x01), value: bytes(0x41) },
+    ],
+    readConflictRanges: [],
+    writeConflictRanges: [],
+  });
+
+  const readOnlySQL = {
+    exec(statement, ...bindings) {
+      if (!/^\s*SELECT\b/i.test(statement)) {
+        throw new Error(`Unexpected SQL write during restart: ${statement}`);
+      }
+      if (/\bIN\s*\(/i.test(statement)) {
+        throw new Error(`Unexpected temporary table query during restart: ${statement}`);
+      }
+      if (/\bsqlite_schema\b/i.test(statement)) {
+        throw new Error(`Unexpected internal schema query during restart: ${statement}`);
+      }
+      return sql.exec(statement, ...bindings);
+    },
+  };
+  const restartedHost = new StorageKitDurableObjectHost(
+    readOnlySQL,
+    () => {
+      throw new Error("Unexpected migration transaction during restart");
+    }
+  );
+
+  restartedHost.migrate();
+
+  assert.deepEqual([...readValue(restartedHost, 0x01)], [0x41]);
+});
+
+test("migration preserves metadata inspection failures", () => {
+  const expected = new Error("Exceeded allowed rows written in Durable Objects free tier.");
+  const host = new StorageKitDurableObjectHost(
+    {
+      exec() {
+        throw expected;
+      },
+    },
+    () => {
+      throw new Error("Unexpected migration transaction after inspection failure");
+    }
+  );
+
+  assert.throws(() => host.migrate(), (error) => error === expected);
 });
 
 test("response decoder rejects an unknown status", () => {
@@ -1004,6 +1065,190 @@ test("old conflict entries are pruned and stale readers conflict", () => {
       singleKeyRange(bytes(0x01)),
     ],
   })));
+  assert.equal(response.status, statusCode.transactionConflict);
+});
+
+test("large commits persist a bounded conservative conflict history", () => {
+  const sql = new InMemorySQLiteStorage();
+  const host = new StorageKitDurableObjectHost(
+    sql,
+    (operation) => sql.transactionSync(operation)
+  );
+  host.migrate();
+  const initialRead = send(host, {
+    operation: operation.read,
+    scope,
+    key: bytes(0x40, 0x80),
+    snapshot: false,
+    expectedReadVersion: null,
+  });
+  const mutations = Array.from({ length: 300 }, (_, index) => ({
+    tag: 1,
+    key: bytes(0x40, index >>> 8, index & 0xff),
+    value: bytes(index & 0xff),
+  }));
+
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations,
+    readConflictRanges: [],
+  });
+
+  const versions = sql.exec(
+    "SELECT entry_count FROM storagekit_conflict_versions WHERE version_hi = 0 AND version_lo = 1"
+  );
+  assert.equal(versions.length, 1);
+  assert.ok(versions[0].entry_count <= 256);
+  assert.ok(versions[0].entry_count < mutations.length);
+
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(
+    StorageKitWire.encodeRequest({
+      operation: operation.commit,
+      scope,
+      observedReadVersion: initialRead.currentCommitVersion,
+      mutations: [
+        { tag: 1, key: bytes(0x50), value: bytes(0x50) },
+      ],
+      readConflictRanges: [
+        singleKeyRange(bytes(0x40, 0x00, 0x80)),
+      ],
+    })
+  ));
+  assert.equal(response.status, statusCode.transactionConflict);
+});
+
+function makeHostWithPlantedConflictHistory({ perVersionByteCount, entryCountMetadata, byteCountMetadata }) {
+  const sql = new InMemorySQLiteStorage();
+  const host = new StorageKitDurableObjectHost(
+    sql,
+    (operation) => sql.transactionSync(operation)
+  );
+  host.migrate();
+  for (let version = 1; version <= 3; version += 1) {
+    sql.exec(
+      "INSERT INTO storagekit_conflicts(version_hi, version_lo, begin_key, end_key) VALUES (0, ?, ?, ?)",
+      version,
+      bytes(version),
+      bytes(version, 0)
+    );
+    sql.exec(
+      "INSERT INTO storagekit_conflict_versions(version_hi, version_lo, entry_count, byte_count) VALUES (0, ?, 1, ?)",
+      version,
+      perVersionByteCount
+    );
+  }
+  sql.exec(
+    "UPDATE storagekit_metadata SET value = '3' WHERE key = 'commitVersion'"
+  );
+  sql.exec(
+    `UPDATE storagekit_metadata SET value = '${entryCountMetadata}' WHERE key = 'conflictEntryCount'`
+  );
+  sql.exec(
+    `UPDATE storagekit_metadata SET value = '${byteCountMetadata}' WHERE key = 'conflictByteCount'`
+  );
+  return { sql, host };
+}
+
+function retainedConflictVersions(sql) {
+  return sql.exec(
+    "SELECT version_lo FROM storagekit_conflict_versions ORDER BY version_lo"
+  ).map((row) => row.version_lo);
+}
+
+function metadataNumber(sql, key) {
+  const rows = sql.exec(
+    "SELECT value FROM storagekit_metadata WHERE key = ?",
+    key
+  );
+  assert.equal(rows.length, 1);
+  return Number(rows[0].value);
+}
+
+test("a commit prunes retained conflict versions until the entry limit holds", () => {
+  // One entry over the limit before the commit; the commit adds one more, so
+  // two oldest versions must be pruned before the limit holds again.
+  const { sql, host } = makeHostWithPlantedConflictHistory({
+    perVersionByteCount: 3,
+    entryCountMetadata: storageKitWireLimits.maxConflictEntries + 1,
+    byteCountMetadata: 9,
+  });
+
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x70), value: bytes(0x70) },
+    ],
+    readConflictRanges: [],
+  });
+
+  assert.deepEqual(retainedConflictVersions(sql), [3, 4]);
+  assert.ok(
+    metadataNumber(sql, "conflictEntryCount")
+      <= storageKitWireLimits.maxConflictEntries
+  );
+});
+
+test("a commit prunes retained conflict versions until the byte limit holds", () => {
+  // 3 x 150MB planted history: pruning one version (300MB) is still over the
+  // 256MB limit, so the prune loop must evict a second version.
+  const { sql, host } = makeHostWithPlantedConflictHistory({
+    perVersionByteCount: 150_000_000,
+    entryCountMetadata: 3,
+    byteCountMetadata: 450_000_000,
+  });
+
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x70), value: bytes(0x70) },
+    ],
+    readConflictRanges: [],
+  });
+
+  assert.deepEqual(retainedConflictVersions(sql), [3, 4]);
+  assert.ok(
+    metadataNumber(sql, "conflictByteCount")
+      <= storageKitWireLimits.maxConflictBytes
+  );
+});
+
+test("a commit whose read version predates retained conflict history is rejected", () => {
+  const { sql, host } = makeHostWithPlantedConflictHistory({
+    perVersionByteCount: 3,
+    entryCountMetadata: storageKitWireLimits.maxConflictEntries + 1,
+    byteCountMetadata: 9,
+  });
+
+  send(host, {
+    operation: operation.commit,
+    scope,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key: bytes(0x70), value: bytes(0x70) },
+    ],
+    readConflictRanges: [],
+  });
+  assert.equal(metadataNumber(sql, "minimumConflictVersion"), 2);
+
+  const response = StorageKitWire.decodeResponse(host.dispatchBytes(
+    StorageKitWire.encodeRequest({
+      operation: operation.commit,
+      scope,
+      observedReadVersion: 1n,
+      mutations: [
+        { tag: 1, key: bytes(0x71), value: bytes(0x71) },
+      ],
+      readConflictRanges: [
+        singleKeyRange(bytes(0x01)),
+      ],
+    })
+  ));
   assert.equal(response.status, statusCode.transactionConflict);
 });
 
