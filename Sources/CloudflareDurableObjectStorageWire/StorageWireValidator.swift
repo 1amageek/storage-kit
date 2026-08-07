@@ -8,14 +8,14 @@ enum StorageWireValidator {
         try counter.add(2)
         switch request {
         case .readiness(let request):
-            try counter.add(request.scope)
+            try counter.add(request.partitionIdentity)
         case .read(let request):
-            try counter.add(request.scope)
+            try counter.add(request.partitionIdentity)
             try counter.addBytes(request.key, maximum: limits.maxKeyBytes)
             try counter.add(1)
             try counter.addOptionalVersion(request.expectedReadVersion)
         case .range(let request):
-            try counter.add(request.scope)
+            try counter.add(request.partitionIdentity)
             try counter.add(request.begin)
             try counter.add(request.end)
             try counter.add(6)
@@ -25,7 +25,7 @@ enum StorageWireValidator {
                 maximum: limits.maxKeyBytes
             )
         case .commit(let request):
-            try counter.add(request.scope)
+            try counter.add(request.partitionIdentity)
             try counter.addOptionalVersion(request.observedReadVersion)
             try counter.addCollectionHeader(
                 count: request.mutations.count,
@@ -49,7 +49,7 @@ enum StorageWireValidator {
                 try counter.add(range)
             }
         case .rangeSize(let request):
-            try counter.add(request.scope)
+            try counter.add(request.partitionIdentity)
             try counter.addBytes(
                 request.begin,
                 maximum: limits.maxBoundaryBytes
@@ -60,7 +60,7 @@ enum StorageWireValidator {
             )
             try counter.addOptionalVersion(request.expectedReadVersion)
         case .rangeSplitPoints(let request):
-            try counter.add(request.scope)
+            try counter.add(request.partitionIdentity)
             try counter.addBytes(
                 request.begin,
                 maximum: limits.maxBoundaryBytes
@@ -95,6 +95,10 @@ enum StorageWireValidator {
                 maximum: limits.maxRangeLimit
             )
             for row in response.rows {
+                try counter.validateStoredPair(
+                    keyBytes: row.key.count,
+                    valueBytes: row.value.count
+                )
                 try counter.addBytes(row.key, maximum: limits.maxKeyBytes)
                 try counter.addBytes(row.value, maximum: limits.maxValueBytes)
             }
@@ -165,16 +169,16 @@ enum StorageWireValidator {
         }
 
         mutating func add(
-            _ scope: StorageWireScope
+            _ partitionIdentity: StoragePartitionIdentity
         ) throws(StorageWireProtocolError) {
-            try addString(scope.databaseID, maximum: StorageWireLimits.cloudflareDurableObject.maxScopeComponentBytes)
+            try addString(partitionIdentity.databaseID, maximum: StorageWireLimits.cloudflareDurableObject.maxPartitionIdentityComponentBytes)
             try addOptionalString(
-                scope.tenantID,
-                maximum: StorageWireLimits.cloudflareDurableObject.maxScopeComponentBytes
+                partitionIdentity.tenantID,
+                maximum: StorageWireLimits.cloudflareDurableObject.maxPartitionIdentityComponentBytes
             )
             try addOptionalString(
-                scope.workspaceID,
-                maximum: StorageWireLimits.cloudflareDurableObject.maxScopeComponentBytes
+                partitionIdentity.workspaceID,
+                maximum: StorageWireLimits.cloudflareDurableObject.maxPartitionIdentityComponentBytes
             )
         }
 
@@ -197,6 +201,10 @@ enum StorageWireValidator {
             case .set(let key, let value):
                 try addBytes(key, maximum: StorageWireLimits.cloudflareDurableObject.maxKeyBytes)
                 try addBytes(value, maximum: StorageWireLimits.cloudflareDurableObject.maxValueBytes)
+                try validateStoredPair(
+                    keyBytes: key.count,
+                    valueBytes: value.count
+                )
             case .clear(let key):
                 try addBytes(key, maximum: StorageWireLimits.cloudflareDurableObject.maxKeyBytes)
             case .clearRange(let begin, let end):
@@ -209,6 +217,23 @@ enum StorageWireValidator {
                     maximum: StorageWireLimits.cloudflareDurableObject.maxBoundaryBytes
                 )
             case .atomic(let key, let param, let mutationType):
+                if mutationType == .setVersionstampedKey, key.count >= 4 {
+                    try validateStoredPair(
+                        keyBytes: key.count - 4,
+                        valueBytes: param.count
+                    )
+                } else if mutationType == .setVersionstampedValue,
+                          param.count >= 4 {
+                    try validateStoredPair(
+                        keyBytes: key.count,
+                        valueBytes: param.count - 4
+                    )
+                } else if mutationType != .compareAndClear {
+                    try validateStoredPair(
+                        keyBytes: key.count,
+                        valueBytes: param.count
+                    )
+                }
                 try addBytes(
                     key,
                     maximum: mutationType == .setVersionstampedKey
@@ -254,6 +279,23 @@ enum StorageWireValidator {
             }
             try add(4)
             try add(bytes.count)
+        }
+
+        func validateStoredPair(
+            keyBytes: Int,
+            valueBytes: Int
+        ) throws(StorageWireProtocolError) {
+            let total = keyBytes.addingReportingOverflow(valueBytes)
+            let maximum = StorageWireLimits.cloudflareDurableObject
+                .maxStoredKeyValueBytes
+            guard !total.overflow, total.partialValue <= maximum else {
+                throw .wire(
+                    .byteCountExceedsLimit(
+                        count: total.overflow ? Int.max : total.partialValue,
+                        maximum: maximum
+                    )
+                )
+            }
         }
 
         mutating func addString(

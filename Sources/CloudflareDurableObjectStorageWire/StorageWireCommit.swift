@@ -1,19 +1,19 @@
 
 public struct StorageWireCommitRequest: Sendable, Hashable {
-    public let scope: StorageWireScope
+    public let partitionIdentity: StoragePartitionIdentity
     public let observedReadVersion: Int64?
     public let mutations: [StorageWireWriteOperation]
     public let readConflictRanges: [StorageWireKeyRange]
     public let writeConflictRanges: [StorageWireKeyRange]
 
     public init(
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         observedReadVersion: Int64?,
         mutations: [StorageWireWriteOperation],
         readConflictRanges: [StorageWireKeyRange] = [],
         writeConflictRanges: [StorageWireKeyRange] = []
     ) {
-        self.scope = scope
+        self.partitionIdentity = partitionIdentity
         self.observedReadVersion = observedReadVersion
         self.mutations = mutations
         self.readConflictRanges = readConflictRanges
@@ -21,7 +21,7 @@ public struct StorageWireCommitRequest: Sendable, Hashable {
     }
 
     func encode(into writer: inout StorageWireWriter) throws(StorageWireProtocolError) {
-        try scope.encode(into: &writer)
+        try partitionIdentity.encode(into: &writer)
         try StorageWireReadRequest.writeOptionalVersion(observedReadVersion, into: &writer)
         let maximum = StorageWireLimits.cloudflareDurableObject.maxMutationsPerCommit
         try StorageWireProtocolError.writeCount(
@@ -51,7 +51,7 @@ public struct StorageWireCommitRequest: Sendable, Hashable {
     }
 
     init(from reader: inout StorageWireReader) throws(StorageWireProtocolError) {
-        self.scope = try StorageWireScope(from: &reader)
+        self.partitionIdentity = try StoragePartitionIdentity(from: &reader)
         self.observedReadVersion = try StorageWireReadRequest.readOptionalVersion(from: &reader)
         let limits = StorageWireLimits.cloudflareDurableObject
         let count = try StorageWireProtocolError.readCount(

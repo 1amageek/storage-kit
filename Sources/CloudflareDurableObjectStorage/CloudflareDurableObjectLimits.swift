@@ -5,6 +5,7 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
     public let maxKeyBytes: Int
     public let maxBoundaryBytes: Int
     public let maxValueBytes: Int
+    public let maxStoredKeyValueBytes: Int
     public let maxMutationsPerCommit: Int
     public let maxConflictRangesPerCommit: Int
     public let maxRangeLimit: Int
@@ -15,6 +16,8 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         maxKeyBytes: Int,
         maxBoundaryBytes: Int,
         maxValueBytes: Int,
+        maxStoredKeyValueBytes: Int = StorageWireLimits
+            .cloudflareDurableObject.maxStoredKeyValueBytes,
         maxMutationsPerCommit: Int,
         maxConflictRangesPerCommit: Int,
         maxRangeLimit: Int,
@@ -24,17 +27,23 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         try Self.validate(
             maxKeyBytes,
             field: "maxKeyBytes",
-            maximum: 1_024
+            maximum: StorageWireLimits.cloudflareDurableObject.maxKeyBytes
         )
         try Self.validate(
             maxBoundaryBytes,
             field: "maxBoundaryBytes",
-            maximum: 1_025
+            maximum: StorageWireLimits.cloudflareDurableObject.maxBoundaryBytes
         )
         try Self.validate(
             maxValueBytes,
             field: "maxValueBytes",
-            maximum: 1_048_576
+            maximum: StorageWireLimits.cloudflareDurableObject.maxValueBytes
+        )
+        try Self.validate(
+            maxStoredKeyValueBytes,
+            field: "maxStoredKeyValueBytes",
+            maximum: StorageWireLimits.cloudflareDurableObject
+                .maxStoredKeyValueBytes
         )
         try Self.validate(
             maxMutationsPerCommit,
@@ -71,9 +80,20 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
                     boundaryBytes: maxBoundaryBytes
                 )
         }
+        try Self.validateComponent(
+            maxKeyBytes,
+            field: "maxKeyBytes",
+            storedPairMaximum: maxStoredKeyValueBytes
+        )
+        try Self.validateComponent(
+            maxValueBytes,
+            field: "maxValueBytes",
+            storedPairMaximum: maxStoredKeyValueBytes
+        )
         self.maxKeyBytes = maxKeyBytes
         self.maxBoundaryBytes = maxBoundaryBytes
         self.maxValueBytes = maxValueBytes
+        self.maxStoredKeyValueBytes = maxStoredKeyValueBytes
         self.maxMutationsPerCommit = maxMutationsPerCommit
         self.maxConflictRangesPerCommit = maxConflictRangesPerCommit
         self.maxRangeLimit = maxRangeLimit
@@ -82,9 +102,12 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
     }
 
     public static let `default` = CloudflareDurableObjectLimits(
-        maxKeyBytes: 1_024,
-        maxBoundaryBytes: 1_025,
-        maxValueBytes: 1_048_576,
+        maxKeyBytes: StorageWireLimits.cloudflareDurableObject.maxKeyBytes,
+        maxBoundaryBytes: StorageWireLimits.cloudflareDurableObject
+            .maxBoundaryBytes,
+        maxValueBytes: StorageWireLimits.cloudflareDurableObject.maxValueBytes,
+        maxStoredKeyValueBytes: StorageWireLimits.cloudflareDurableObject
+            .maxStoredKeyValueBytes,
         maxMutationsPerCommit: StorageWireLimits.cloudflareDurableObject
             .maxMutationsPerCommit,
         maxConflictRangesPerCommit: StorageWireLimits.cloudflareDurableObject
@@ -99,6 +122,7 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         maxKeyBytes: Int,
         maxBoundaryBytes: Int,
         maxValueBytes: Int,
+        maxStoredKeyValueBytes: Int,
         maxMutationsPerCommit: Int,
         maxConflictRangesPerCommit: Int,
         maxRangeLimit: Int,
@@ -110,6 +134,7 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
         self.maxKeyBytes = maxKeyBytes
         self.maxBoundaryBytes = maxBoundaryBytes
         self.maxValueBytes = maxValueBytes
+        self.maxStoredKeyValueBytes = maxStoredKeyValueBytes
         self.maxMutationsPerCommit = maxMutationsPerCommit
         self.maxConflictRangesPerCommit = maxConflictRangesPerCommit
         self.maxRangeLimit = maxRangeLimit
@@ -134,6 +159,21 @@ public struct CloudflareDurableObjectLimits: Sendable, Hashable {
                 value: value,
                 maximum: maximum
             )
+        }
+    }
+
+    private static func validateComponent(
+        _ value: Int,
+        field: String,
+        storedPairMaximum: Int
+    ) throws {
+        guard value <= storedPairMaximum else {
+            throw CloudflareDurableObjectLimitsError
+                .componentExceedsStoredPairLimit(
+                    field: field,
+                    value: value,
+                    maximum: storedPairMaximum
+                )
         }
     }
 }

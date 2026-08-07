@@ -9,6 +9,8 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         let ensureOpen: @Sendable () throws -> Void
         let recordReadVersion: @Sendable (Int64) throws -> Void
         let recordReadConflictRange: @Sendable (StorageWireKeyRange) throws -> Void
+        let validateStoredRow:
+            @Sendable (ByteString, ByteString) throws -> Void
     }
 
     private enum ResolvedBoundary: Sendable, Equatable {
@@ -18,7 +20,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private var storageAccess: RangeStorageAccess?
-    private let scope: StorageWireScope
+    private let partitionIdentity: StoragePartitionIdentity
     private let begin: KeySelector
     private let end: KeySelector
     private let snapshot: Bool
@@ -53,7 +55,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
             @escaping @Sendable (
                 StorageWireRangeRequest
             ) async throws -> StorageWireRangeResponse,
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         begin: KeySelector,
         end: KeySelector,
         snapshot: Bool,
@@ -68,16 +70,19 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         recordReadConflictRange:
             @escaping @Sendable (
                 StorageWireKeyRange
-            ) throws -> Void
+            ) throws -> Void,
+        validateStoredRow:
+            @escaping @Sendable (ByteString, ByteString) throws -> Void
     ) {
         self.storageAccess = RangeStorageAccess(
             read: read,
             range: range,
             ensureOpen: ensureOpen,
             recordReadVersion: recordReadVersion,
-            recordReadConflictRange: recordReadConflictRange
+            recordReadConflictRange: recordReadConflictRange,
+            validateStoredRow: validateStoredRow
         )
-        self.scope = scope
+        self.partitionIdentity = partitionIdentity
         self.begin = begin
         self.end = end
         self.snapshot = snapshot
@@ -666,7 +671,7 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         }
         let response = try await storageAccess.range(
             StorageWireRangeRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 begin: begin,
                 end: end,
                 limit: limit,
@@ -676,6 +681,9 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
                 cursorKey: cursorKey
             )
         )
+        for row in response.rows {
+            try storageAccess.validateStoredRow(row.key, row.value)
+        }
         try acceptReadVersion(response.currentCommitVersion)
         if !snapshot {
             for conflictRange in response.readConflictRanges {
@@ -761,12 +769,15 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         }
         let response = try await storageAccess.read(
             StorageWireReadRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 key: key,
                 snapshot: snapshot,
                 expectedReadVersion: expectedReadVersionForRequest
             )
         )
+        if let value = response.value {
+            try storageAccess.validateStoredRow(key, value)
+        }
         try acceptReadVersion(response.currentCommitVersion)
         if !snapshot {
             try storageAccess.recordReadConflictRange(

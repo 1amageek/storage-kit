@@ -8,7 +8,7 @@ import Foundation
 ///
 /// These tests exercise the **exact code paths** that database-framework uses:
 /// - `engine.createTransaction()` (not withTransaction)
-/// - `ActiveTransactionScope.$current.withValue(transaction)` wrapping
+/// - `ActiveTransactionContext.withActiveTransaction(transaction)` wrapping
 /// - Explicit `transaction.commit()` and `transaction.cancel()`
 /// - Subspace-based key organization (items / indexes / blobs)
 /// - ItemEnvelope-style data storage
@@ -132,7 +132,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
     /// Mirrors TransactionRunner.run() lines 77-99:
     /// `let transaction = try database.createTransaction()`
-    /// `ActiveTransactionScope.$current.withValue(transaction) { ... }`
+    /// `ActiveTransactionContext.withActiveTransaction(transaction) { _ in ... }`
     /// `try await transaction.commit()`
     @Test func transactionRunner_createCommitPattern() async throws {
         let engine = try await makeEngine()
@@ -141,16 +141,16 @@ struct DatabaseFrameworkTransactionContractTests {
         let key = itemKey(type: "User", id: "user-001")
         let value = serializeItem(name: "Alice", email: "alice@example.com")
 
-        // TransactionRunner pattern: create → scope → operation → commit
+        // TransactionRunner pattern: create → active context → operation → commit
         let transaction = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(transaction) {
+        try await ActiveTransactionContext.withActiveTransaction(transaction) { _ in
             try transaction.setValue(value, for: key)
             try await transaction.commit()
         }
 
         // Verify with a separate read transaction
         let readTx = try engine.createTransaction()
-        let result = try await ActiveTransactionScope.$current.withValue(readTx) {
+        let result = try await ActiveTransactionContext.withActiveTransaction(readTx) { _ in
             try await readTx.getValue(for: key)
         }
         try await readTx.commit()
@@ -171,7 +171,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Simulate failure: cancellation explicitly discards buffered writes.
         let tx1 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx1) {
+        try await ActiveTransactionContext.withActiveTransaction(tx1) { _ in
             try tx1.setValue(value, for: key)
             // Simulate error → cancel
             try await tx1.cancel()
@@ -179,7 +179,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Verify data was NOT persisted
         let tx2 = try engine.createTransaction()
-        let result = try await ActiveTransactionScope.$current.withValue(tx2) {
+        let result = try await ActiveTransactionContext.withActiveTransaction(tx2) { _ in
             try await tx2.getValue(for: key)
         }
         try await tx2.commit()
@@ -206,7 +206,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Write phase (single transaction, batch)
         let writeTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(writeTx) {
+        try await ActiveTransactionContext.withActiveTransaction(writeTx) { _ in
             for user in users {
                 let key = itemKey(type: "User", id: user.id)
                 let data = serializeItem(name: user.name, email: user.email)
@@ -217,7 +217,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Read phase (separate transaction)
         let readTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(readTx) {
+        try await ActiveTransactionContext.withActiveTransaction(readTx) { _ in
             for user in users {
                 let key = itemKey(type: "User", id: user.id)
                 let data = try await readTx.getValue(for: key, snapshot: true)
@@ -273,7 +273,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Step 1: Insert with initial index values
         let tx1 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx1) {
+        try await ActiveTransactionContext.withActiveTransaction(tx1) { _ in
             // Write item record
             try tx1.setValue(serializeItem(name: "Alice", email: "alice@test.com"), for: itemKeyBytes)
             // Write index entry (email → id) with empty value
@@ -285,7 +285,7 @@ struct DatabaseFrameworkTransactionContractTests {
         // Step 2: Update — diff-based index maintenance
         // Old index key: email=alice@test.com, New: email=alice2@test.com
         let tx2 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx2) {
+        try await ActiveTransactionContext.withActiveTransaction(tx2) { _ in
             // Read old value (for diff computation)
             let oldData = try await tx2.getValue(for: itemKeyBytes)
             #expect(oldData != nil) // Must exist
@@ -304,7 +304,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Step 3: Verify — old index gone, new index present
         let tx3 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx3) {
+        try await ActiveTransactionContext.withActiveTransaction(tx3) { _ in
             let oldIdxVal = try await tx3.getValue(for: indexKey(name: "user_email", value: "alice@test.com", id: userId))
             #expect(oldIdxVal == nil) // Removed
 
@@ -327,7 +327,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Create multiple items with index entries
         let tx1 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx1) {
+        try await ActiveTransactionContext.withActiveTransaction(tx1) { _ in
             for i in 0..<10 {
                 let id = String(format: "user-%03d", i)
                 let age = String(format: "%03d", 20 + i)
@@ -344,7 +344,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Scan index range: age 023..027 (users aged 23-26)
         let tx2 = try engine.createTransaction()
-        let results = try await ActiveTransactionScope.$current.withValue(tx2) {
+        let results = try await ActiveTransactionContext.withActiveTransaction(tx2) { _ in
             try await tx2.collectRange(
                 from: .firstGreaterOrEqual(indexKey(name: "user_age", value: "023", id: "")),
                 to: .firstGreaterOrEqual(indexKey(name: "user_age", value: "027", id: "")),
@@ -363,7 +363,7 @@ struct DatabaseFrameworkTransactionContractTests {
         defer { await engine.waitUntilShutdown() }
 
         let tx1 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx1) {
+        try await ActiveTransactionContext.withActiveTransaction(tx1) { _ in
             for i in 0..<25 {
                 let key = itemKey(type: "Product", id: String(format: "p-%03d", i))
                 try tx1.setValue(serializeItem(name: "Product\(i)", email: ""), for: key)
@@ -374,7 +374,7 @@ struct DatabaseFrameworkTransactionContractTests {
         // Count all products via collectRange
         let tx2 = try engine.createTransaction()
         let (begin, end) = subspaceRange(prefix: SubspacePrefix.items, name: "Product")
-        let allItems = try await ActiveTransactionScope.$current.withValue(tx2) {
+        let allItems = try await ActiveTransactionContext.withActiveTransaction(tx2) { _ in
             try await tx2.collectRange(
                 from: .firstGreaterOrEqual(begin),
                 to: .firstGreaterOrEqual(end),
@@ -393,7 +393,7 @@ struct DatabaseFrameworkTransactionContractTests {
         defer { await engine.waitUntilShutdown() }
 
         let tx1 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx1) {
+        try await ActiveTransactionContext.withActiveTransaction(tx1) { _ in
             for i in 0..<20 {
                 let key = itemKey(type: "Event", id: String(format: "evt-%03d", i))
                 try tx1.setValue(ByteString(Array("event-\(i)".utf8)), for: key)
@@ -404,7 +404,7 @@ struct DatabaseFrameworkTransactionContractTests {
         // Reverse scan with limit (latest 5 events)
         let tx2 = try engine.createTransaction()
         let (begin, end) = subspaceRange(prefix: SubspacePrefix.items, name: "Event")
-        let latest = try await ActiveTransactionScope.$current.withValue(tx2) {
+        let latest = try await ActiveTransactionContext.withActiveTransaction(tx2) { _ in
             try await tx2.collectRange(
                 from: .firstGreaterOrEqual(begin),
                 to: .firstGreaterOrEqual(end),
@@ -434,7 +434,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Write items + indexes for two types
         let tx1 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx1) {
+        try await ActiveTransactionContext.withActiveTransaction(tx1) { _ in
             // Type A: 5 items
             for i in 0..<5 {
                 let key = itemKey(type: "TypeA", id: "a-\(i)")
@@ -451,7 +451,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Clear all TypeA items and indexes (like clearAll())
         let tx2 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx2) {
+        try await ActiveTransactionContext.withActiveTransaction(tx2) { _ in
             let (itemBegin, itemEnd) = subspaceRange(prefix: SubspacePrefix.items, name: "TypeA")
             try tx2.clearRange(beginKey: itemBegin, endKey: itemEnd)
 
@@ -463,7 +463,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Verify: TypeA gone, TypeB intact
         let tx3 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx3) {
+        try await ActiveTransactionContext.withActiveTransaction(tx3) { _ in
             let (aBegin, aEnd) = subspaceRange(prefix: SubspacePrefix.items, name: "TypeA")
             let typeAItems = try await tx3.collectRange(
                 from: .firstGreaterOrEqual(aBegin),
@@ -505,7 +505,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Delete: clear blobs range + clear item
         let tx2 = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx2) {
+        try await ActiveTransactionContext.withActiveTransaction(tx2) { _ in
             // Clear blob range
             let blobRangeBegin = ByteString(
                 [SubspacePrefix.blobs] + key.copyBytes() + [0x00]
@@ -532,11 +532,11 @@ struct DatabaseFrameworkTransactionContractTests {
     }
 
     // =========================================================================
-    // MARK: - Nested Transaction (ActiveTransactionScope)
+    // MARK: - Nested Transaction (ActiveTransactionContext)
     // =========================================================================
 
     /// Mirrors nested transaction detection in TransactionRunner + DatabaseDataStore.
-    /// When ActiveTransactionScope.current is set, createTransaction() returns
+    /// When ActiveTransactionContext.current is set, createTransaction() returns
     /// a nested transaction reusing the parent connection.
     @Test func nestedTransaction_reuseParentConnection() async throws {
         let engine = try await makeEngine()
@@ -547,7 +547,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Outer transaction (like TransactionRunner)
         let outerTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(outerTx) {
+        try await ActiveTransactionContext.withActiveTransaction(outerTx) { _ in
             try outerTx.setValue(ByteString(Array("outer-data".utf8)), for: outerKey)
 
             // Inner transaction (like DatabaseDataStore calling createTransaction inside operation)
@@ -580,7 +580,7 @@ struct DatabaseFrameworkTransactionContractTests {
         let innerKey = itemKey(type: "Inner", id: "i-2")
 
         let outerTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(outerTx) {
+        try await ActiveTransactionContext.withActiveTransaction(outerTx) { _ in
             try outerTx.setValue(ByteString(Array("outer-kept".utf8)), for: outerKey)
 
             let innerTx = try engine.createTransaction()
@@ -607,7 +607,7 @@ struct DatabaseFrameworkTransactionContractTests {
         let value = ByteString(Array("parent-buffered".utf8))
 
         let parentTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(parentTx) {
+        try await ActiveTransactionContext.withActiveTransaction(parentTx) { _ in
             try parentTx.setValue(value, for: key)
 
             let childTx = try engine.createTransaction()
@@ -626,7 +626,7 @@ struct DatabaseFrameworkTransactionContractTests {
         let key = itemKey(type: "NestedOrdering", id: "ordered-key")
 
         let parentTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(parentTx) {
+        try await ActiveTransactionContext.withActiveTransaction(parentTx) { _ in
             // Force the lazy parent to acquire a connection before either write.
             _ = try await parentTx.getValue(for: itemKey(type: "NestedOrdering", id: "missing"))
 
@@ -650,7 +650,7 @@ struct DatabaseFrameworkTransactionContractTests {
         defer { await engine.waitUntilShutdown() }
 
         let parentTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(parentTx) {
+        try await ActiveTransactionContext.withActiveTransaction(parentTx) { _ in
             let childTx = try engine.createTransaction()
             try childTx.setValue(ByteString(Array("child-write".utf8)), for: itemKey(type: "NestedRange", id: "child"))
 
@@ -696,7 +696,7 @@ struct DatabaseFrameworkTransactionContractTests {
         for attempt in 0..<maxRetries {
             let tx = try engine.createTransaction()
             do {
-                try await ActiveTransactionScope.$current.withValue(tx) {
+                try await ActiveTransactionContext.withActiveTransaction(tx) { _ in
                     try tx.setValue(ByteString(Array("attempt-\(attempt)".utf8)), for: key)
 
                     if attempt < 2 {
@@ -737,7 +737,7 @@ struct DatabaseFrameworkTransactionContractTests {
         let value = serializeItem(name: "ReadYourWrites", email: "ryw@test.com")
 
         let tx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx) {
+        try await ActiveTransactionContext.withActiveTransaction(tx) { _ in
             // Write (buffered)
             try tx.setValue(value, for: key)
 
@@ -765,7 +765,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Overwrite + read within same transaction
         let tx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx) {
+        try await ActiveTransactionContext.withActiveTransaction(tx) { _ in
             // Read original
             let oldData = try await tx.getValue(for: key)
             let oldItem = try #require(oldData.flatMap { deserializeItem($0) })
@@ -851,7 +851,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // ---- INSERT ----
         let insertTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(insertTx) {
+        try await ActiveTransactionContext.withActiveTransaction(insertTx) { _ in
             // Write item
             try insertTx.setValue(serializeItem(name: "Alice", email: "alice@test.com"), for: itemKeyBytes)
             // Write index (name)
@@ -863,7 +863,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // ---- READ ----
         let readTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(readTx) {
+        try await ActiveTransactionContext.withActiveTransaction(readTx) { _ in
             let data = try await readTx.getValue(for: itemKeyBytes, snapshot: true)
             let item = try #require(data.flatMap { deserializeItem($0) })
             #expect(item.name == "Alice")
@@ -877,7 +877,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // ---- UPDATE (diff-based) ----
         let updateTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(updateTx) {
+        try await ActiveTransactionContext.withActiveTransaction(updateTx) { _ in
             // Write updated item
             try updateTx.setValue(serializeItem(name: "Alice Smith", email: "alice@test.com"), for: itemKeyBytes)
             // Diff: remove old name index, add new
@@ -889,7 +889,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // ---- DELETE ----
         let deleteTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(deleteTx) {
+        try await ActiveTransactionContext.withActiveTransaction(deleteTx) { _ in
             // Clear item
             try deleteTx.clear(key: itemKeyBytes)
             // Clear all indexes for this item
@@ -900,7 +900,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // ---- VERIFY DELETION ----
         let verifyTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(verifyTx) {
+        try await ActiveTransactionContext.withActiveTransaction(verifyTx) { _ in
             let item = try await verifyTx.getValue(for: itemKeyBytes)
             #expect(item == nil)
 
@@ -960,7 +960,7 @@ struct DatabaseFrameworkTransactionContractTests {
         defer { await engine.waitUntilShutdown() }
 
         let tx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(tx) {
+        try await ActiveTransactionContext.withActiveTransaction(tx) { _ in
             // Write User items
             for i in 0..<3 {
                 try tx.setValue(ByteString(Array("user-\(i)".utf8)), for: itemKey(type: "User", id: "u-\(i)"))
@@ -1016,7 +1016,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Create lazy parent (no async ops yet — no connection acquired)
         let parentTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(parentTx) {
+        try await ActiveTransactionContext.withActiveTransaction(parentTx) { _ in
             // Create nested TX before parent has acquired a connection
             let nestedTx = try engine.createTransaction()
 
@@ -1043,7 +1043,7 @@ struct DatabaseFrameworkTransactionContractTests {
 
         // Create lazy parent, nested writes before any connection
         let parentTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(parentTx) {
+        try await ActiveTransactionContext.withActiveTransaction(parentTx) { _ in
             let nestedTx = try engine.createTransaction()
             try nestedTx.setValue(ByteString(Array("transferred-write".utf8)), for: key)
             try await nestedTx.commit() // transfers to parent buffer
@@ -1074,7 +1074,7 @@ struct DatabaseFrameworkTransactionContractTests {
         try await setup.commit()
 
         let parentTx = try engine.createTransaction()
-        try await ActiveTransactionScope.$current.withValue(parentTx) {
+        try await ActiveTransactionContext.withActiveTransaction(parentTx) { _ in
             let nestedTx = try engine.createTransaction()
 
             // Read (triggers parent connection acquisition)

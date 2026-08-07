@@ -203,7 +203,7 @@ struct CloudflareDurableObjectStorageTimeoutTests {
         clock: any StorageMonotonicClock = SystemStorageClock()
     ) throws -> CloudflareDurableObjectStorageTransaction {
         CloudflareDurableObjectStorageTransaction(
-            scope: try StorageWireScope(databaseID: "main"),
+            partitionIdentity: try StoragePartitionIdentity(databaseID: "main"),
             client: client,
             limits: .default,
             monotonicClock: clock

@@ -52,6 +52,7 @@ public final class SQLiteStorageTransaction:
     private let connection: SQLiteConnectionHandle
     private let lifetime: SQLiteStorageLifetime
     private let mutationByteMeter: TransactionMutationByteMeter
+    private let contextLease: ActiveTransactionContext.Lease?
     private let state = Mutex(MutableState())
     public let transactionDomain: StorageTransactionDomain
 
@@ -78,12 +79,14 @@ public final class SQLiteStorageTransaction:
         self.connection = connection
         self.lifetime = lifetime
         self.mutationByteMeter = TransactionMutationByteMeter()
+        self.contextLease = nil
         self.transactionDomain = transactionDomain
     }
 
     private init(
         identifier: UInt64,
-        parent: SQLiteStorageTransaction
+        parent: SQLiteStorageTransaction,
+        contextLease: ActiveTransactionContext.Lease
     ) {
         self.identifier = identifier
         self.rootIdentifier = parent.rootIdentifier
@@ -92,6 +95,7 @@ public final class SQLiteStorageTransaction:
         self.connection = parent.connection
         self.lifetime = parent.lifetime
         self.mutationByteMeter = parent.mutationByteMeter
+        self.contextLease = contextLease
         self.transactionDomain = parent.transactionDomain
     }
 
@@ -104,6 +108,7 @@ public final class SQLiteStorageTransaction:
         let identifier = identifier
         let rootIdentifier = rootIdentifier
         let parent = parent
+        let contextLease = contextLease
         let cleanupRequired = state.withLock { state in
             switch state.lifecycle {
             case .open, .failed(_, cleanupRequired: true):
@@ -130,6 +135,7 @@ public final class SQLiteStorageTransaction:
                 }
             }
             await coordinator.retireTerminalIdentifier(identifier)
+            contextLease?.release()
         }
     }
 
@@ -137,7 +143,10 @@ public final class SQLiteStorageTransaction:
         state.withLock { $0.activeChildIdentifier != nil }
     }
 
-    func makeChild(identifier: UInt64) throws -> SQLiteStorageTransaction {
+    func makeChild(
+        identifier: UInt64,
+        contextLease: ActiveTransactionContext.Lease
+    ) throws -> SQLiteStorageTransaction {
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .beginTransaction)
             guard state.activeChildIdentifier == nil else {
@@ -154,7 +163,11 @@ public final class SQLiteStorageTransaction:
             }
             state.activeChildIdentifier = identifier
         }
-        return SQLiteStorageTransaction(identifier: identifier, parent: self)
+        return SQLiteStorageTransaction(
+            identifier: identifier,
+            parent: self,
+            contextLease: contextLease
+        )
     }
 
     // MARK: - Read
@@ -420,6 +433,11 @@ public final class SQLiteStorageTransaction:
     // MARK: - Terminal Operations
 
     public func commit() async throws {
+        defer { releaseContextLeaseIfTerminal() }
+        try await commitWithoutReleasingContextLease()
+    }
+
+    private func commitWithoutReleasingContextLease() async throws {
         enum Start {
             case leader(TransactionOperationCompletion)
             case waitForCommit(TransactionOperationCompletion)
@@ -485,6 +503,11 @@ public final class SQLiteStorageTransaction:
     }
 
     public func cancel() async throws {
+        defer { releaseContextLeaseIfTerminal() }
+        try await cancelWithoutReleasingContextLease()
+    }
+
+    private func cancelWithoutReleasingContextLease() async throws {
         enum Start {
             case leader(TransactionOperationCompletion)
             case waitForCancellation(TransactionOperationCompletion)
@@ -620,6 +643,22 @@ public final class SQLiteStorageTransaction:
         }
         state.withLock { $0.lifecycle = .committed }
         return .success(())
+    }
+
+    private func releaseContextLeaseIfTerminal() {
+        let mayRelease = state.withLock { state in
+            switch state.lifecycle {
+            case .committed, .cancelled,
+                 .failed(_, cleanupRequired: false):
+                return true
+            case .open, .committing, .cancelling,
+                 .failed(_, cleanupRequired: true):
+                return false
+            }
+        }
+        if mayRelease {
+            contextLease?.release()
+        }
     }
 
     private func performCancellation() async -> Result<Void, StorageError> {

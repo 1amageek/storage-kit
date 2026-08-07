@@ -104,7 +104,7 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
         let tx = try createTransaction()
-        try await ActiveTransactionScope.withActiveTransaction(
+        try await ActiveTransactionContext.withActiveTransaction(
             tx
         ) { _ in
             do {

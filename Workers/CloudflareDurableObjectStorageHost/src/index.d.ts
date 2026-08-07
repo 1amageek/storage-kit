@@ -2,6 +2,20 @@ export type StorageKitTransactionSync = <Result>(
   operation: () => Result
 ) => Result;
 
+export type StoragePartitionIdentity = Readonly<{
+  databaseID: string;
+  tenantID: string | null;
+  workspaceID: string | null;
+}>;
+
+export declare function validatePartitionIdentity(
+  partitionIdentity: StoragePartitionIdentity
+): StoragePartitionIdentity;
+
+export declare function nameForPartitionIdentity(
+  partitionIdentity: StoragePartitionIdentity
+): string;
+
 /** Minimal synchronous SQL contract consumed by the StorageKit host. */
 export type StorageKitSQLBinding =
   | null

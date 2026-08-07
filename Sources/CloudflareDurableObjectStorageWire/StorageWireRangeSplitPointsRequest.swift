@@ -2,20 +2,20 @@ import DatabaseTypes
 
 /// Server-side chunk-boundary request for one committed key range.
 public struct StorageWireRangeSplitPointsRequest: Sendable, Hashable {
-    public let scope: StorageWireScope
+    public let partitionIdentity: StoragePartitionIdentity
     public let begin: ByteString
     public let end: ByteString
     public let chunkSize: Int64
     public let expectedReadVersion: Int64?
 
     public init(
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         begin: ByteString,
         end: ByteString,
         chunkSize: Int64,
         expectedReadVersion: Int64? = nil
     ) {
-        self.scope = scope
+        self.partitionIdentity = partitionIdentity
         self.begin = begin
         self.end = end
         self.chunkSize = chunkSize
@@ -32,7 +32,7 @@ public struct StorageWireRangeSplitPointsRequest: Sendable, Hashable {
         guard chunkSize > 0 else {
             throw .wire(.invalidChunkSize(chunkSize))
         }
-        try scope.encode(into: &writer)
+        try partitionIdentity.encode(into: &writer)
         try StorageWireProtocolError.writeBytes(
             begin,
             maximum: StorageWireLimits.cloudflareDurableObject.maxBoundaryBytes,
@@ -53,7 +53,7 @@ public struct StorageWireRangeSplitPointsRequest: Sendable, Hashable {
     init(
         from reader: inout StorageWireReader
     ) throws(StorageWireProtocolError) {
-        self.scope = try StorageWireScope(from: &reader)
+        self.partitionIdentity = try StoragePartitionIdentity(from: &reader)
         self.begin = try StorageWireProtocolError.readBytes(
             from: &reader,
             maximum: StorageWireLimits.cloudflareDurableObject.maxBoundaryBytes

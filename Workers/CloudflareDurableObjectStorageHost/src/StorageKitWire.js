@@ -1,7 +1,7 @@
 import { StorageKitWireReader } from "./StorageKitWireReader.js";
 import { StorageKitWireWriter } from "./StorageKitWireWriter.js";
 import { compareBytes } from "./StorageKitByteOrdering.js";
-import { nameForScope, validateScope } from "./StorageKitScope.js";
+import { nameForPartitionIdentity, validatePartitionIdentity } from "./StorageKitPartitionIdentity.js";
 import {
   mutationType,
   operation,
@@ -14,7 +14,7 @@ import { storageKitWireLimits } from "./StorageKitWireLimits.js";
 const utf8Encoder = new TextEncoder();
 
 export class StorageKitWire {
-  static decodeRoutingScope(bytes) {
+  static decodeRoutingPartitionIdentity(bytes) {
     const reader = new StorageKitWireReader(bytes);
     const version = reader.readUInt8();
     if (version !== protocolVersion) {
@@ -26,7 +26,7 @@ export class StorageKitWire {
     }
     return {
       operation: op,
-      scope: readScope(reader),
+      partitionIdentity: readPartitionIdentity(reader),
     };
   }
 
@@ -40,12 +40,12 @@ export class StorageKitWire {
     let request;
     switch (op) {
       case operation.readiness:
-        request = { operation: op, scope: readScope(reader) };
+        request = { operation: op, partitionIdentity: readPartitionIdentity(reader) };
         break;
       case operation.read:
         request = {
           operation: op,
-          scope: readScope(reader),
+          partitionIdentity: readPartitionIdentity(reader),
           key: readKey(reader),
           snapshot: reader.readBool(),
           expectedReadVersion: readOptionalInt64(reader),
@@ -54,7 +54,7 @@ export class StorageKitWire {
       case operation.range:
         request = {
           operation: op,
-          scope: readScope(reader),
+          partitionIdentity: readPartitionIdentity(reader),
           begin: readRangeBoundary(reader),
           end: readRangeBoundary(reader),
           limit: readRangeLimit(reader),
@@ -67,7 +67,7 @@ export class StorageKitWire {
       case operation.commit:
         request = {
           operation: op,
-          scope: readScope(reader),
+          partitionIdentity: readPartitionIdentity(reader),
           observedReadVersion: readOptionalInt64(reader),
           mutations: readMutations(reader),
           readConflictRanges: readKeyRanges(reader),
@@ -77,7 +77,7 @@ export class StorageKitWire {
       case operation.rangeSize:
         request = {
           operation: op,
-          scope: readScope(reader),
+          partitionIdentity: readPartitionIdentity(reader),
           begin: readBoundary(reader),
           end: readBoundary(reader),
           expectedReadVersion: readOptionalInt64(reader),
@@ -87,7 +87,7 @@ export class StorageKitWire {
       case operation.rangeSplitPoints:
         request = {
           operation: op,
-          scope: readScope(reader),
+          partitionIdentity: readPartitionIdentity(reader),
           begin: readBoundary(reader),
           end: readBoundary(reader),
           chunkSize: readPositiveInt64(reader, "Split point chunk size"),
@@ -220,16 +220,16 @@ export class StorageKitWire {
 function writeRequestPayload(writer, request) {
   switch (request.operation) {
     case operation.readiness:
-      writeScope(writer, request.scope);
+      writePartitionIdentity(writer, request.partitionIdentity);
       break;
     case operation.read:
-      writeScope(writer, request.scope);
+      writePartitionIdentity(writer, request.partitionIdentity);
       writeKey(writer, request.key);
       writer.writeBool(request.snapshot);
       writeOptionalInt64(writer, request.expectedReadVersion);
       break;
     case operation.range:
-      writeScope(writer, request.scope);
+      writePartitionIdentity(writer, request.partitionIdentity);
       writeRangeBoundary(writer, request.begin);
       writeRangeBoundary(writer, request.end);
       writer.writeInt32(validateRangeLimit(request.limit));
@@ -239,7 +239,7 @@ function writeRequestPayload(writer, request) {
       writeOptionalKey(writer, request.cursorKey);
       break;
     case operation.commit:
-      writeScope(writer, request.scope);
+      writePartitionIdentity(writer, request.partitionIdentity);
       writeOptionalInt64(writer, request.observedReadVersion);
       validateCollectionCount(
         request.mutations.length,
@@ -270,14 +270,14 @@ function writeRequestPayload(writer, request) {
       }
       break;
     case operation.rangeSize:
-      writeScope(writer, request.scope);
+      writePartitionIdentity(writer, request.partitionIdentity);
       validateOrderedRange(request.begin, request.end);
       writeBoundary(writer, request.begin);
       writeBoundary(writer, request.end);
       writeOptionalInt64(writer, request.expectedReadVersion);
       break;
     case operation.rangeSplitPoints:
-      writeScope(writer, request.scope);
+      writePartitionIdentity(writer, request.partitionIdentity);
       validateOrderedRange(request.begin, request.end);
       writeBoundary(writer, request.begin);
       writeBoundary(writer, request.end);
@@ -346,30 +346,30 @@ function writeResponsePayload(writer, response) {
   }
 }
 
-function readScope(reader) {
-  const scope = validateScope({
+function readPartitionIdentity(reader) {
+  const partitionIdentity = validatePartitionIdentity({
     databaseID: reader.readString(
-      storageKitWireLimits.maxScopeComponentBytes,
+      storageKitWireLimits.maxPartitionIdentityComponentBytes,
       "Database ID bytes"
     ),
     tenantID: readOptionalString(
       reader,
-      storageKitWireLimits.maxScopeComponentBytes,
+      storageKitWireLimits.maxPartitionIdentityComponentBytes,
       "Tenant ID bytes"
     ),
     workspaceID: readOptionalString(
       reader,
-      storageKitWireLimits.maxScopeComponentBytes,
+      storageKitWireLimits.maxPartitionIdentityComponentBytes,
       "Workspace ID bytes"
     ),
   });
-  nameForScope(scope);
-  return scope;
+  nameForPartitionIdentity(partitionIdentity);
+  return partitionIdentity;
 }
 
-function writeScope(writer, scope) {
-  const validated = validateScope(scope);
-  nameForScope(validated);
+function writePartitionIdentity(writer, partitionIdentity) {
+  const validated = validatePartitionIdentity(partitionIdentity);
+  nameForPartitionIdentity(validated);
   writer.writeString(validated.databaseID);
   writeOptionalString(writer, validated.tenantID);
   writeOptionalString(writer, validated.workspaceID);
@@ -377,7 +377,7 @@ function writeScope(writer, scope) {
 
 function readOptionalString(
   reader,
-  maximum = storageKitWireLimits.maxScopeComponentBytes,
+  maximum = storageKitWireLimits.maxPartitionIdentityComponentBytes,
   field = "Optional string bytes"
 ) {
   return reader.readBool() ? reader.readString(maximum, field) : null;
@@ -386,7 +386,7 @@ function readOptionalString(
 function writeOptionalString(
   writer,
   value,
-  maximum = storageKitWireLimits.maxScopeComponentBytes,
+  maximum = storageKitWireLimits.maxPartitionIdentityComponentBytes,
   field = "Optional string bytes"
 ) {
   writer.writeBool(value !== null && value !== undefined);
@@ -549,10 +549,10 @@ function readRows(reader) {
   validateCollectionCount(count, storageKitWireLimits.maxRangeLimit, "Range row count");
   const rows = [];
   for (let index = 0; index < count; index += 1) {
-    rows.push({
-      key: readKey(reader),
-      value: readValue(reader),
-    });
+    const key = readKey(reader);
+    const value = readValue(reader);
+    validateStoredPairByteLengths(key.byteLength, value.byteLength);
+    rows.push({ key, value });
   }
   return rows;
 }
@@ -644,8 +644,12 @@ function readMutations(reader) {
 function readMutation(reader) {
   const tag = reader.readUInt8();
   switch (tag) {
-    case 1:
-      return { tag, key: readKey(reader), value: readValue(reader) };
+    case 1: {
+      const key = readKey(reader);
+      const value = readValue(reader);
+      validateStoredPairByteLengths(key.byteLength, value.byteLength);
+      return { tag, key, value };
+    }
     case 2:
       return { tag, key: readKey(reader) };
     case 3:
@@ -675,6 +679,20 @@ function writeMutation(writer, mutation) {
   writer.writeUInt8(mutation.tag);
   switch (mutation.tag) {
     case 1:
+      validateByteLength(
+        mutation.key,
+        storageKitWireLimits.maxKeyBytes,
+        "Key bytes"
+      );
+      validateByteLength(
+        mutation.value,
+        storageKitWireLimits.maxValueBytes,
+        "Value bytes"
+      );
+      validateStoredPairByteLengths(
+        binaryByteLength(mutation.key),
+        binaryByteLength(mutation.value)
+      );
       writeKey(writer, mutation.key);
       writeValue(writer, mutation.value);
       break;
@@ -714,6 +732,34 @@ function validateAtomicOperands(key, param, type) {
     : storageKitWireLimits.maxValueBytes;
   validateByteLength(key, maximumKey, "Atomic key operand bytes");
   validateByteLength(param, maximumParam, "Atomic value operand bytes");
+  const keyBytes = binaryByteLength(key);
+  const paramBytes = binaryByteLength(param);
+  if (type === mutationType.setVersionstampedKey && keyBytes >= 4) {
+    validateStoredPairByteLengths(keyBytes - 4, paramBytes);
+  } else if (type === mutationType.setVersionstampedValue
+      && paramBytes >= 4) {
+    validateStoredPairByteLengths(keyBytes, paramBytes - 4);
+  } else if (type !== mutationType.compareAndClear) {
+    validateStoredPairByteLengths(keyBytes, paramBytes);
+  }
+}
+
+function validateStoredPairByteLengths(keyBytes, valueBytes) {
+  const total = keyBytes + valueBytes;
+  if (!Number.isSafeInteger(total)
+      || total > storageKitWireLimits.maxStoredKeyValueBytes) {
+    throw StorageKitWireError.limitExceeded(
+      "Stored key and value bytes",
+      storageKitWireLimits.maxStoredKeyValueBytes
+    );
+  }
+}
+
+function binaryByteLength(value) {
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    return value.byteLength;
+  }
+  return new Uint8Array(value).byteLength;
 }
 
 function readKey(reader) {

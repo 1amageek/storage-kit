@@ -22,9 +22,9 @@ import Synchronization
 ///    this transaction owns BEGIN/COMMIT/ROLLBACK. The caller MUST call `commit()`
 ///    or `cancel()` to release the connection back to the pool.
 /// 3. **Nested** (`init(parent:...)`, used by `createTransaction` under an active
-///    scope): the parent's connection is reused. `commit()` merges the child buffer
-///    into the parent; `cancel()` only discards. The parent controls the real
-///    transaction lifecycle.
+///    transaction context): the parent's connection is reused. `commit()` merges
+///    the child buffer into the parent; `cancel()` only discards. The parent
+///    controls the real transaction lifecycle.
 ///
 /// ## Lazy Acquisition and Parking
 ///
@@ -68,6 +68,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
     /// Parent transaction for nested transactions; nil otherwise.
     private let parent: PostgreSQLStorageTransaction?
+    private let contextLease: ActiveTransactionContext.Lease?
 
     /// Client for lazy acquisition (set only for the top-level lazy path).
     private let client: PostgresClient?
@@ -141,6 +142,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         self.tableName = tableName
         self.logger = logger
         self.parent = nil
+        self.contextLease = nil
         self.client = nil
         self.beginStatement = nil
         self.transactionDomain = transactionDomain
@@ -150,11 +152,16 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     /// Nested-transaction init (parent owns the connection).
-    init(parent: PostgreSQLStorageTransaction, logger: Logger) {
+    init(
+        parent: PostgreSQLStorageTransaction,
+        logger: Logger,
+        contextLease: ActiveTransactionContext.Lease
+    ) {
         self.isNested = true
         self.tableName = parent.tableName
         self.logger = logger
         self.parent = parent
+        self.contextLease = contextLease
         self.client = nil
         self.beginStatement = nil
         self.transactionDomain = parent.transactionDomain
@@ -175,6 +182,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         self.tableName = tableName
         self.logger = logger
         self.parent = nil
+        self.contextLease = nil
         self.client = client
         self.beginStatement = beginStatement
         self.transactionDomain = transactionDomain
@@ -791,6 +799,11 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     // MARK: - Transaction Control
 
     public func commit() async throws {
+        defer { releaseContextLeaseIfTerminal() }
+        try await commitWithoutReleasingContextLease()
+    }
+
+    private func commitWithoutReleasingContextLease() async throws {
         let start = beginCommit()
         switch start {
         case .leader(let completion):
@@ -823,6 +836,11 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     public func cancel() async throws {
+        defer { releaseContextLeaseIfTerminal() }
+        try await cancelWithoutReleasingContextLease()
+    }
+
+    private func cancelWithoutReleasingContextLease() async throws {
         enum Start {
             case leader(TransactionOperationCompletion)
             case waitForCancellation(TransactionOperationCompletion)
@@ -1083,6 +1101,22 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 releaseConnection()
             }
             return finishCommit(result)
+        }
+    }
+
+    private func releaseContextLeaseIfTerminal() {
+        let mayRelease = state.withLock { state in
+            switch state.lifecycle {
+            case .committed, .cancelled, .commitUnknown,
+                 .failed(_, cleanupRequired: false):
+                return true
+            case .open, .committing, .cancelling,
+                 .failed(_, cleanupRequired: true):
+                return false
+            }
+        }
+        if mayRelease {
+            contextLease?.release()
         }
     }
 

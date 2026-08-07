@@ -21,19 +21,19 @@ binding, and lifecycle. This package owns bounded storage-wire dispatch and
 Durable Object SQLite operations. Database semantics remain in the Swift
 runtime.
 
-## Scope Routing
+## Partition Identity Routing
 
-`StorageKitScope.nameForScope` deterministically maps a scope to a Durable
-Object name. An application-owned router may use this operation when it chooses
+The public `nameForPartitionIdentity` export deterministically maps a partition
+identity to a Durable Object name. An application-owned router may use this operation when it chooses
 to expose StorageKit Wire over HTTP.
 
-| Scope field | Purpose |
+| Partition identity field | Purpose |
 |---|---|
 | `databaseID` | Logical database |
 | `tenantID` | Tenant partition |
 | `workspaceID` | Workspace partition |
 
-The Durable Object name is deterministic for the same scope, so all writes for
+The Durable Object name is deterministic for the same partition identity, so all writes for
 one logical database partition are serialized by the same Durable Object.
 
 ## Test Fixture
@@ -70,6 +70,10 @@ npm run smoke:local
 npm run smoke:local:persistence
 npm run fixture:validate
 ```
+
+The local smoke run exercises the real Wrangler Durable Object SQLite runtime,
+round-trips the exact 2,000,000-byte combined key-and-value boundary, stops the
+runtime, and requires the endpoint to become unreachable before succeeding.
 
 `wrangler.jsonc` points to the fixture solely so the tests exercise real local
 Durable Object SQLite. Production deployment configuration belongs to the

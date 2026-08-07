@@ -13,9 +13,9 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     }
 
     private struct State: Sendable {
-        var rowsByScope: [StorageWireScope: [ByteString: ByteString]] = [:]
-        var versionsByScope: [StorageWireScope: Int64] = [:]
-        var conflictsByScope: [StorageWireScope: [ConflictEntry]] = [:]
+        var rowsByPartitionIdentity: [StoragePartitionIdentity: [ByteString: ByteString]] = [:]
+        var versionsByPartitionIdentity: [StoragePartitionIdentity: Int64] = [:]
+        var conflictsByPartitionIdentity: [StoragePartitionIdentity: [ConflictEntry]] = [:]
     }
 
     private struct ConflictEntry: Sendable {
@@ -63,13 +63,13 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         return try state.withLock { state in
             try verifyReadVersion(
                 request.expectedReadVersion,
-                scope: request.scope,
+                partitionIdentity: request.partitionIdentity,
                 state: state
             )
-            let rows = state.rowsByScope[request.scope] ?? [:]
+            let rows = state.rowsByPartitionIdentity[request.partitionIdentity] ?? [:]
             return StorageWireReadResponse(
                 value: rows[request.key],
-                currentCommitVersion: state.versionsByScope[request.scope] ?? 0
+                currentCommitVersion: state.versionsByPartitionIdentity[request.partitionIdentity] ?? 0
             )
         }
     }
@@ -84,11 +84,11 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         let response = try state.withLock { state in
             try verifyReadVersion(
                 request.expectedReadVersion,
-                scope: request.scope,
+                partitionIdentity: request.partitionIdentity,
                 state: state,
                 operation: .rangeRead
             )
-            let rows = state.rowsByScope[request.scope] ?? [:]
+            let rows = state.rowsByPartitionIdentity[request.partitionIdentity] ?? [:]
             let sortedRows =
                 rows
                 .map { (key: $0.key, value: $0.value) }
@@ -128,7 +128,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                     )
                 },
                 hasMore: page.count < selected.count,
-                currentCommitVersion: state.versionsByScope[request.scope] ?? 0,
+                currentCommitVersion: state.versionsByPartitionIdentity[request.partitionIdentity] ?? 0,
                 readConflictRanges: [conflictRange(for: request)]
             )
         }
@@ -152,12 +152,12 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             try verifyReadConflicts(
                 readVersion: request.observedReadVersion,
                 readConflictRanges: request.readConflictRanges,
-                scope: request.scope,
+                partitionIdentity: request.partitionIdentity,
                 state: state
             )
             onCommit?()
-            var rows = state.rowsByScope[request.scope] ?? [:]
-            let currentVersion = state.versionsByScope[request.scope] ?? 0
+            var rows = state.rowsByPartitionIdentity[request.partitionIdentity] ?? [:]
+            let currentVersion = state.versionsByPartitionIdentity[request.partitionIdentity] ?? 0
             let committedVersion = currentVersion + 1
 
             let materializedMutations = try request.mutations.map {
@@ -165,7 +165,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             }
             for mutation in materializedMutations {
                 recordWriteConflict(
-                    mutation, version: committedVersion, scope: request.scope, state: &state)
+                    mutation, version: committedVersion, partitionIdentity: request.partitionIdentity, state: &state)
                 switch mutation {
                 case .set(let key, let value):
                     rows[key] = value
@@ -191,13 +191,13 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                 recordWriteConflict(
                     range,
                     version: committedVersion,
-                    scope: request.scope,
+                    partitionIdentity: request.partitionIdentity,
                     state: &state
                 )
             }
 
-            state.rowsByScope[request.scope] = rows
-            state.versionsByScope[request.scope] = committedVersion
+            state.rowsByPartitionIdentity[request.partitionIdentity] = rows
+            state.versionsByPartitionIdentity[request.partitionIdentity] = committedVersion
             return StorageWireCommitResponse(committedVersion: committedVersion)
         }
     }
@@ -208,7 +208,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         state.withLock { state in
             StorageWireReadinessResponse(
                 schemaVersion: 1,
-                commitVersion: state.versionsByScope[request.scope] ?? 0,
+                commitVersion: state.versionsByPartitionIdentity[request.partitionIdentity] ?? 0,
                 metadataInitialized: true
             )
         }
@@ -220,12 +220,12 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         try state.withLock { state in
             try verifyReadVersion(
                 request.expectedReadVersion,
-                scope: request.scope,
+                partitionIdentity: request.partitionIdentity,
                 state: state,
                 operation: .rangeRead
             )
             var total: Int64 = 0
-            for (key, value) in state.rowsByScope[request.scope] ?? [:]
+            for (key, value) in state.rowsByPartitionIdentity[request.partitionIdentity] ?? [:]
             where compare(key, request.begin) >= 0
                 && compare(key, request.end) < 0
             {
@@ -233,7 +233,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             }
             return StorageWireRangeSizeResponse(
                 byteCount: total,
-                currentCommitVersion: state.versionsByScope[request.scope] ?? 0
+                currentCommitVersion: state.versionsByPartitionIdentity[request.partitionIdentity] ?? 0
             )
         }
     }
@@ -247,7 +247,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         return try state.withLock { state in
             try verifyReadVersion(
                 request.expectedReadVersion,
-                scope: request.scope,
+                partitionIdentity: request.partitionIdentity,
                 state: state,
                 operation: .rangeRead
             )
@@ -256,7 +256,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                     "Split point chunk size must be positive"
                 )
             }
-            let rows = (state.rowsByScope[request.scope] ?? [:])
+            let rows = (state.rowsByPartitionIdentity[request.partitionIdentity] ?? [:])
                 .filter {
                     compare($0.key, request.begin) >= 0
                         && compare($0.key, request.end) < 0
@@ -291,19 +291,19 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             }
             return StorageWireRangeSplitPointsResponse(
                 splitPoints: points,
-                currentCommitVersion: state.versionsByScope[request.scope] ?? 0
+                currentCommitVersion: state.versionsByPartitionIdentity[request.partitionIdentity] ?? 0
             )
         }
     }
 
     private func verifyReadVersion(
         _ expectedReadVersion: Int64?,
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         state: State,
         operation: StorageOperation = .read
     ) throws {
         guard let expectedReadVersion else { return }
-        let currentVersion = state.versionsByScope[scope] ?? 0
+        let currentVersion = state.versionsByPartitionIdentity[partitionIdentity] ?? 0
         guard currentVersion == expectedReadVersion else {
             throw StorageError(
                 code: .transactionConflict,
@@ -317,11 +317,11 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     private func verifyReadConflicts(
         readVersion: Int64?,
         readConflictRanges: [StorageWireKeyRange],
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         state: State
     ) throws {
         guard let readVersion else { return }
-        let conflicts = state.conflictsByScope[scope] ?? []
+        let conflicts = state.conflictsByPartitionIdentity[partitionIdentity] ?? []
         for readRange in readConflictRanges {
             for conflict in conflicts
             where conflict.version > readVersion && overlaps(conflict, readRange) {
@@ -338,13 +338,13 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     private func recordWriteConflict(
         _ mutation: StorageWireWriteOperation,
         version: Int64,
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         state: inout State
     ) {
         guard let range = writeConflictRange(for: mutation) else {
             return
         }
-        state.conflictsByScope[scope, default: []].append(
+        state.conflictsByPartitionIdentity[partitionIdentity, default: []].append(
             ConflictEntry(version: version, begin: range.begin, end: range.end)
         )
     }
@@ -352,7 +352,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
     private func recordWriteConflict(
         _ range: StorageWireKeyRange,
         version: Int64,
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         state: inout State
     ) {
         guard let begin = range.begin,
@@ -361,7 +361,7 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         else {
             return
         }
-        state.conflictsByScope[scope, default: []].append(
+        state.conflictsByPartitionIdentity[partitionIdentity, default: []].append(
             ConflictEntry(version: version, begin: begin, end: end)
         )
     }

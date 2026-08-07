@@ -81,7 +81,7 @@ export class StorageKitWireReader {
   }
 
   readString(
-    maximum = storageKitWireLimits.maxScopeComponentBytes,
+    maximum = storageKitWireLimits.maxPartitionIdentityComponentBytes,
     field = "UTF-8 string"
   ) {
     const bytes = this.readBytes(maximum, field);

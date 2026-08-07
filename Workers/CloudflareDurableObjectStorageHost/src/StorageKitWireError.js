@@ -56,8 +56,8 @@ export class StorageKitWireError extends Error {
     return new StorageKitWireError("unsupportedProtocolVersion", `Unsupported protocol version: ${value}`);
   }
 
-  static invalidScope() {
-    return new StorageKitWireError("invalidScope", "Invalid Durable Object storage scope");
+  static invalidPartitionIdentity() {
+    return new StorageKitWireError("invalidPartitionIdentity", "Invalid Durable Object storage partition identity");
   }
 
   static invalidRangeContinuation() {
@@ -71,10 +71,10 @@ export class StorageKitWireError extends Error {
     return new StorageKitWireError("transactionConflict", "Observed read version does not match current committed version");
   }
 
-  static scopeMismatch() {
+  static partitionIdentityMismatch() {
     return new StorageKitWireError(
-      "scopeMismatch",
-      "Storage scope does not match this Durable Object"
+      "partitionIdentityMismatch",
+      "Storage partition identity does not match this Durable Object"
     );
   }
 

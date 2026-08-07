@@ -7,16 +7,16 @@ import CloudflareDurableObjectStorageWire
 struct StorageKitWireGoldenVectorTests {
     @Test func encoderMatchesCanonicalVectors() throws {
         let vectors = try loadVectors()
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
 
         let readiness = StorageWireRequest.readiness(
-            StorageWireReadinessRequest(scope: scope)
+            StorageWireReadinessRequest(partitionIdentity: partitionIdentity)
         )
         #expect(try encodeHex(readiness) == vectors.readinessRequest)
 
         let range = StorageWireRequest.range(
             StorageWireRangeRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 begin: .unbounded,
                 end: .selector(
                     StorageWireKeySelector(key: [0x20], orEqual: true, offset: 1)
@@ -32,7 +32,7 @@ struct StorageKitWireGoldenVectorTests {
 
         let commit = StorageWireRequest.commit(
             StorageWireCommitRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 observedReadVersion: 7,
                 mutations: [
                     .set(key: [0x01], value: [0x0A, 0x0B]),
@@ -52,7 +52,7 @@ struct StorageKitWireGoldenVectorTests {
         let versionstampedCommit = StorageWireRequest
             .commit(
                 StorageWireCommitRequest(
-                    scope: scope,
+                    partitionIdentity: partitionIdentity,
                     observedReadVersion: 8,
                     mutations: [
                         .atomic(
@@ -92,7 +92,7 @@ struct StorageKitWireGoldenVectorTests {
 
         let rangeSize = StorageWireRequest.rangeSize(
             StorageWireRangeSizeRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 begin: [0x01],
                 end: [0x04],
                 expectedReadVersion: 7
@@ -114,7 +114,7 @@ struct StorageKitWireGoldenVectorTests {
         let splitPoints = StorageWireRequest
             .rangeSplitPoints(
                 StorageWireRangeSplitPointsRequest(
-                    scope: scope,
+                    partitionIdentity: partitionIdentity,
                     begin: [0x01],
                     end: [0x04],
                     chunkSize: 6,

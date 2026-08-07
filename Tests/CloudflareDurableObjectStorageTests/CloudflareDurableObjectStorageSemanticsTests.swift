@@ -137,11 +137,11 @@ struct CloudflareDurableObjectStorageSemanticsTests {
     @Test func cancellingInFlightCommitProducesUnknownOutcome() async throws {
         let transport = SuspendingCloudflareDurableObjectStorageTransport()
         let client = CloudflareDurableObjectStorageWireClient(transport: transport)
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         let engine = try await CloudflareDurableObjectSharedClientRouter(
             client: client,
             monotonicClock: SystemStorageClock()
-        ).engine(for: scope)
+        ).engine(for: partitionIdentity)
         let transaction = try engine.createTransaction()
         try transaction.setValue([1], for: [0x01])
 
@@ -176,10 +176,10 @@ struct CloudflareDurableObjectStorageSemanticsTests {
 
     private func makeEngine() async throws -> CloudflareDurableObjectStorageEngine {
         let client = InMemoryCloudflareDurableObjectStorageClient()
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         return try await CloudflareDurableObjectSharedClientRouter(
             client: client,
             monotonicClock: SystemStorageClock()
-        ).engine(for: scope)
+        ).engine(for: partitionIdentity)
     }
 }

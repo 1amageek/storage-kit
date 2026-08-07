@@ -12,4 +12,9 @@ public enum CloudflareDurableObjectLimitsError:
         keyBytes: Int,
         boundaryBytes: Int
     )
+    case componentExceedsStoredPairLimit(
+        field: String,
+        value: Int,
+        maximum: Int
+    )
 }

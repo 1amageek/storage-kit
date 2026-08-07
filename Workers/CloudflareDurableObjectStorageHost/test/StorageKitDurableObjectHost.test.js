@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { StorageKitWireWriter } from "../src/StorageKitWireWriter.js";
-import { StorageKitDurableObjectHost } from "../src/StorageKitDurableObjectHost.js";
-import { nameForScope } from "../src/StorageKitScope.js";
+import {
+  nameForPartitionIdentity,
+  StorageKitDurableObjectHost,
+} from "../src/index.js";
 import { StorageKitWire } from "../src/StorageKitWire.js";
 import { mutationType, operation, protocolVersion, statusCode } from "../src/StorageKitWireConstants.js";
 import { storageKitWireLimits } from "../src/StorageKitWireLimits.js";
+import { StorageKitSQLiteStore } from "../src/StorageKitSQLiteStore.js";
 import { InMemorySQLiteStorage } from "./InMemorySQLiteStorage.js";
 
-const scope = Object.freeze({
+const partitionIdentity = Object.freeze({
   databaseID: "main",
   tenantID: null,
   workspaceID: null,
@@ -18,10 +21,47 @@ test("canonical StorageKit wire starts at protocol version one", () => {
   assert.equal(protocolVersion, 1);
 });
 
-test("scope name encoding matches the StorageKit v1 canonical format", () => {
+test("partition identity name encoding matches the StorageKit v1 canonical format", () => {
   assert.equal(
-    nameForScope({ databaseID: "main", tenantID: "tenant-a", workspaceID: "workspace-a" }),
+    nameForPartitionIdentity({ databaseID: "main", tenantID: "tenant-a", workspaceID: "workspace-a" }),
     "storage-kit/cfdo/v1/database/bWFpbg/tenant/dGVuYW50LWE/workspace/d29ya3NwYWNlLWE"
+  );
+});
+
+test("partition identity preserves exact UTF-8 identity", () => {
+  assert.notEqual(
+    nameForPartitionIdentity({
+      databaseID: "caf\u{00E9}",
+      tenantID: null,
+      workspaceID: null,
+    }),
+    nameForPartitionIdentity({
+      databaseID: "cafe\u{0301}",
+      tenantID: null,
+      workspaceID: null,
+    })
+  );
+});
+
+test("partition identity rejects non-scalar JavaScript strings", () => {
+  assert.throws(
+    () => nameForPartitionIdentity({
+      databaseID: "\ud800",
+      tenantID: null,
+      workspaceID: null,
+    }),
+    /partition identity/i
+  );
+});
+
+test("partition identity rejects non-object input as a typed wire error", () => {
+  assert.throws(
+    () => nameForPartitionIdentity(null),
+    /partition identity/i
+  );
+  assert.throws(
+    () => nameForPartitionIdentity([]),
+    /partition identity/i
   );
 });
 
@@ -29,7 +69,7 @@ test("host dispatch rejects trailing bytes as a typed failure", () => {
   const host = makeHost();
   const bytes = StorageKitWire.encodeRequest({
     operation: operation.readiness,
-    scope,
+    partitionIdentity,
   });
   const response = StorageKitWire.decodeResponse(host.dispatchBytes([...bytes, 0xff]));
   assert.equal(response.status, statusCode.invalidOperation);
@@ -86,7 +126,7 @@ test("migration and CRUD do not depend on unavailable SQLite PRAGMAs", () => {
   host.migrate();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(0x41) },
@@ -107,7 +147,7 @@ test("migration reopens an initialized store without SQL writes", () => {
   firstHost.migrate();
   send(firstHost, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(0x41) },
@@ -184,7 +224,7 @@ test("request decoder rejects oversized collections before reading elements", ()
 test("wire accepts physical mutation batches above the former database-level ceiling", () => {
   const request = {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: Array.from(
       { length: 1_001 },
@@ -213,29 +253,94 @@ test("wire accepts physical mutation batches above the former database-level cei
 test("request encoder rejects oversized keys and values", () => {
   assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.read,
-    scope,
-    key: new Uint8Array(1_025),
+    partitionIdentity,
+    key: new Uint8Array(storageKitWireLimits.maxKeyBytes + 1),
     snapshot: false,
     expectedReadVersion: null,
   }), /Key bytes/);
 
   assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
-      { tag: 1, key: bytes(0x01), value: new Uint8Array(1_048_577) },
+      {
+        tag: 1,
+        key: bytes(0x01),
+        value: new Uint8Array(storageKitWireLimits.maxValueBytes + 1),
+      },
     ],
   }), /Value bytes/);
+});
+
+test("wire enforces the exact stored key and value combined limit", () => {
+  const half = Math.floor(storageKitWireLimits.maxStoredKeyValueBytes / 2);
+  const accepted = {
+    operation: operation.commit,
+    partitionIdentity,
+    observedReadVersion: null,
+    mutations: [{
+      tag: 1,
+      key: new Uint8Array(half),
+      value: new Uint8Array(storageKitWireLimits.maxStoredKeyValueBytes - half),
+    }],
+    readConflictRanges: [],
+    writeConflictRanges: [],
+  };
+  assert.equal(
+    StorageKitWire.decodeRequest(StorageKitWire.encodeRequest(accepted))
+      .mutations.length,
+    1
+  );
+
+  assert.throws(() => StorageKitWire.encodeRequest({
+    ...accepted,
+    mutations: [{
+      tag: 1,
+      key: new Uint8Array(half),
+      value: new Uint8Array(
+        storageKitWireLimits.maxStoredKeyValueBytes - half + 1
+      ),
+    }],
+  }), /Stored key and value bytes/);
+});
+
+test("SQLite store rejects a versionstamped result above the combined limit", () => {
+  const sql = new InMemorySQLiteStorage();
+  const store = new StorageKitSQLiteStore(
+    sql,
+    (operation) => sql.transactionSync(operation)
+  );
+  store.migrate();
+  const key = new Uint8Array(1_000_000);
+  const valueOperand = versionstampOperand(
+    new Uint8Array(999_991),
+    new Uint8Array()
+  );
+
+  assert.throws(() => store.dispatch({
+    operation: operation.commit,
+    partitionIdentity,
+    observedReadVersion: 0n,
+    mutations: [{
+      tag: 4,
+      key,
+      param: valueOperand,
+      mutationType: mutationType.setVersionstampedValue,
+    }],
+    readConflictRanges: [],
+    writeConflictRanges: [],
+  }), /Stored key and value bytes/);
+  assert.equal(store.currentCommitVersion(), 0n);
 });
 
 test("host dispatch rejects an oversized raw range cursor as a typed failure", () => {
   const host = makeHost();
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(rawRangeRequestWithCursor(
-    new Uint8Array(1_025),
+    new Uint8Array(storageKitWireLimits.maxKeyBytes + 1),
     {
       operation: operation.range,
-      scope,
+      partitionIdentity,
       begin: firstGreaterOrEqual(bytes(0x01)),
       end: firstGreaterThan(bytes(0x01)),
       limit: 1,
@@ -255,7 +360,7 @@ test("set, atomic, read, and commit persistence round trip through StorageKit Wi
 
   let response = send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(10) },
@@ -265,7 +370,7 @@ test("set, atomic, read, and commit persistence round trip through StorageKit Wi
 
   response = send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: 1n,
     mutations: [
       { tag: 4, key: bytes(0x01), param: bytes(5), mutationType: mutationType.add },
@@ -275,7 +380,7 @@ test("set, atomic, read, and commit persistence round trip through StorageKit Wi
 
   response = send(host, {
     operation: operation.read,
-    scope,
+    partitionIdentity,
     key: bytes(0x01),
     snapshot: false,
     expectedReadVersion: 2n,
@@ -289,7 +394,7 @@ test("clearRange removes committed keys using begin-inclusive end-exclusive boun
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -302,7 +407,7 @@ test("clearRange removes committed keys using begin-inclusive end-exclusive boun
 
   const response = send(host, {
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: firstGreaterOrEqual(bytes(0x01)),
     end: firstGreaterThan(bytes(0x04)),
     limit: 10,
@@ -319,7 +424,7 @@ test("atomic mutation semantics cover bitwise unsigned max min and compareAndCle
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(0b1010) },
@@ -346,7 +451,7 @@ test("atomic mutation semantics cover bitwise unsigned max min and compareAndCle
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: 1n,
     mutations: [
       { tag: 1, key: bytes(0x07), value: bytes(0x80) },
@@ -378,7 +483,7 @@ test("versionstamped key and value materialize atomically and survive restart", 
 
   const firstCommit = send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: 0n,
     mutations: [
       {
@@ -421,7 +526,7 @@ test("versionstamped key and value materialize atomically and survive restart", 
   const secondStamp = commitVersionstamp(2n);
   const secondCommit = send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: 1n,
     mutations: [
       {
@@ -453,7 +558,7 @@ test("failed mutation batch rolls back values versions and conflict history", ()
     host.dispatchBytes(
       StorageKitWire.encodeRequest({
         operation: operation.commit,
-        scope,
+        partitionIdentity,
         observedReadVersion: 0n,
         mutations: [
           { tag: 1, key: bytes(0x08), value: bytes(8) },
@@ -474,7 +579,7 @@ test("failed mutation batch rolls back values versions and conflict history", ()
   assert.equal(readValue(host, 0x08), null);
   const readiness = send(host, {
     operation: operation.readiness,
-    scope,
+    partitionIdentity,
   });
   assert.equal(readiness.commitVersion, 0n);
   assert.equal(
@@ -492,7 +597,7 @@ test("range size and split points use exact stored bytes and include endpoints",
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(0x10, 0x11) },
@@ -503,7 +608,7 @@ test("range size and split points use exact stored bytes and include endpoints",
 
   const size = send(host, {
     operation: operation.rangeSize,
-    scope,
+    partitionIdentity,
     begin: bytes(0x01),
     end: bytes(0x04),
     expectedReadVersion: 1n,
@@ -513,7 +618,7 @@ test("range size and split points use exact stored bytes and include endpoints",
 
   const split = send(host, {
     operation: operation.rangeSplitPoints,
-    scope,
+    partitionIdentity,
     begin: bytes(0x01),
     end: bytes(0x04),
     chunkSize: 6n,
@@ -527,7 +632,7 @@ test("range size and split points use exact stored bytes and include endpoints",
 
   const empty = send(host, {
     operation: operation.rangeSplitPoints,
-    scope,
+    partitionIdentity,
     begin: bytes(0x04),
     end: bytes(0x04),
     chunkSize: 1n,
@@ -540,7 +645,7 @@ test("range metric requests reject invalid bounds chunk sizes and stale versions
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(0x10) },
@@ -549,14 +654,14 @@ test("range metric requests reject invalid bounds chunk sizes and stale versions
 
   assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.rangeSize,
-    scope,
+    partitionIdentity,
     begin: bytes(0x02),
     end: bytes(0x01),
     expectedReadVersion: 1n,
   }), /not ordered/);
   assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.rangeSplitPoints,
-    scope,
+    partitionIdentity,
     begin: bytes(0x01),
     end: bytes(0x02),
     chunkSize: 0n,
@@ -566,7 +671,7 @@ test("range metric requests reject invalid bounds chunk sizes and stale versions
   const stale = StorageKitWire.decodeResponse(host.dispatchBytes(
     StorageKitWire.encodeRequest({
       operation: operation.rangeSize,
-      scope,
+      partitionIdentity,
       begin: bytes(0x01),
       end: bytes(0x02),
       expectedReadVersion: 0n,
@@ -695,7 +800,7 @@ test("snapshot reads do not participate in commit conflict", () => {
   const host = makeHost();
   const snapshot = send(host, {
     operation: operation.read,
-    scope,
+    partitionIdentity,
     key: bytes(0x01),
     snapshot: true,
     expectedReadVersion: 0n,
@@ -704,7 +809,7 @@ test("snapshot reads do not participate in commit conflict", () => {
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -713,7 +818,7 @@ test("snapshot reads do not participate in commit conflict", () => {
 
   const response = send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x02), value: bytes(2) },
@@ -726,7 +831,7 @@ test("snapshot reads still enforce a pinned read version", () => {
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -736,7 +841,7 @@ test("snapshot reads still enforce a pinned read version", () => {
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(
     StorageKitWire.encodeRequest({
       operation: operation.read,
-      scope,
+      partitionIdentity,
       key: bytes(0x01),
       snapshot: true,
       expectedReadVersion: 0n,
@@ -750,7 +855,7 @@ test("commit rejects future versions and read conflicts without a version", () =
   let response = StorageKitWire.decodeResponse(host.dispatchBytes(
     StorageKitWire.encodeRequest({
       operation: operation.commit,
-      scope,
+      partitionIdentity,
       observedReadVersion: 1n,
       mutations: [
         { tag: 1, key: bytes(0x02), value: bytes(2) },
@@ -763,7 +868,7 @@ test("commit rejects future versions and read conflicts without a version", () =
   response = StorageKitWire.decodeResponse(host.dispatchBytes(
     StorageKitWire.encodeRequest({
       operation: operation.commit,
-      scope,
+      partitionIdentity,
       observedReadVersion: null,
       mutations: [
         { tag: 1, key: bytes(0x02), value: bytes(2) },
@@ -778,23 +883,23 @@ test("empty commit validates reads without advancing the commit version", () => 
   const host = makeHost();
   const response = send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: 0n,
     mutations: [],
     readConflictRanges: [],
     writeConflictRanges: [],
   });
   assert.equal(response.committedVersion, 0n);
-  assert.equal(send(host, { operation: operation.readiness, scope }).commitVersion, 0n);
+  assert.equal(send(host, { operation: operation.readiness, partitionIdentity }).commitVersion, 0n);
 });
 
-test("one Durable Object rejects a different persisted scope", () => {
+test("one Durable Object rejects a different persisted partitionIdentity", () => {
   const host = makeHost();
-  send(host, { operation: operation.readiness, scope });
+  send(host, { operation: operation.readiness, partitionIdentity });
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(
     StorageKitWire.encodeRequest({
       operation: operation.readiness,
-      scope: { databaseID: "other", tenantID: null, workspaceID: null },
+      partitionIdentity: { databaseID: "other", tenantID: null, workspaceID: null },
     })
   ));
   assert.equal(response.status, statusCode.invalidOperation);
@@ -805,7 +910,7 @@ test("non-snapshot read conflict range detects conflicting commit", () => {
   const host = makeHost();
   const firstRead = send(host, {
     operation: operation.read,
-    scope,
+    partitionIdentity,
     key: bytes(0x01),
     snapshot: false,
     expectedReadVersion: null,
@@ -814,7 +919,7 @@ test("non-snapshot read conflict range detects conflicting commit", () => {
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -823,7 +928,7 @@ test("non-snapshot read conflict range detects conflicting commit", () => {
 
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(StorageKitWire.encodeRequest({
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: firstRead.currentCommitVersion,
     mutations: [
       { tag: 1, key: bytes(0x02), value: bytes(2) },
@@ -839,7 +944,7 @@ test("range read conflict range catches inserts into selector gaps", () => {
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x15), value: bytes(15) },
@@ -849,7 +954,7 @@ test("range read conflict range catches inserts into selector gaps", () => {
 
   const rangeRead = send(host, {
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: firstGreaterOrEqual(bytes(0x10)),
     end: firstGreaterOrEqual(bytes(0x20)),
     limit: 10,
@@ -864,7 +969,7 @@ test("range read conflict range catches inserts into selector gaps", () => {
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x12), value: bytes(12) },
@@ -874,7 +979,7 @@ test("range read conflict range catches inserts into selector gaps", () => {
 
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(StorageKitWire.encodeRequest({
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: rangeRead.currentCommitVersion,
     mutations: [
       { tag: 1, key: bytes(0x30), value: bytes(30) },
@@ -888,7 +993,7 @@ test("selector dependency conflicts when begin and end collapse on an inserted k
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x02), value: bytes(2) },
@@ -897,7 +1002,7 @@ test("selector dependency conflicts when begin and end collapse on an inserted k
   });
   const rangeRead = send(host, {
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: lastLessOrEqual(bytes(0x03)),
     end: firstGreaterOrEqual(bytes(0x03)),
     limit: 10,
@@ -910,7 +1015,7 @@ test("selector dependency conflicts when begin and end collapse on an inserted k
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x03), value: bytes(3) },
@@ -919,7 +1024,7 @@ test("selector dependency conflicts when begin and end collapse on an inserted k
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(
     StorageKitWire.encodeRequest({
       operation: operation.commit,
-      scope,
+      partitionIdentity,
       observedReadVersion: rangeRead.currentCommitVersion,
       mutations: [
         { tag: 1, key: bytes(0x30), value: bytes(30) },
@@ -934,7 +1039,7 @@ test("range read conflict range does not catch writes after direct end selector"
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x15), value: bytes(15) },
@@ -944,7 +1049,7 @@ test("range read conflict range does not catch writes after direct end selector"
 
   const rangeRead = send(host, {
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: firstGreaterOrEqual(bytes(0x10)),
     end: firstGreaterOrEqual(bytes(0x20)),
     limit: 10,
@@ -958,7 +1063,7 @@ test("range read conflict range does not catch writes after direct end selector"
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x30), value: bytes(30) },
@@ -968,7 +1073,7 @@ test("range read conflict range does not catch writes after direct end selector"
 
   const response = send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: rangeRead.currentCommitVersion,
     mutations: [
       { tag: 1, key: bytes(0x40), value: bytes(40) },
@@ -982,7 +1087,7 @@ test("range read conflict range includes exact key for firstGreaterThan end sele
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -993,7 +1098,7 @@ test("range read conflict range includes exact key for firstGreaterThan end sele
 
   const rangeRead = send(host, {
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: firstGreaterOrEqual(bytes(0x01)),
     end: firstGreaterThan(bytes(0x03)),
     limit: 10,
@@ -1007,7 +1112,7 @@ test("range read conflict range includes exact key for firstGreaterThan end sele
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x03), value: bytes(33) },
@@ -1017,7 +1122,7 @@ test("range read conflict range includes exact key for firstGreaterThan end sele
 
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(StorageKitWire.encodeRequest({
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: rangeRead.currentCommitVersion,
     mutations: [
       { tag: 1, key: bytes(0x04), value: bytes(4) },
@@ -1033,7 +1138,7 @@ test("old conflict entries are pruned and stale readers conflict", () => {
   host.migrate();
   const initialRead = send(host, {
     operation: operation.read,
-    scope,
+    partitionIdentity,
     key: bytes(0x01),
     snapshot: false,
     expectedReadVersion: null,
@@ -1042,7 +1147,7 @@ test("old conflict entries are pruned and stale readers conflict", () => {
   for (let index = 0; index < 4100; index += 1) {
     send(host, {
       operation: operation.commit,
-      scope,
+      partitionIdentity,
       observedReadVersion: null,
       mutations: [
         { tag: 1, key: bytes(0x80, index & 0xff), value: bytes(index & 0xff) },
@@ -1056,7 +1161,7 @@ test("old conflict entries are pruned and stale readers conflict", () => {
 
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(StorageKitWire.encodeRequest({
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: initialRead.currentCommitVersion,
     mutations: [
       { tag: 1, key: bytes(0x02), value: bytes(2) },
@@ -1077,7 +1182,7 @@ test("large commits persist a bounded conservative conflict history", () => {
   host.migrate();
   const initialRead = send(host, {
     operation: operation.read,
-    scope,
+    partitionIdentity,
     key: bytes(0x40, 0x80),
     snapshot: false,
     expectedReadVersion: null,
@@ -1090,7 +1195,7 @@ test("large commits persist a bounded conservative conflict history", () => {
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations,
     readConflictRanges: [],
@@ -1106,7 +1211,7 @@ test("large commits persist a bounded conservative conflict history", () => {
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(
     StorageKitWire.encodeRequest({
       operation: operation.commit,
-      scope,
+      partitionIdentity,
       observedReadVersion: initialRead.currentCommitVersion,
       mutations: [
         { tag: 1, key: bytes(0x50), value: bytes(0x50) },
@@ -1177,7 +1282,7 @@ test("a commit prunes retained conflict versions until the entry limit holds", (
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x70), value: bytes(0x70) },
@@ -1203,7 +1308,7 @@ test("a commit prunes retained conflict versions until the byte limit holds", ()
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x70), value: bytes(0x70) },
@@ -1227,7 +1332,7 @@ test("a commit whose read version predates retained conflict history is rejected
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x70), value: bytes(0x70) },
@@ -1239,7 +1344,7 @@ test("a commit whose read version predates retained conflict history is rejected
   const response = StorageKitWire.decodeResponse(host.dispatchBytes(
     StorageKitWire.encodeRequest({
       operation: operation.commit,
-      scope,
+      partitionIdentity,
       observedReadVersion: 1n,
       mutations: [
         { tag: 1, key: bytes(0x71), value: bytes(0x71) },
@@ -1256,7 +1361,7 @@ test("unrelated commit after read version does not conflict at commit", () => {
   const host = makeHost();
   const firstRead = send(host, {
     operation: operation.read,
-    scope,
+    partitionIdentity,
     key: bytes(0x01),
     snapshot: false,
     expectedReadVersion: null,
@@ -1265,7 +1370,7 @@ test("unrelated commit after read version does not conflict at commit", () => {
 
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x02), value: bytes(2) },
@@ -1274,7 +1379,7 @@ test("unrelated commit after read version does not conflict at commit", () => {
 
   const response = send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: firstRead.currentCommitVersion,
     mutations: [
       { tag: 1, key: bytes(0x03), value: bytes(3) },
@@ -1291,7 +1396,7 @@ test("key selectors and key cursor pagination preserve range order", () => {
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -1303,7 +1408,7 @@ test("key selectors and key cursor pagination preserve range order", () => {
 
   const firstPage = send(host, {
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: lastLessOrEqual(bytes(0x03)),
     end: firstGreaterThan(bytes(0x05)),
     limit: 1,
@@ -1318,7 +1423,7 @@ test("key selectors and key cursor pagination preserve range order", () => {
 
   const secondPage = send(host, {
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: lastLessOrEqual(bytes(0x03)),
     end: firstGreaterThan(bytes(0x05)),
     limit: 1,
@@ -1336,7 +1441,7 @@ test("all key selector kinds are preserved by SQLite host pagination", () => {
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -1378,7 +1483,7 @@ test("arbitrary key selector offsets resolve deterministically", () => {
   const host = makeHost();
   send(host, {
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -1390,7 +1495,7 @@ test("arbitrary key selector offsets resolve deterministically", () => {
 
   const response = send(host, {
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: { key: bytes(0x01), orEqual: false, offset: 2n },
     end: { key: bytes(0x07), orEqual: true, offset: 0n },
     limit: 10,
@@ -1437,7 +1542,7 @@ function readValue(host, key) {
 function read(host, key) {
   return send(host, {
     operation: operation.read,
-    scope,
+    partitionIdentity,
     key,
     snapshot: false,
     expectedReadVersion: null,
@@ -1464,7 +1569,7 @@ function rawRangeMetricRequest(request) {
   const writer = new StorageKitWireWriter();
   writer.writeUInt8(protocolVersion);
   writer.writeUInt8(request.operation);
-  writer.writeString(scope.databaseID);
+  writer.writeString(partitionIdentity.databaseID);
   writer.writeBool(false);
   writer.writeBool(false);
   writer.writeBytes(request.begin);
@@ -1525,7 +1630,7 @@ function collectRangeKeys(host, begin, end) {
   do {
     const response = send(host, {
       operation: operation.range,
-      scope,
+      partitionIdentity,
       begin,
       end,
       limit: 1,

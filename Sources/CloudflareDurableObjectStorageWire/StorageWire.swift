@@ -28,6 +28,7 @@ public enum StorageWire {
         }
         let request = try StorageWireRequest(from: &reader)
         try StorageWireProtocolError.ensureFullyRead(reader)
+        try StorageWireValidator.validate(request)
         return request
     }
 
@@ -55,6 +56,7 @@ public enum StorageWire {
         }
         let response = try StorageWireResponse(from: &reader)
         try StorageWireProtocolError.ensureFullyRead(reader)
+        try StorageWireValidator.validate(response)
         return response
     }
 

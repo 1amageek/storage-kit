@@ -33,8 +33,8 @@ function statusForError(error) {
       case "backendContractViolation":
         return statusCode.backendContractViolation;
       case "invalidOperation":
-      case "invalidScope":
-      case "scopeMismatch":
+      case "invalidPartitionIdentity":
+      case "partitionIdentityMismatch":
       case "invalidRangeContinuation":
       case "limitExceeded":
       case "unsupportedProtocolVersion":

@@ -1,13 +1,17 @@
 export const storageKitWireLimits = Object.freeze({
   maxFrameBytes: 16 * 1024 * 1024,
   maxRangeResponseBytes: 8 * 1024 * 1024,
-  maxKeyBytes: 1_024,
-  maxVersionstampedKeyOperandBytes: 1_028,
-  maxBoundaryBytes: 1_025,
-  maxValueBytes: 1_048_576,
-  maxVersionstampedValueOperandBytes: 1_048_580,
-  maxScopeComponentBytes: 512,
-  maxCanonicalScopeNameBytes: 512,
+  // The host is backed by SQLite-backed Durable Object storage. Cloudflare
+  // documents a 2,000,000-byte combined key and value limit. Either component
+  // may consume that budget alone; stored pairs are validated separately.
+  maxKeyBytes: 2_000_000,
+  maxVersionstampedKeyOperandBytes: 2_000_004,
+  maxBoundaryBytes: 2_000_001,
+  maxValueBytes: 2_000_000,
+  maxStoredKeyValueBytes: 2_000_000,
+  maxVersionstampedValueOperandBytes: 2_000_004,
+  maxPartitionIdentityComponentBytes: 512,
+  maxCanonicalPartitionIdentityNameBytes: 512,
   maxErrorMessageBytes: 4_096,
   // Database-level mutations expand into physical item and index writes.
   // maxFrameBytes remains the aggregate byte admission limit.

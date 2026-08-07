@@ -1,7 +1,7 @@
 import DatabaseTypes
 
 public struct StorageWireRangeRequest: Sendable, Hashable {
-    public let scope: StorageWireScope
+    public let partitionIdentity: StoragePartitionIdentity
     public let begin: StorageWireRangeBoundary
     public let end: StorageWireRangeBoundary
     public let limit: Int
@@ -11,7 +11,7 @@ public struct StorageWireRangeRequest: Sendable, Hashable {
     public let cursorKey: ByteString?
 
     public init(
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         begin: StorageWireRangeBoundary,
         end: StorageWireRangeBoundary,
         limit: Int,
@@ -20,7 +20,7 @@ public struct StorageWireRangeRequest: Sendable, Hashable {
         expectedReadVersion: Int64? = nil,
         cursorKey: ByteString? = nil
     ) {
-        self.scope = scope
+        self.partitionIdentity = partitionIdentity
         self.begin = begin
         self.end = end
         self.limit = limit
@@ -31,7 +31,7 @@ public struct StorageWireRangeRequest: Sendable, Hashable {
     }
 
     public init(
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         begin: StorageWireKeySelector,
         end: StorageWireKeySelector,
         limit: Int,
@@ -41,7 +41,7 @@ public struct StorageWireRangeRequest: Sendable, Hashable {
         cursorKey: ByteString? = nil
     ) {
         self.init(
-            scope: scope,
+            partitionIdentity: partitionIdentity,
             begin: .selector(begin),
             end: .selector(end),
             limit: limit,
@@ -56,7 +56,7 @@ public struct StorageWireRangeRequest: Sendable, Hashable {
         guard limit > 0, limit <= StorageWireLimits.cloudflareDurableObject.maxRangeLimit else {
             throw .wire(.invalidRangeLimit)
         }
-        try scope.encode(into: &writer)
+        try partitionIdentity.encode(into: &writer)
         try StorageWireProtocolError.encode(begin, into: &writer)
         try StorageWireProtocolError.encode(end, into: &writer)
         writer.writeInt32(Int32(limit))
@@ -67,7 +67,7 @@ public struct StorageWireRangeRequest: Sendable, Hashable {
     }
 
     init(from reader: inout StorageWireReader) throws(StorageWireProtocolError) {
-        self.scope = try StorageWireScope(from: &reader)
+        self.partitionIdentity = try StoragePartitionIdentity(from: &reader)
         self.begin = try StorageWireProtocolError.readRangeBoundary(
             from: &reader
         )

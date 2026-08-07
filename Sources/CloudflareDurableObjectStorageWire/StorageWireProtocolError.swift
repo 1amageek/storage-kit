@@ -6,7 +6,7 @@ public enum StorageWireProtocolError: Error, Sendable, Equatable {
     case unsupportedProtocolVersion(UInt8)
     case unknownOperation(UInt8)
     case unknownStatus(UInt8)
-    case invalidScope
+    case invalidPartitionIdentity
     case invalidVersion(Int64)
 }
 
@@ -105,7 +105,7 @@ extension StorageWireProtocolError {
     static func readString(from reader: inout StorageWireReader) throws(StorageWireProtocolError) -> String {
         try readString(
             from: &reader,
-            maximum: StorageWireLimits.cloudflareDurableObject.maxScopeComponentBytes
+            maximum: StorageWireLimits.cloudflareDurableObject.maxPartitionIdentityComponentBytes
         )
     }
 
@@ -187,7 +187,7 @@ extension StorageWireProtocolError {
     ) throws(StorageWireProtocolError) {
         try writeString(
             value,
-            maximum: StorageWireLimits.cloudflareDurableObject.maxScopeComponentBytes,
+            maximum: StorageWireLimits.cloudflareDurableObject.maxPartitionIdentityComponentBytes,
             into: &writer
         )
     }

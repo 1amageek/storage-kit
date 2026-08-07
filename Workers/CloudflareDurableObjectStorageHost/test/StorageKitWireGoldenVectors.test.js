@@ -14,17 +14,17 @@ const fixtureURL = new URL(
   import.meta.url
 );
 const vectors = JSON.parse(readFileSync(fileURLToPath(fixtureURL), "utf8"));
-const scope = Object.freeze({ databaseID: "main", tenantID: null, workspaceID: null });
+const partitionIdentity = Object.freeze({ databaseID: "main", tenantID: null, workspaceID: null });
 
 test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
   assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.readiness,
-    scope,
+    partitionIdentity,
   })), vectors.readinessRequest);
 
   assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.range,
-    scope,
+    partitionIdentity,
     begin: null,
     end: { key: bytes(0x20), orEqual: true, offset: 1n },
     limit: 2,
@@ -36,7 +36,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
 
   assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: 7n,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(0x0A, 0x0B) },
@@ -53,7 +53,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
 
   assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: 8n,
     mutations: [
       {
@@ -90,7 +90,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
 
   assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.rangeSize,
-    scope,
+    partitionIdentity,
     begin: bytes(0x01),
     end: bytes(0x04),
     expectedReadVersion: 7n,
@@ -105,7 +105,7 @@ test("JavaScript encoder matches canonical StorageKit Wire v1 vectors", () => {
 
   assert.equal(hex(StorageKitWire.encodeRequest({
     operation: operation.rangeSplitPoints,
-    scope,
+    partitionIdentity,
     begin: bytes(0x01),
     end: bytes(0x04),
     chunkSize: 6n,
@@ -208,7 +208,7 @@ test("range response encoder rejects an empty continuation page", () => {
 test("JavaScript encoder rejects unknown atomic mutation types", () => {
   assert.throws(() => StorageKitWire.encodeRequest({
     operation: operation.commit,
-    scope,
+    partitionIdentity,
     observedReadVersion: 0n,
     mutations: [
       {

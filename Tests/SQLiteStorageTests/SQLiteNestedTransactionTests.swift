@@ -25,7 +25,7 @@ struct SQLiteNestedTransactionTests {
     // =========================================================================
     // MARK: - Nested withTransaction
     //
-    // SQLiteStorageEngine uses ActiveTransactionScope (TaskLocal) to detect
+    // SQLiteStorageEngine uses ActiveTransactionContext (TaskLocal) to detect
     // nested withTransaction calls. The inner call opens a SQLite savepoint on
     // the active FIFO connection lease.
     // =========================================================================
@@ -336,7 +336,7 @@ struct SQLiteNestedTransactionTests {
         try parent.configureMutationByteLimit(maximumBytes: 19)
 
         do {
-            try await ActiveTransactionScope.withActiveTransaction(
+            try await ActiveTransactionContext.withActiveTransaction(
                 parent
             ) { parentAccess in
                 let child = try engine.createTransaction()

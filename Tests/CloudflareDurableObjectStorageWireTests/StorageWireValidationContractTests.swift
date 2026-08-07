@@ -56,7 +56,7 @@ struct StorageWireValidationContractTests {
         let mutationCount = 1_001
         let request = StorageWireRequest.commit(
             StorageWireCommitRequest(
-                scope: try StorageWireScope(databaseID: "main"),
+                partitionIdentity: try StoragePartitionIdentity(databaseID: "main"),
                 observedReadVersion: nil,
                 mutations: Array(
                     repeating: .clear(key: [0x01]),
@@ -79,7 +79,7 @@ struct StorageWireValidationContractTests {
         let limits = StorageWireLimits.cloudflareDurableObject
         let request = StorageWireRequest.commit(
             StorageWireCommitRequest(
-                scope: try StorageWireScope(databaseID: "main"),
+                partitionIdentity: try StoragePartitionIdentity(databaseID: "main"),
                 observedReadVersion: nil,
                 mutations: Array(
                     repeating: .clear(key: [0x01]),
@@ -95,10 +95,10 @@ struct StorageWireValidationContractTests {
 
     @Test func oversizedKeyAndValueAreRejectedBeforeEncoding() throws {
         let limits = StorageWireLimits.cloudflareDurableObject
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         let read = StorageWireRequest.read(
             StorageWireReadRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 key: ByteString(
                     Array(repeating: 0, count: limits.maxKeyBytes + 1)
                 ),
@@ -122,12 +122,89 @@ struct StorageWireValidationContractTests {
         }
     }
 
+    @Test func storedKeyValueCombinedLimitIsEnforcedAtExactBoundary() throws {
+        let limits = StorageWireLimits.cloudflareDurableObject
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
+        let half = limits.maxStoredKeyValueBytes / 2
+        let accepted = StorageWireRequest.commit(
+            StorageWireCommitRequest(
+                partitionIdentity: partitionIdentity,
+                observedReadVersion: nil,
+                mutations: [
+                    .set(
+                        key: ByteString([UInt8](repeating: 0x01, count: half)),
+                        value: ByteString(
+                            [UInt8](
+                                repeating: 0x02,
+                                count: limits.maxStoredKeyValueBytes - half
+                            )
+                        )
+                    ),
+                ]
+            )
+        )
+
+        _ = try StorageWire.decodeRequest(StorageWire.encode(accepted))
+
+        let rejected = StorageWireRequest.commit(
+            StorageWireCommitRequest(
+                partitionIdentity: partitionIdentity,
+                observedReadVersion: nil,
+                mutations: [
+                    .set(
+                        key: ByteString([UInt8](repeating: 0x01, count: half)),
+                        value: ByteString(
+                            [UInt8](
+                                repeating: 0x02,
+                                count: limits.maxStoredKeyValueBytes - half + 1
+                            )
+                        )
+                    ),
+                ]
+            )
+        )
+        #expect(throws: StorageWireProtocolError.self) {
+            _ = try StorageWire.encode(rejected)
+        }
+
+        var requestWriter = StorageWireWriter()
+        requestWriter.writeUInt8(StorageWire.protocolVersion)
+        try rejected.encode(into: &requestWriter)
+        #expect(throws: StorageWireProtocolError.self) {
+            _ = try StorageWire.decodeRequest(requestWriter.bytes)
+        }
+
+        let oversizedRow = StorageWireResponse.range(
+            StorageWireRangeResponse(
+                rows: [
+                    StorageWireKeyValue(
+                        key: ByteString([UInt8](repeating: 0x01, count: half)),
+                        value: ByteString(
+                            [UInt8](
+                                repeating: 0x02,
+                                count: limits.maxStoredKeyValueBytes - half + 1
+                            )
+                        )
+                    ),
+                ],
+                hasMore: false,
+                currentCommitVersion: 0
+            )
+        )
+        var responseWriter = StorageWireWriter()
+        responseWriter.writeUInt8(StorageWire.protocolVersion)
+        try oversizedRow.encode(into: &responseWriter)
+        #expect(throws: StorageWireProtocolError.self) {
+            _ = try StorageWire.decodeResponse(responseWriter.bytes)
+        }
+    }
+
     @Test func excessiveSelectorOffsetAndInvalidRangeLimitAreRejected() throws {
         let limits = StorageWireLimits.cloudflareDurableObject
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         let excessiveOffset = StorageWireRequest.range(
             StorageWireRangeRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 begin: .selector(
                     StorageWireKeySelector(
                         key: [0x01],
@@ -147,7 +224,7 @@ struct StorageWireValidationContractTests {
 
         let invalidLimit = StorageWireRequest.range(
             StorageWireRangeRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 begin: .unbounded,
                 end: .unbounded,
                 limit: 0,
@@ -160,12 +237,12 @@ struct StorageWireValidationContractTests {
         }
     }
 
-    @Test func oversizedCursorKeyAndScopeAreRejected() {
+    @Test func oversizedCursorKeyAndPartitionIdentityAreRejected() {
         #expect(throws: StorageWireProtocolError.self) {
             _ = try StorageWire.encode(
                 .range(
                     StorageWireRangeRequest(
-                        scope: try StorageWireScope(
+                        partitionIdentity: try StoragePartitionIdentity(
                             databaseID: "main"
                         ),
                         begin: .unbounded,
@@ -184,7 +261,7 @@ struct StorageWireValidationContractTests {
             )
         }
         #expect(throws: StorageWireProtocolError.self) {
-            _ = try StorageWireScope(
+            _ = try StoragePartitionIdentity(
                 databaseID: String(repeating: "a", count: 400)
             )
         }
@@ -204,12 +281,12 @@ struct StorageWireValidationContractTests {
     }
 
     @Test func rangeMetricEncodersRejectInvalidValues() throws {
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         #expect(throws: StorageWireProtocolError.self) {
             _ = try StorageWire.encode(
                 .rangeSize(
                     StorageWireRangeSizeRequest(
-                        scope: scope,
+                        partitionIdentity: partitionIdentity,
                         begin: [0x02],
                         end: [0x01]
                     )
@@ -220,7 +297,7 @@ struct StorageWireValidationContractTests {
             _ = try StorageWire.encode(
                 .rangeSplitPoints(
                     StorageWireRangeSplitPointsRequest(
-                        scope: scope,
+                        partitionIdentity: partitionIdentity,
                         begin: [0x01],
                         end: [0x02],
                         chunkSize: 0

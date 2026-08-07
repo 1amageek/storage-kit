@@ -24,7 +24,7 @@ import Logging
 ///
 /// ## Nested Transaction Safety
 ///
-/// `ActiveTransactionScope` (TaskLocal) detects nested calls and reuses the
+/// `ActiveTransactionContext` (TaskLocal) detects nested calls and reuses the
 /// parent's connection for efficiency.
 ///
 /// ## Concurrency
@@ -186,18 +186,26 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     /// The caller MUST call `commit()` or `cancel()` to release the connection
     /// back to the pool. Failing to do so will leak the connection.
     ///
-    /// If called within an existing `ActiveTransactionScope`, returns a nested
+    /// If called within an existing `ActiveTransactionContext`, returns a nested
     /// transaction that reuses the parent's connection.
     public func createTransaction() throws -> PostgreSQLStorageTransaction {
         try storageLifecycle.withActiveAdmission(
             backend: .postgreSQL,
             operation: .beginTransaction
         ) {
-            if let existing = ActiveTransactionScope.current
+            let contextLease = ActiveTransactionContext
+                .acquireCurrentTransaction()
+            if let contextLease,
+               let existing = contextLease.transaction
                 as? PostgreSQLStorageTransaction,
                existing.transactionDomain === transactionDomain {
-                return PostgreSQLStorageTransaction(parent: existing, logger: logger)
+                return PostgreSQLStorageTransaction(
+                    parent: existing,
+                    logger: logger,
+                    contextLease: contextLease
+                )
             }
+            contextLease?.release()
 
             return PostgreSQLStorageTransaction(
                 client: client,
@@ -217,12 +225,17 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
             operation: .execute
         )
         // Nested call — reuse the existing transaction.
-        if let existing = ActiveTransactionScope.current
+        let contextLease = ActiveTransactionContext
+            .acquireCurrentTransaction()
+        if let contextLease,
+           let existing = contextLease.transaction
             as? PostgreSQLStorageTransaction,
            existing.transactionDomain === transactionDomain {
+            defer { contextLease.release() }
             try await operation(existing)
             return
         }
+        contextLease?.release()
 
         do {
             try await client.withConnection { [configuration, logger] conn in
@@ -238,8 +251,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                     transactionDomain: transactionDomain
                 )
 
-                return try await ActiveTransactionScope.$current
-                    .withValue(tx) {
+                return try await ActiveTransactionContext
+                    .withActiveTransaction(tx) { _ in
                     do {
                         do {
                             try await operation(tx)

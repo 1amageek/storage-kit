@@ -1,7 +1,7 @@
 import CloudflareDurableObjectStorageWire
 import StorageKit
 
-/// StorageKit engine facade for one Cloudflare Durable Object scope.
+/// StorageKit engine facade for one Cloudflare Durable Object partition identity.
 public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable {
     public typealias Configuration = CloudflareDurableObjectStorageConfiguration
     public typealias TransactionType = CloudflareDurableObjectStorageTransaction
@@ -18,7 +18,7 @@ public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable
         self.configuration = configuration
         self.transactionDomain = StorageTransactionDomain()
         let readiness = try await configuration.client.readiness(
-            StorageWireReadinessRequest(scope: configuration.scope)
+            StorageWireReadinessRequest(partitionIdentity: configuration.partitionIdentity)
         )
         guard readiness.schemaVersion == 1,
             readiness.metadataInitialized
@@ -38,7 +38,7 @@ public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable
             operation: .beginTransaction
         ) {
             CloudflareDurableObjectStorageTransaction(
-                scope: configuration.scope,
+                partitionIdentity: configuration.partitionIdentity,
                 client: configuration.client,
                 limits: configuration.limits,
                 monotonicClock: configuration.monotonicClock,

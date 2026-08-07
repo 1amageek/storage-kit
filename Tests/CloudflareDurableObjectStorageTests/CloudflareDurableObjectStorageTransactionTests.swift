@@ -10,6 +10,112 @@ import Testing
 
 @Suite("Cloudflare Durable Object Storage Transaction Tests")
 struct CloudflareDurableObjectStorageTransactionTests {
+    @Test func storedPairLimitConfigurationMatchesProtocolContract() {
+        let protocolLimits = StorageWireLimits.cloudflareDurableObject
+        #expect(
+            CloudflareDurableObjectLimits.default.maxStoredKeyValueBytes
+                == protocolLimits.maxStoredKeyValueBytes
+        )
+        #expect(protocolLimits.maxStoredKeyValueBytes == 2_000_000)
+
+        do {
+            _ = try CloudflareDurableObjectLimits(
+                maxKeyBytes: 10,
+                maxBoundaryBytes: 11,
+                maxValueBytes: 10,
+                maxStoredKeyValueBytes: 9,
+                maxMutationsPerCommit: 20,
+                maxConflictRangesPerCommit: 20,
+                maxRangeLimit: 20,
+                maxSplitPoints: 20
+            )
+            Issue.record("Expected the component to exceed the stored-pair limit")
+        } catch let error as CloudflareDurableObjectLimitsError {
+            #expect(
+                error == .componentExceedsStoredPairLimit(
+                    field: "maxKeyBytes",
+                    value: 10,
+                    maximum: 9
+                )
+            )
+        } catch {
+            Issue.record("Unexpected limits error: \(error)")
+        }
+    }
+
+    @Test func configuredStoredPairLimitRejectsCombinedOverflow() async throws {
+        let limits = try CloudflareDurableObjectLimits(
+            maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
+            maxValueBytes: 10,
+            maxStoredKeyValueBytes: 10,
+            maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
+            maxRangeLimit: 20,
+            maxSplitPoints: 20
+        )
+        let engine = try await makeEngine(limits: limits)
+        let transaction = try engine.createTransaction()
+
+        #expect(throws: StorageError.self) {
+            try transaction.setValue(
+                ByteString([UInt8](repeating: 0x02, count: 5)),
+                for: ByteString([UInt8](repeating: 0x01, count: 6))
+            )
+        }
+        #expect(throws: StorageError.self) {
+            try transaction.atomicOp(
+                key: ByteString([UInt8](repeating: 0x01, count: 6)),
+                param: ByteString([UInt8](repeating: 0x02, count: 5)),
+                mutationType: .add
+            )
+        }
+        try transaction.atomicOp(
+            key: ByteString([UInt8](repeating: 0x01, count: 6)),
+            param: ByteString([UInt8](repeating: 0x02, count: 5)),
+            mutationType: .compareAndClear
+        )
+        try transaction.setValue(
+            ByteString([UInt8](repeating: 0x02, count: 5)),
+            for: ByteString([UInt8](repeating: 0x01, count: 5))
+        )
+    }
+
+    @Test func configuredStoredPairLimitRejectsOversizedHostRead() async throws {
+        let limits = try CloudflareDurableObjectLimits(
+            maxKeyBytes: 10,
+            maxBoundaryBytes: 11,
+            maxValueBytes: 10,
+            maxStoredKeyValueBytes: 10,
+            maxMutationsPerCommit: 20,
+            maxConflictRangesPerCommit: 20,
+            maxRangeLimit: 20,
+            maxSplitPoints: 20
+        )
+        let client = InMemoryCloudflareDurableObjectStorageClient()
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
+        _ = try client.commitForTesting(
+            StorageWireCommitRequest(
+                partitionIdentity: partitionIdentity,
+                observedReadVersion: nil,
+                mutations: [
+                    .set(
+                        key: ByteString([UInt8](repeating: 0x01, count: 6)),
+                        value: ByteString([UInt8](repeating: 0x02, count: 5))
+                    ),
+                ]
+            )
+        )
+        let engine = try await makeEngine(client: client, limits: limits)
+        let transaction = try engine.createTransaction()
+
+        await #expect(throws: StorageError.self) {
+            _ = try await transaction.getValue(
+                for: ByteString([UInt8](repeating: 0x01, count: 6))
+            )
+        }
+    }
+
     @Test func defaultLimitAllowsIndexExpandedMutationBatch() async throws {
         let engine = try await makeEngine()
         let mutationCount = 1_001
@@ -277,7 +383,7 @@ struct CloudflareDurableObjectStorageTransactionTests {
             guard let client = clientHolder.withLock({ $0 }) else { return }
             _ = try client.commitForTesting(
                 StorageWireCommitRequest(
-                    scope: request.scope,
+                    partitionIdentity: request.partitionIdentity,
                     observedReadVersion: nil,
                     mutations: [
                         .set(
@@ -333,16 +439,16 @@ struct CloudflareDurableObjectStorageTransactionTests {
         }
     }
 
-    @Test func scopesAreIsolated() async throws {
+    @Test func partitionIdentitiesAreIsolated() async throws {
         let client = InMemoryCloudflareDurableObjectStorageClient()
-        let firstScope = try StorageWireScope(databaseID: "main", tenantID: "tenant-a")
-        let secondScope = try StorageWireScope(databaseID: "main", tenantID: "tenant-b")
+        let firstPartitionIdentity = try StoragePartitionIdentity(databaseID: "main", tenantID: "tenant-a")
+        let secondPartitionIdentity = try StoragePartitionIdentity(databaseID: "main", tenantID: "tenant-b")
         let router = CloudflareDurableObjectSharedClientRouter(
             client: client,
             monotonicClock: SystemStorageClock()
         )
-        let first = try await router.engine(for: firstScope)
-        let second = try await router.engine(for: secondScope)
+        let first = try await router.engine(for: firstPartitionIdentity)
+        let second = try await router.engine(for: secondPartitionIdentity)
 
         try await first.withTransaction { tx in
             try tx.setValue([1], for: [0x01])
@@ -668,9 +774,9 @@ struct CloudflareDurableObjectStorageTransactionTests {
                 )
             )
         )
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         let tx = CloudflareDurableObjectStorageTransaction(
-            scope: scope,
+            partitionIdentity: partitionIdentity,
             client: client,
             limits: .default,
             monotonicClock: SystemStorageClock()
@@ -892,12 +998,12 @@ struct CloudflareDurableObjectStorageTransactionTests {
             InMemoryCloudflareDurableObjectStorageClient(),
         limits: CloudflareDurableObjectLimits = .default
     ) async throws -> CloudflareDurableObjectStorageEngine {
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         return try await CloudflareDurableObjectSharedClientRouter(
             client: client,
             limits: limits,
             monotonicClock: SystemStorageClock()
-        ).engine(for: scope)
+        ).engine(for: partitionIdentity)
     }
 }
 

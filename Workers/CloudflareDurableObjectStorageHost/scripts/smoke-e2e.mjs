@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { StorageKitWire } from "../src/StorageKitWire.js";
 import {
@@ -27,17 +27,20 @@ const smokeRunID = `${process.pid}-${Date.now()}`;
 const accessToken = process.env.STORAGEKIT_ACCESS_TOKEN ?? "local-storage-kit-smoke-token";
 
 let worker = null;
+let originalDevVars = null;
+const expectedShutdowns = new WeakSet();
 try {
   writeDevVars();
   worker = startWorker();
   await waitForWorker();
   await smokeHttpGuards();
   await smokeReadiness();
+  await smokeMaximumStoredPair();
   await smokeAtomicReadRangeAndPagination();
   await smokeQuerySelectorMatrix();
   await smokeBytewisePrefixQuery();
   await smokeClearRangeAndReverseRange();
-  await smokeScopeIsolation();
+  await smokePartitionIdentityIsolation();
   await smokeReadConflictRanges();
   await smokeRangeConflictGaps();
   await smokeTypedBadRequest();
@@ -62,7 +65,7 @@ function startWorker() {
   child.stdout.on("data", (chunk) => process.stdout.write(chunk));
   child.stderr.on("data", (chunk) => process.stderr.write(chunk));
   child.on("exit", (code, signal) => {
-    if (code !== 0 && signal === null) {
+    if (code !== 0 && signal === null && !expectedShutdowns.has(child)) {
       process.stderr.write(`wrangler dev exited with code ${code}\n`);
     }
   });
@@ -98,7 +101,7 @@ async function smokeHttpGuards() {
     },
     body: StorageKitWire.encodeRequest({
       operation: operation.readiness,
-      scope: scope("unauthorized"),
+      partitionIdentity: partitionIdentity("unauthorized"),
     }),
   });
   assert.equal(unauthorizedResponse.status, 401);
@@ -107,7 +110,7 @@ async function smokeHttpGuards() {
 async function smokeReadiness() {
   const response = expectOk(await send({
     operation: operation.readiness,
-    scope: scope("readiness"),
+    partitionIdentity: partitionIdentity("readiness"),
   }));
   assert.equal(response.operation, operation.readiness);
   assert.equal(response.schemaVersion, 1);
@@ -115,11 +118,36 @@ async function smokeReadiness() {
   assert.equal(response.metadataInitialized, true);
 }
 
-async function smokeAtomicReadRangeAndPagination() {
-  const testScope = scope("atomic-range");
+async function smokeMaximumStoredPair() {
+  const testPartitionIdentity = partitionIdentity("maximum-stored-pair");
+  const key = bytes(0x01);
+  const value = new Uint8Array(1_999_999);
+
   expectOk(await send({
     operation: operation.commit,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
+    observedReadVersion: null,
+    mutations: [
+      { tag: 1, key, value },
+    ],
+    readConflictRanges: [],
+  }));
+
+  const response = expectOk(await send({
+    operation: operation.read,
+    partitionIdentity: testPartitionIdentity,
+    key,
+    snapshot: false,
+    expectedReadVersion: 1n,
+  }));
+  assert.equal(response.value.byteLength, value.byteLength);
+}
+
+async function smokeAtomicReadRangeAndPagination() {
+  const testPartitionIdentity = partitionIdentity("atomic-range");
+  expectOk(await send({
+    operation: operation.commit,
+    partitionIdentity: testPartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(10) },
@@ -132,7 +160,7 @@ async function smokeAtomicReadRangeAndPagination() {
 
   let response = expectOk(await send({
     operation: operation.read,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     key: bytes(0x01),
     snapshot: false,
     expectedReadVersion: 1n,
@@ -141,7 +169,7 @@ async function smokeAtomicReadRangeAndPagination() {
 
   response = expectOk(await send({
     operation: operation.range,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x01]),
     end: selector(keySelectorKind.firstGreaterThan, [0x03]),
     limit: 2,
@@ -157,7 +185,7 @@ async function smokeAtomicReadRangeAndPagination() {
 
   response = expectOk(await send({
     operation: operation.range,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x01]),
     end: selector(keySelectorKind.firstGreaterThan, [0x03]),
     limit: 2,
@@ -171,8 +199,8 @@ async function smokeAtomicReadRangeAndPagination() {
 }
 
 async function smokeQuerySelectorMatrix() {
-  const testScope = scope("query-selectors");
-  await seedKeys(testScope, [
+  const testPartitionIdentity = partitionIdentity("query-selectors");
+  await seedKeys(testPartitionIdentity, [
     [0x10],
     [0x20],
     [0x30],
@@ -224,12 +252,12 @@ async function smokeQuerySelectorMatrix() {
   ];
 
   for (const pattern of patterns) {
-    const response = expectOk(await send(rangeRequest(testScope, pattern)));
+    const response = expectOk(await send(rangeRequest(testPartitionIdentity, pattern)));
     assertRangeKeys(response, pattern.expected);
     assert.equal(response.hasMore, false);
   }
 
-  let page = expectOk(await send(rangeRequest(testScope, {
+  let page = expectOk(await send(rangeRequest(testPartitionIdentity, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterThan, [0x50]),
     limit: 2,
@@ -238,7 +266,7 @@ async function smokeQuerySelectorMatrix() {
   assertRangeKeys(page, [[0x50], [0x40]]);
   assert.equal(page.hasMore, true);
 
-  page = expectOk(await send(rangeRequest(testScope, {
+  page = expectOk(await send(rangeRequest(testPartitionIdentity, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterThan, [0x50]),
     limit: 2,
@@ -248,7 +276,7 @@ async function smokeQuerySelectorMatrix() {
   assertRangeKeys(page, [[0x30], [0x20]]);
   assert.equal(page.hasMore, true);
 
-  page = expectOk(await send(rangeRequest(testScope, {
+  page = expectOk(await send(rangeRequest(testPartitionIdentity, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterThan, [0x50]),
     limit: 2,
@@ -258,7 +286,7 @@ async function smokeQuerySelectorMatrix() {
   assertRangeKeys(page, [[0x10]]);
   assert.equal(page.hasMore, false);
 
-  const snapshotResponse = expectOk(await send(rangeRequest(testScope, {
+  const snapshotResponse = expectOk(await send(rangeRequest(testPartitionIdentity, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterThan, [0x20]),
     snapshot: true,
@@ -266,7 +294,7 @@ async function smokeQuerySelectorMatrix() {
   })));
   assertRangeKeys(snapshotResponse, [[0x10], [0x20]]);
 
-  const staleResponse = await send(rangeRequest(testScope, {
+  const staleResponse = await send(rangeRequest(testPartitionIdentity, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterThan, [0x20]),
     snapshot: false,
@@ -276,15 +304,15 @@ async function smokeQuerySelectorMatrix() {
 }
 
 async function smokeBytewisePrefixQuery() {
-  const testScope = scope("query-bytewise-prefix");
-  await seedKeys(testScope, [
+  const testPartitionIdentity = partitionIdentity("query-bytewise-prefix");
+  await seedKeys(testPartitionIdentity, [
     [0x01],
     [0x01, 0x00],
     [0x01, 0xff],
     [0x02],
   ]);
 
-  const response = expectOk(await send(rangeRequest(testScope, {
+  const response = expectOk(await send(rangeRequest(testPartitionIdentity, {
     begin: selector(keySelectorKind.firstGreaterThan, [0x01]),
     end: selector(keySelectorKind.firstGreaterOrEqual, [0x02]),
   })));
@@ -292,10 +320,10 @@ async function smokeBytewisePrefixQuery() {
 }
 
 async function smokeClearRangeAndReverseRange() {
-  const testScope = scope("clear-range");
+  const testPartitionIdentity = partitionIdentity("clear-range");
   expectOk(await send({
     operation: operation.commit,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -309,7 +337,7 @@ async function smokeClearRangeAndReverseRange() {
 
   let response = expectOk(await send({
     operation: operation.range,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x01]),
     end: selector(keySelectorKind.firstGreaterThan, [0x04]),
     limit: 10,
@@ -322,7 +350,7 @@ async function smokeClearRangeAndReverseRange() {
 
   response = expectOk(await send({
     operation: operation.range,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x01]),
     end: selector(keySelectorKind.firstGreaterThan, [0x04]),
     limit: 10,
@@ -334,12 +362,12 @@ async function smokeClearRangeAndReverseRange() {
   assert.deepEqual(response.rows.map((row) => [...row.key]), [[0x04], [0x01]]);
 }
 
-async function smokeScopeIsolation() {
-  const firstScope = scope("scope-isolation", "tenant-a");
-  const secondScope = scope("scope-isolation", "tenant-b");
+async function smokePartitionIdentityIsolation() {
+  const firstPartitionIdentity = partitionIdentity("partitionIdentity-isolation", "tenant-a");
+  const secondPartitionIdentity = partitionIdentity("partitionIdentity-isolation", "tenant-b");
   expectOk(await send({
     operation: operation.commit,
-    scope: firstScope,
+    partitionIdentity: firstPartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(1) },
@@ -348,7 +376,7 @@ async function smokeScopeIsolation() {
   }));
   expectOk(await send({
     operation: operation.commit,
-    scope: secondScope,
+    partitionIdentity: secondPartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x01), value: bytes(2) },
@@ -358,7 +386,7 @@ async function smokeScopeIsolation() {
 
   let response = expectOk(await send({
     operation: operation.read,
-    scope: firstScope,
+    partitionIdentity: firstPartitionIdentity,
     key: bytes(0x01),
     snapshot: false,
     expectedReadVersion: 1n,
@@ -367,7 +395,7 @@ async function smokeScopeIsolation() {
 
   response = expectOk(await send({
     operation: operation.read,
-    scope: secondScope,
+    partitionIdentity: secondPartitionIdentity,
     key: bytes(0x01),
     snapshot: false,
     expectedReadVersion: 1n,
@@ -376,10 +404,10 @@ async function smokeScopeIsolation() {
 }
 
 async function smokeReadConflictRanges() {
-  const testScope = scope("conflicts");
+  const testPartitionIdentity = partitionIdentity("conflicts");
   let response = expectOk(await send({
     operation: operation.read,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     key: bytes(0x09),
     snapshot: false,
     expectedReadVersion: null,
@@ -388,7 +416,7 @@ async function smokeReadConflictRanges() {
 
   expectOk(await send({
     operation: operation.commit,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x08), value: bytes(8) },
@@ -398,7 +426,7 @@ async function smokeReadConflictRanges() {
 
   response = expectOk(await send({
     operation: operation.commit,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     observedReadVersion: readVersion,
     mutations: [
       { tag: 1, key: bytes(0x07), value: bytes(7) },
@@ -409,7 +437,7 @@ async function smokeReadConflictRanges() {
 
   response = expectOk(await send({
     operation: operation.read,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     key: bytes(0x0a),
     snapshot: false,
     expectedReadVersion: null,
@@ -418,7 +446,7 @@ async function smokeReadConflictRanges() {
 
   expectOk(await send({
     operation: operation.commit,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x0a), value: bytes(10) },
@@ -428,7 +456,7 @@ async function smokeReadConflictRanges() {
 
   response = await send({
     operation: operation.commit,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     observedReadVersion: conflictReadVersion,
     mutations: [
       { tag: 1, key: bytes(0x0b), value: bytes(11) },
@@ -439,10 +467,10 @@ async function smokeReadConflictRanges() {
 }
 
 async function smokeRangeConflictGaps() {
-  const outsideScope = scope("range-conflict-outside");
+  const outsidePartitionIdentity = partitionIdentity("range-conflict-outside");
   expectOk(await send({
     operation: operation.commit,
-    scope: outsideScope,
+    partitionIdentity: outsidePartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x15), value: bytes(15) },
@@ -450,7 +478,7 @@ async function smokeRangeConflictGaps() {
     readConflictRanges: [],
   }));
 
-  let rangeResponse = expectOk(await send(rangeRequest(outsideScope, {
+  let rangeResponse = expectOk(await send(rangeRequest(outsidePartitionIdentity, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterOrEqual, [0x20]),
     expectedReadVersion: 1n,
@@ -461,7 +489,7 @@ async function smokeRangeConflictGaps() {
 
   expectOk(await send({
     operation: operation.commit,
-    scope: outsideScope,
+    partitionIdentity: outsidePartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x30), value: bytes(30) },
@@ -471,7 +499,7 @@ async function smokeRangeConflictGaps() {
 
   let commitResponse = expectOk(await send({
     operation: operation.commit,
-    scope: outsideScope,
+    partitionIdentity: outsidePartitionIdentity,
     observedReadVersion: rangeResponse.currentCommitVersion,
     mutations: [
       { tag: 1, key: bytes(0x40), value: bytes(40) },
@@ -480,10 +508,10 @@ async function smokeRangeConflictGaps() {
   }));
   assert.equal(commitResponse.committedVersion, 3n);
 
-  const insideScope = scope("range-conflict-inside");
+  const insidePartitionIdentity = partitionIdentity("range-conflict-inside");
   expectOk(await send({
     operation: operation.commit,
-    scope: insideScope,
+    partitionIdentity: insidePartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x15), value: bytes(15) },
@@ -491,7 +519,7 @@ async function smokeRangeConflictGaps() {
     readConflictRanges: [],
   }));
 
-  rangeResponse = expectOk(await send(rangeRequest(insideScope, {
+  rangeResponse = expectOk(await send(rangeRequest(insidePartitionIdentity, {
     begin: selector(keySelectorKind.firstGreaterOrEqual, [0x10]),
     end: selector(keySelectorKind.firstGreaterOrEqual, [0x20]),
     expectedReadVersion: 1n,
@@ -499,7 +527,7 @@ async function smokeRangeConflictGaps() {
 
   expectOk(await send({
     operation: operation.commit,
-    scope: insideScope,
+    partitionIdentity: insidePartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key: bytes(0x12), value: bytes(12) },
@@ -509,7 +537,7 @@ async function smokeRangeConflictGaps() {
 
   commitResponse = await send({
     operation: operation.commit,
-    scope: insideScope,
+    partitionIdentity: insidePartitionIdentity,
     observedReadVersion: rangeResponse.currentCommitVersion,
     mutations: [
       { tag: 1, key: bytes(0x40), value: bytes(40) },
@@ -554,6 +582,9 @@ function expectOk(response) {
 }
 
 function writeDevVars() {
+  if (existsSync(devVarsPath)) {
+    originalDevVars = readFileSync(devVarsPath);
+  }
   writeFileSync(devVarsPath, [
     `STORAGEKIT_ACCESS_TOKEN=${accessToken}`,
     "STORAGEKIT_MAX_REQUEST_BYTES=4194304",
@@ -562,27 +593,47 @@ function writeDevVars() {
 }
 
 function removeDevVars() {
-  rmSync(devVarsPath, { force: true });
+  if (originalDevVars === null) {
+    rmSync(devVarsPath, { force: true });
+  } else {
+    writeFileSync(devVarsPath, originalDevVars);
+  }
 }
 
 async function stopWorker(child) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
+  expectedShutdowns.add(child);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.stdin.end("x");
+    await Promise.race([once(child, "exit"), delay(5_000)]);
   }
-  child.stdin.write("x");
-  const exit = once(child, "exit");
-  const timeout = delay(5_000).then(() => {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-    }
-  });
-  await Promise.race([exit, timeout]);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGTERM");
+    const exited = await Promise.race([
+      once(child, "exit").then(() => true),
+      delay(5_000).then(() => false),
+    ]);
+    assert.equal(exited, true, "wrangler dev did not stop after SIGTERM");
+  }
+  await requireWorkerStopped();
 }
 
-async function seedKeys(testScope, keys) {
+async function requireWorkerStopped() {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(endpoint, { method: "GET", signal: AbortSignal.timeout(500) });
+    } catch {
+      return;
+    }
+    await delay(100);
+  }
+  assert.fail("wrangler dev remained reachable after shutdown");
+}
+
+async function seedKeys(testPartitionIdentity, keys) {
   expectOk(await send({
     operation: operation.commit,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     observedReadVersion: null,
     mutations: keys.map((key, index) => ({
       tag: 1,
@@ -593,7 +644,7 @@ async function seedKeys(testScope, keys) {
   }));
 }
 
-function rangeRequest(testScope, {
+function rangeRequest(testPartitionIdentity, {
   begin,
   end,
   limit = 10,
@@ -604,7 +655,7 @@ function rangeRequest(testScope, {
 }) {
   return {
     operation: operation.range,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     begin,
     end,
     limit,
@@ -634,7 +685,7 @@ function assertRangeKeys(response, expected) {
   assert.deepEqual(response.rows.map((row) => [...row.key]), expected);
 }
 
-function scope(databaseID, tenantID = "tenant-a", workspaceID = "workspace-a") {
+function partitionIdentity(databaseID, tenantID = "tenant-a", workspaceID = "workspace-a") {
   return {
     databaseID: `smoke-${databaseID}-${smokeRunID}`,
     tenantID,

@@ -1,16 +1,16 @@
 
 public struct StorageWireReadinessRequest: Sendable, Hashable {
-    public let scope: StorageWireScope
+    public let partitionIdentity: StoragePartitionIdentity
 
-    public init(scope: StorageWireScope) {
-        self.scope = scope
+    public init(partitionIdentity: StoragePartitionIdentity) {
+        self.partitionIdentity = partitionIdentity
     }
 
     func encode(into writer: inout StorageWireWriter) throws(StorageWireProtocolError) {
-        try scope.encode(into: &writer)
+        try partitionIdentity.encode(into: &writer)
     }
 
     init(from reader: inout StorageWireReader) throws(StorageWireProtocolError) {
-        self.scope = try StorageWireScope(from: &reader)
+        self.partitionIdentity = try StoragePartitionIdentity(from: &reader)
     }
 }

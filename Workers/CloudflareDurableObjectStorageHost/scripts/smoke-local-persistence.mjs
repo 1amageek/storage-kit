@@ -19,7 +19,7 @@ const devVarsPath = fileURLToPath(new URL("../.dev.vars", import.meta.url));
 const statePath = fileURLToPath(new URL("../.wrangler/storagekit-persistence-smoke", import.meta.url));
 const accessToken = "local-storage-kit-persistence-token";
 const token = randomBytes(16);
-const testScope = {
+const testPartitionIdentity = {
   databaseID: `storagekit-local-persistence-${process.pid}-${Date.now()}`,
   tenantID: "tenant-persistence",
   workspaceID: "workspace-persistence",
@@ -95,7 +95,7 @@ async function waitForWorker(child) {
 async function writeToken() {
   const response = expectOk(await send({
     operation: operation.commit,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     observedReadVersion: null,
     mutations: [
       { tag: 1, key, value: token },
@@ -108,7 +108,7 @@ async function writeToken() {
 async function readToken() {
   const response = expectOk(await send({
     operation: operation.read,
-    scope: testScope,
+    partitionIdentity: testPartitionIdentity,
     key,
     snapshot: false,
     expectedReadVersion: null,

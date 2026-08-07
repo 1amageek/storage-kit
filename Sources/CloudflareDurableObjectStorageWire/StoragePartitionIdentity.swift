@@ -1,6 +1,10 @@
 
-/// Stable logical database identity routed to one Durable Object.
-public struct StorageWireScope: Sendable, Hashable {
+/// Stable identity of one logical storage partition.
+///
+/// Identity is defined by the exact UTF-8 bytes of every component. Swift's
+/// canonical Unicode string equality is intentionally not used because the
+/// Durable Object name is also derived from those exact bytes.
+public struct StoragePartitionIdentity: Sendable, Hashable {
     public let databaseID: String
     public let tenantID: String?
     public let workspaceID: String?
@@ -17,8 +21,8 @@ public struct StorageWireScope: Sendable, Hashable {
                 databaseID: databaseID,
                 tenantID: tenantID,
                 workspaceID: workspaceID
-              ) <= StorageWireLimits.cloudflareDurableObject.maxCanonicalScopeNameBytes else {
-            throw StorageWireProtocolError.invalidScope
+              ) <= StorageWireLimits.cloudflareDurableObject.maxCanonicalPartitionIdentityNameBytes else {
+            throw StorageWireProtocolError.invalidPartitionIdentity
         }
         self.databaseID = databaseID
         self.tenantID = tenantID
@@ -45,6 +49,55 @@ public struct StorageWireScope: Sendable, Hashable {
         let tenantPart = Self.storageNameComponent(tenantID)
         let workspacePart = Self.storageNameComponent(workspaceID)
         return "storage-kit/cfdo/v1/database/\(databasePart)/tenant/\(tenantPart)/workspace/\(workspacePart)"
+    }
+
+    public static func == (
+        lhs: StoragePartitionIdentity,
+        rhs: StoragePartitionIdentity
+    ) -> Bool {
+        exactUTF8Equal(lhs.databaseID, rhs.databaseID)
+            && exactOptionalUTF8Equal(lhs.tenantID, rhs.tenantID)
+            && exactOptionalUTF8Equal(lhs.workspaceID, rhs.workspaceID)
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        Self.hash(databaseID, into: &hasher)
+        Self.hash(tenantID, into: &hasher)
+        Self.hash(workspaceID, into: &hasher)
+    }
+
+    private static func exactUTF8Equal(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf8.elementsEqual(rhs.utf8)
+    }
+
+    private static func exactOptionalUTF8Equal(
+        _ lhs: String?,
+        _ rhs: String?
+    ) -> Bool {
+        switch (lhs, rhs) {
+        case (.none, .none):
+            true
+        case (.some(let lhs), .some(let rhs)):
+            exactUTF8Equal(lhs, rhs)
+        case (.none, .some), (.some, .none):
+            false
+        }
+    }
+
+    private static func hash(_ value: String, into hasher: inout Hasher) {
+        hasher.combine(UInt8(1))
+        hasher.combine(value.utf8.count)
+        for byte in value.utf8 {
+            hasher.combine(byte)
+        }
+    }
+
+    private static func hash(_ value: String?, into hasher: inout Hasher) {
+        guard let value else {
+            hasher.combine(UInt8(0))
+            return
+        }
+        hash(value, into: &hasher)
     }
 
     private static func writeOptional(
@@ -77,7 +130,7 @@ public struct StorageWireScope: Sendable, Hashable {
     }
 
     private static func isValid(_ value: String) -> Bool {
-        guard value.utf8.count <= StorageWireLimits.cloudflareDurableObject.maxScopeComponentBytes,
+        guard value.utf8.count <= StorageWireLimits.cloudflareDurableObject.maxPartitionIdentityComponentBytes,
               !isASCIIBlank(value) else {
             return false
         }

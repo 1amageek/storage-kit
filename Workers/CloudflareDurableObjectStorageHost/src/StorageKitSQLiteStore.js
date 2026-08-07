@@ -1,6 +1,6 @@
 import { compareBytes } from "./StorageKitByteOrdering.js";
 import { applyMutation } from "./StorageKitMutation.js";
-import { nameForScope } from "./StorageKitScope.js";
+import { nameForPartitionIdentity } from "./StorageKitPartitionIdentity.js";
 import {
   mutationType,
   operation,
@@ -13,8 +13,8 @@ const schemaVersion = 1;
 // Retention invariant: with consecutive commit versions the window bounds the
 // retained history at conflictVersionWindow * maximumPersistedConflictRangesPerCommit
 // entries (4096 * 256 = 1,048,576 = storageKitWireLimits.maxConflictEntries).
-// Byte retention has no such structural bound (ranges carry up to ~2KB of key
-// bytes each), so pruneConflictRanges must also enforce
+// Byte retention has no such structural bound (one range can carry nearly two
+// full boundary values), so pruneConflictRanges must also enforce
 // storageKitWireLimits.maxConflictEntries / maxConflictBytes as hard limits.
 // Pruning is always safe: verifyReadConflicts conservatively rejects any
 // commit whose observed read version predates the retained history.
@@ -97,7 +97,7 @@ export class StorageKitSQLiteStore {
 
   dispatch(request) {
     this.requireInitialized();
-    this.bindOrVerifyScope(request.scope);
+    this.bindOrVerifyPartitionIdentity(request.partitionIdentity);
     switch (request.operation) {
       case operation.readiness:
         return this.readiness();
@@ -129,9 +129,13 @@ export class StorageKitSQLiteStore {
     this.verifyReadVersion(request.expectedReadVersion);
     validateKey(request.key);
     const row = this.first("SELECT value FROM storagekit_kv WHERE key = ?", request.key);
+    const value = row === null ? null : validatedValue(row.value);
+    if (value !== null) {
+      validateStoredPair(request.key, value);
+    }
     return {
       operation: operation.read,
-      value: row === null ? null : validatedValue(row.value),
+      value,
       currentCommitVersion: this.currentCommitVersion(),
     };
   }
@@ -297,6 +301,7 @@ export class StorageKitSQLiteStore {
         );
       }
       for (const mutation of mutations) {
+        validateMutation(mutation);
         this.applyWrite(mutation);
       }
       this.recordConflictRanges(
@@ -318,6 +323,7 @@ export class StorageKitSQLiteStore {
   applyWrite(mutation) {
     switch (mutation.tag) {
       case 1:
+        validateStoredPair(mutation.key, mutation.value);
         this.exec(
           "INSERT OR REPLACE INTO storagekit_kv(key, value) VALUES (?, ?)",
           mutation.key,
@@ -352,6 +358,7 @@ export class StorageKitSQLiteStore {
     switch (result.kind) {
       case "set":
         validateValue(result.value);
+        validateStoredPair(mutation.key, result.value);
         this.exec(
           "INSERT OR REPLACE INTO storagekit_kv(key, value) VALUES (?, ?)",
           mutation.key,
@@ -598,17 +605,17 @@ export class StorageKitSQLiteStore {
     }
   }
 
-  bindOrVerifyScope(scope) {
-    const canonicalName = nameForScope(scope);
+  bindOrVerifyPartitionIdentity(partitionIdentity) {
+    const canonicalName = nameForPartitionIdentity(partitionIdentity);
     const row = this.first(
-      "SELECT value FROM storagekit_metadata WHERE key = 'scopeName'"
+      "SELECT value FROM storagekit_metadata WHERE key = 'partitionIdentityName'"
     );
     if (row === null) {
-      this.setMetadata("scopeName", canonicalName);
+      this.setMetadata("partitionIdentityName", canonicalName);
       return;
     }
     if (row.value !== canonicalName) {
-      throw StorageKitWireError.scopeMismatch();
+      throw StorageKitWireError.partitionIdentityMismatch();
     }
   }
 
@@ -745,6 +752,7 @@ function boundedResponseRowCount(rows, requestedLimit) {
         storageKitWireLimits.maxValueBytes
       );
     }
+    validateStoredPairByteLengths(key.byteLength, valueSize);
     const rowBytes = 8 + key.byteLength + valueSize;
     if (byteCount + rowBytes > storageKitWireLimits.maxRangeResponseBytes) {
       break;
@@ -818,6 +826,7 @@ function validateMutation(mutation) {
     case 1:
       validateKey(mutation.key);
       validateValue(mutation.value);
+      validateStoredPair(mutation.key, mutation.value);
       return;
     case 2:
       validateKey(mutation.key);
@@ -845,6 +854,25 @@ function validateMutation(mutation) {
         );
       } else {
         validateValue(mutation.param);
+      }
+      if (mutation.mutationType === mutationType.setVersionstampedKey) {
+        const keyBytes = byteView(mutation.key).byteLength;
+        if (keyBytes >= 4) {
+          validateStoredPairByteLengths(
+            keyBytes - 4,
+            byteView(mutation.param).byteLength
+          );
+        }
+      } else if (mutation.mutationType === mutationType.setVersionstampedValue) {
+        const valueBytes = byteView(mutation.param).byteLength;
+        if (valueBytes >= 4) {
+          validateStoredPairByteLengths(
+            byteView(mutation.key).byteLength,
+            valueBytes - 4
+          );
+        }
+      } else if (mutation.mutationType !== mutationType.compareAndClear) {
+        validateStoredPair(mutation.key, mutation.param);
       }
       return;
     default:
@@ -1070,6 +1098,24 @@ function validateValue(value) {
     throw StorageKitWireError.limitExceeded(
       "Value bytes",
       storageKitWireLimits.maxValueBytes
+    );
+  }
+}
+
+function validateStoredPair(key, value) {
+  validateStoredPairByteLengths(
+    byteView(key).byteLength,
+    byteView(value).byteLength
+  );
+}
+
+function validateStoredPairByteLengths(keyBytes, valueBytes) {
+  const total = keyBytes + valueBytes;
+  if (!Number.isSafeInteger(total)
+      || total > storageKitWireLimits.maxStoredKeyValueBytes) {
+    throw StorageKitWireError.limitExceeded(
+      "Stored key and value bytes",
+      storageKitWireLimits.maxStoredKeyValueBytes
     );
   }
 }

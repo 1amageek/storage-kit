@@ -3,7 +3,7 @@ import DatabaseTypes
 import StorageKit
 import Synchronization
 
-/// Transaction facade for one Cloudflare Durable Object scope.
+/// Transaction facade for one Cloudflare Durable Object partition identity.
 public final class CloudflareDurableObjectStorageTransaction: Transaction, Sendable {
     public typealias RangeResult = CloudflareDurableObjectRangeResult
 
@@ -32,7 +32,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
     }
 
-    private let scope: StorageWireScope
+    private let partitionIdentity: StoragePartitionIdentity
     private let client: any CloudflareDurableObjectStorageClient
     private let limits: CloudflareDurableObjectLimits
     private let monotonicClock: any StorageMonotonicClock
@@ -52,13 +52,13 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     init(
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         client: any CloudflareDurableObjectStorageClient,
         limits: CloudflareDurableObjectLimits,
         monotonicClock: any StorageMonotonicClock,
         transactionDomain: StorageTransactionDomain = StorageTransactionDomain()
     ) {
-        self.scope = scope
+        self.partitionIdentity = partitionIdentity
         self.client = client
         self.limits = limits
         self.monotonicClock = monotonicClock
@@ -75,12 +75,15 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         let response = try await performHostCall(operation: .read) { [self] in
             try await self.client.read(
                 StorageWireReadRequest(
-                    scope: self.scope,
+                    partitionIdentity: self.partitionIdentity,
                     key: key,
                     snapshot: snapshot,
                     expectedReadVersion: observedReadVersion
                 )
             )
+        }
+        if let value = response.value {
+            try validateStoredRow(key: key, value: value)
         }
         try acceptReadVersion(response.currentCommitVersion)
         if !snapshot {
@@ -120,7 +123,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                         try await self.client.range(request)
                     }
                 },
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 begin: begin,
                 end: end,
                 snapshot: snapshot,
@@ -139,6 +142,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 },
                 recordReadConflictRange: { [self] range in
                     try recordReadConflictRange(range)
+                },
+                validateStoredRow: { [self] key, value in
+                    try validateStoredRow(key: key, value: value)
                 }
             )
         }
@@ -147,6 +153,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     public func setValue(_ value: ByteString, for key: ByteString) throws {
         try validateKey(key)
         try validateValue(value)
+        try validateStoredPair(keyBytes: key.count, valueBytes: value.count)
         try state.withLock { state in
             try prepareMutation(state: &state)
             try mutationByteMeter.recordSet(
@@ -217,6 +224,12 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 message: "Versionstamped key operand exceeds configured byte limit"
             )
             try validateValue(param)
+            if key.count >= 4 {
+                try validateStoredPair(
+                    keyBytes: key.count - 4,
+                    valueBytes: param.count
+                )
+            }
         case .setVersionstampedValue:
             try validateKey(key)
             try validateBytes(
@@ -224,9 +237,24 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 maximum: limits.maxValueBytes + 4,
                 message: "Versionstamped value operand exceeds configured byte limit"
             )
+            if param.count >= 4 {
+                try validateStoredPair(
+                    keyBytes: key.count,
+                    valueBytes: param.count - 4
+                )
+            }
         default:
             try validateKey(key)
             try validateValue(param)
+            switch mutationType {
+            case .compareAndClear:
+                break
+            default:
+                try validateStoredPair(
+                    keyBytes: key.count,
+                    valueBytes: param.count
+                )
+            }
         }
         try state.withLock { state in
             try prepareMutation(state: &state)
@@ -337,7 +365,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             let response = try await performHostCall(operation: .commit) { [self] in
                 try await self.client.commit(
                     StorageWireCommitRequest(
-                        scope: self.scope,
+                        partitionIdentity: self.partitionIdentity,
                         observedReadVersion: payload.observedReadVersion,
                         mutations: payload.mutations,
                         readConflictRanges: payload.readConflictRanges,
@@ -492,7 +520,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
         let response = try await performHostCall(operation: .read) { [self] in
             try await self.client.readiness(
-                StorageWireReadinessRequest(scope: self.scope)
+                StorageWireReadinessRequest(partitionIdentity: self.partitionIdentity)
             )
         }
         try acceptReadVersion(response.commitVersion)
@@ -618,7 +646,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         let response = try await performHostCall(operation: .rangeRead) { [self] in
             try await self.client.rangeSize(
                 StorageWireRangeSizeRequest(
-                    scope: self.scope,
+                    partitionIdentity: self.partitionIdentity,
                     begin: beginKey,
                     end: endKey,
                     expectedReadVersion: transactionView.readVersion
@@ -685,7 +713,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         let response = try await performHostCall(operation: .rangeRead) { [self] in
             try await self.client.rangeSplitPoints(
                 StorageWireRangeSplitPointsRequest(
-                    scope: self.scope,
+                    partitionIdentity: self.partitionIdentity,
                     begin: beginKey,
                     end: endKey,
                     chunkSize: wireChunkSize,
@@ -791,6 +819,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             case .set(let key, let value):
                 try validateKey(key)
                 try validateValue(value)
+                try validateStoredPair(
+                    keyBytes: key.count,
+                    valueBytes: value.count
+                )
             case .clear(let key):
                 try validateKey(key)
             case .clearRange(let begin, let end):
@@ -805,6 +837,12 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                         message: "Versionstamped key operand exceeds configured byte limit"
                     )
                     try validateValue(param)
+                    if key.count >= 4 {
+                        try validateStoredPair(
+                            keyBytes: key.count - 4,
+                            valueBytes: param.count
+                        )
+                    }
                 case .setVersionstampedValue:
                     try validateKey(key)
                     try validateBytes(
@@ -812,9 +850,24 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                         maximum: limits.maxValueBytes + 4,
                         message: "Versionstamped value operand exceeds configured byte limit"
                     )
+                    if param.count >= 4 {
+                        try validateStoredPair(
+                            keyBytes: key.count,
+                            valueBytes: param.count - 4
+                        )
+                    }
                 default:
                     try validateKey(key)
                     try validateValue(param)
+                    switch mutationType {
+                    case .compareAndClear:
+                        break
+                    default:
+                        try validateStoredPair(
+                            keyBytes: key.count,
+                            valueBytes: param.count
+                        )
+                    }
                 }
             }
         }
@@ -852,6 +905,31 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 message: message
             )
         }
+    }
+
+    private func validateStoredPair(
+        keyBytes: Int,
+        valueBytes: Int
+    ) throws {
+        let total = keyBytes.addingReportingOverflow(valueBytes)
+        guard !total.overflow,
+              total.partialValue <= limits.maxStoredKeyValueBytes else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: .write,
+                backend: .cloudflareDurableObject,
+                message: "Stored key and value exceed configured combined byte limit"
+            )
+        }
+    }
+
+    private func validateStoredRow(
+        key: ByteString,
+        value: ByteString
+    ) throws {
+        try validateKey(key)
+        try validateValue(value)
+        try validateStoredPair(keyBytes: key.count, valueBytes: value.count)
     }
 
     private func validateBoundary(

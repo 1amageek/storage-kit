@@ -2,18 +2,18 @@ import DatabaseTypes
 
 /// Exact stored-byte count request for one committed key range.
 public struct StorageWireRangeSizeRequest: Sendable, Hashable {
-    public let scope: StorageWireScope
+    public let partitionIdentity: StoragePartitionIdentity
     public let begin: ByteString
     public let end: ByteString
     public let expectedReadVersion: Int64?
 
     public init(
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         begin: ByteString,
         end: ByteString,
         expectedReadVersion: Int64? = nil
     ) {
-        self.scope = scope
+        self.partitionIdentity = partitionIdentity
         self.begin = begin
         self.end = end
         self.expectedReadVersion = expectedReadVersion
@@ -23,7 +23,7 @@ public struct StorageWireRangeSizeRequest: Sendable, Hashable {
         into writer: inout StorageWireWriter
     ) throws(StorageWireProtocolError) {
         try Self.validate(begin: begin, end: end)
-        try scope.encode(into: &writer)
+        try partitionIdentity.encode(into: &writer)
         try StorageWireProtocolError.writeBytes(
             begin,
             maximum: StorageWireLimits.cloudflareDurableObject.maxBoundaryBytes,
@@ -43,7 +43,7 @@ public struct StorageWireRangeSizeRequest: Sendable, Hashable {
     init(
         from reader: inout StorageWireReader
     ) throws(StorageWireProtocolError) {
-        self.scope = try StorageWireScope(from: &reader)
+        self.partitionIdentity = try StoragePartitionIdentity(from: &reader)
         self.begin = try StorageWireProtocolError.readBytes(
             from: &reader,
             maximum: StorageWireLimits.cloudflareDurableObject.maxBoundaryBytes

@@ -1,6 +1,6 @@
 import CloudflareDurableObjectStorageWire
 
-/// Routes logical scopes to Cloudflare Durable Object storage engines.
+/// Routes logical partition identities to Cloudflare Durable Object storage engines.
 public protocol CloudflareDurableObjectStorageRouter: Sendable {
-    func engine(for scope: StorageWireScope) async throws -> CloudflareDurableObjectStorageEngine
+    func engine(for partitionIdentity: StoragePartitionIdentity) async throws -> CloudflareDurableObjectStorageEngine
 }

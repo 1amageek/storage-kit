@@ -86,9 +86,9 @@ struct StorageWireTests {
     }
 
     @Test func trailingBytesAreRejectedByEnvelopeDecoder() throws {
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         let request = StorageWireRequest.readiness(
-            StorageWireReadinessRequest(scope: scope)
+            StorageWireReadinessRequest(partitionIdentity: partitionIdentity)
         )
         var encoded =
             try StorageWire
@@ -141,14 +141,14 @@ struct StorageWireTests {
     }
 
     @Test func cloudflareReadRequestEnvelopeRoundTrips() throws {
-        let scope = try StorageWireScope(
+        let partitionIdentity = try StoragePartitionIdentity(
             databaseID: "database",
             tenantID: "tenant",
             workspaceID: "workspace"
         )
         let request = StorageWireRequest.read(
             StorageWireReadRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 key: [0x01, 0x02],
                 snapshot: false,
                 expectedReadVersion: 42
@@ -159,28 +159,28 @@ struct StorageWireTests {
         let decoded = try StorageWire.decodeRequest(encoded)
 
         #expect(decoded == request)
-        #expect(scope.durableObjectName.hasPrefix("storage-kit/cfdo/v1/"))
+        #expect(partitionIdentity.durableObjectName.hasPrefix("storage-kit/cfdo/v1/"))
     }
 
-    @Test func scopePreservesIdentifiersAndProducesCanonicalName() throws {
-        let scope = try StorageWireScope(
+    @Test func partitionIdentityPreservesIdentifiersAndProducesCanonicalName() throws {
+        let partitionIdentity = try StoragePartitionIdentity(
             databaseID: "MainDB",
             tenantID: "TenantA",
             workspaceID: "WorkspaceB"
         )
 
-        #expect(scope.databaseID == "MainDB")
-        #expect(scope.tenantID == "TenantA")
-        #expect(scope.workspaceID == "WorkspaceB")
+        #expect(partitionIdentity.databaseID == "MainDB")
+        #expect(partitionIdentity.tenantID == "TenantA")
+        #expect(partitionIdentity.workspaceID == "WorkspaceB")
         #expect(
-            scope.durableObjectName
+            partitionIdentity.durableObjectName
                 == "storage-kit/cfdo/v1/database/TWFpbkRC/tenant/VGVuYW50QQ/workspace/V29ya3NwYWNlQg"
         )
     }
 
-    @Test func absentScopeComponentsCannotCollideWithLiteralMarker() throws {
-        let absent = try StorageWireScope(databaseID: "main")
-        let literal = try StorageWireScope(
+    @Test func absentPartitionIdentityComponentsCannotCollideWithLiteralMarker() throws {
+        let absent = try StoragePartitionIdentity(databaseID: "main")
+        let literal = try StoragePartitionIdentity(
             databaseID: "main",
             tenantID: "_",
             workspaceID: "_"
@@ -193,18 +193,31 @@ struct StorageWireTests {
         #expect(absent.durableObjectName != literal.durableObjectName)
     }
 
-    @Test func scopeRejectsBlankAndControlCharacterComponents() {
+    @Test func partitionIdentityUsesExactUTF8Identity() throws {
+        let composed = try StoragePartitionIdentity(
+            databaseID: "caf\u{00E9}"
+        )
+        let decomposed = try StoragePartitionIdentity(
+            databaseID: "cafe\u{0301}"
+        )
+
+        #expect(composed != decomposed)
+        #expect(Set([composed, decomposed]).count == 2)
+        #expect(composed.durableObjectName != decomposed.durableObjectName)
+    }
+
+    @Test func partitionIdentityRejectsBlankAndControlCharacterComponents() {
         #expect(throws: StorageWireProtocolError.self) {
-            _ = try StorageWireScope(databaseID: " \t\n")
+            _ = try StoragePartitionIdentity(databaseID: " \t\n")
         }
         #expect(throws: StorageWireProtocolError.self) {
-            _ = try StorageWireScope(databaseID: "main", tenantID: "")
+            _ = try StoragePartitionIdentity(databaseID: "main", tenantID: "")
         }
         #expect(throws: StorageWireProtocolError.self) {
-            _ = try StorageWireScope(databaseID: "main", workspaceID: " ")
+            _ = try StoragePartitionIdentity(databaseID: "main", workspaceID: " ")
         }
         #expect(throws: StorageWireProtocolError.self) {
-            _ = try StorageWireScope(databaseID: "main\u{0000}")
+            _ = try StoragePartitionIdentity(databaseID: "main\u{0000}")
         }
     }
 
@@ -230,10 +243,10 @@ struct StorageWireTests {
     }
 
     @Test func cloudflareCommitRequestRoundTripsMutations() throws {
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         let request = StorageWireRequest.commit(
             StorageWireCommitRequest(
-                scope: scope,
+                partitionIdentity: partitionIdentity,
                 observedReadVersion: 3,
                 mutations: [
                     .set(key: [0x01], value: [0x0A]),

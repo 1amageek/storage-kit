@@ -1,25 +1,25 @@
 import DatabaseTypes
 
 public struct StorageWireReadRequest: Sendable, Hashable {
-    public let scope: StorageWireScope
+    public let partitionIdentity: StoragePartitionIdentity
     public let key: ByteString
     public let snapshot: Bool
     public let expectedReadVersion: Int64?
 
     public init(
-        scope: StorageWireScope,
+        partitionIdentity: StoragePartitionIdentity,
         key: ByteString,
         snapshot: Bool,
         expectedReadVersion: Int64? = nil
     ) {
-        self.scope = scope
+        self.partitionIdentity = partitionIdentity
         self.key = key
         self.snapshot = snapshot
         self.expectedReadVersion = expectedReadVersion
     }
 
     func encode(into writer: inout StorageWireWriter) throws(StorageWireProtocolError) {
-        try scope.encode(into: &writer)
+        try partitionIdentity.encode(into: &writer)
         try StorageWireProtocolError.writeBytes(
             key,
             maximum: StorageWireLimits.cloudflareDurableObject.maxKeyBytes,
@@ -30,7 +30,7 @@ public struct StorageWireReadRequest: Sendable, Hashable {
     }
 
     init(from reader: inout StorageWireReader) throws(StorageWireProtocolError) {
-        self.scope = try StorageWireScope(from: &reader)
+        self.partitionIdentity = try StoragePartitionIdentity(from: &reader)
         self.key = try StorageWireProtocolError.readBytes(
             from: &reader,
             maximum: StorageWireLimits.cloudflareDurableObject.maxKeyBytes

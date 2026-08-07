@@ -112,7 +112,7 @@ extension StorageEngine {
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
         let transaction = try createTransaction()
-        try await ActiveTransactionScope.withActiveTransaction(
+        try await ActiveTransactionContext.withActiveTransaction(
             transaction
         ) { _ in
             do {

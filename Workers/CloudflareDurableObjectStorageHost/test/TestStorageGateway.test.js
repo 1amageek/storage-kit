@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import worker from "./fixtures/TestStorageGateway.js";
-import { nameForScope } from "../src/StorageKitScope.js";
+import { nameForPartitionIdentity } from "../src/StorageKitPartitionIdentity.js";
 import { StorageKitWire } from "../src/StorageKitWire.js";
 import { operation, statusCode } from "../src/StorageKitWireConstants.js";
 
 const accessToken = "storage-kit-test-token";
 
-test("fixture routes StorageKit Wire requests to the Durable Object name derived from scope", async () => {
-  const scope = {
+test("fixture routes StorageKit Wire requests to the Durable Object name derived from partitionIdentity", async () => {
+  const partitionIdentity = {
     databaseID: "main",
     tenantID: "tenant-a",
     workspaceID: "workspace-a",
   };
   const requestBytes = StorageKitWire.encodeRequest({
     operation: operation.readiness,
-    scope,
+    partitionIdentity,
   });
 
   let observedName = null;
@@ -48,7 +48,7 @@ test("fixture routes StorageKit Wire requests to the Durable Object name derived
     },
   });
 
-  assert.equal(observedName, nameForScope(scope));
+  assert.equal(observedName, nameForPartitionIdentity(partitionIdentity));
   assert.deepEqual([...observedBody], [...requestBytes]);
   assert.equal(response.headers.get("content-type"), "application/octet-stream");
 
@@ -57,7 +57,7 @@ test("fixture routes StorageKit Wire requests to the Durable Object name derived
   assert.equal(decodedResponse.operation, operation.readiness);
 });
 
-test("fixture returns a typed failure when routing cannot decode scope", async () => {
+test("fixture returns a typed failure when routing cannot decode partitionIdentity", async () => {
   const response = await worker.fetch(new Request("https://storage-kit.example.test/", {
     method: "POST",
     headers: authorizedHeaders(),
@@ -106,10 +106,10 @@ test("fixture rejects removed operation 7 before Durable Object routing", async 
   assert.equal(routed, false);
 });
 
-test("fixture decodes only routing scope before Durable Object dispatch", async () => {
+test("fixture decodes only routing partitionIdentity before Durable Object dispatch", async () => {
   const validPrefix = StorageKitWire.encodeRequest({
     operation: operation.readiness,
-    scope: {
+    partitionIdentity: {
       databaseID: "main",
       tenantID: null,
       workspaceID: null,
@@ -150,7 +150,7 @@ test("fixture decodes only routing scope before Durable Object dispatch", async 
 test("fixture returns a typed failure when the Durable Object binding is absent", async () => {
   const requestBytes = StorageKitWire.encodeRequest({
     operation: operation.readiness,
-    scope: {
+    partitionIdentity: {
       databaseID: "main",
       tenantID: null,
       workspaceID: null,

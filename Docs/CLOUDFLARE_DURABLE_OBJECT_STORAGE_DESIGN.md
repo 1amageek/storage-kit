@@ -89,12 +89,12 @@ and SQLite host lifecycle. The Swift storage engine therefore never interprets a
 shutdown request as a successful storage mutation or as permission to bypass
 the host transaction boundary.
 
-## Storage Scope
+## Storage Partition Identity
 
-One logical scope routes to exactly one Durable Object:
+One logical partition identity routes to exactly one Durable Object:
 
 ```text
-StorageWireScope
+StoragePartitionIdentity
   databaseID: String
   tenantID: String?
   workspaceID: String?
@@ -110,16 +110,16 @@ Each component is UTF-8 encoded and then unpadded base64url encoded. A missing
 optional component uses the reserved `_` marker. Empty, ASCII-whitespace-only,
 control-character, oversized, and overlong canonical names are rejected.
 
-The Durable Object persists the canonical scope name in metadata on its first
+The Durable Object persists the canonical partition identity name in metadata on its first
 request. Every later request must match it. This guard prevents a routing error
 from silently mixing two logical databases inside one object.
 
-Cross-scope transactions are not supported. Application-level resharding must
+Cross-partition transactions are not supported. Application-level resharding must
 use an explicit staged copy and atomic metadata switch outside StorageKit.
 
-`StorageWireScope` is the single scope model used by the wire codec, typed
+`StoragePartitionIdentity` is the single partition identity model used by the wire codec, typed
 client, router, engine configuration, and transaction. The storage backend does
-not maintain a second scope type or convert between equivalent request and
+not maintain a second partition identity type or convert between equivalent request and
 response DTOs. This keeps validation, naming, and protocol meaning in one owner
 while preserving `ByteString` storage views across the client boundary.
 
@@ -235,23 +235,30 @@ The hard limits are protocol invariants, not deployment suggestions:
 |---|---:|
 | Wire frame | 16 MiB |
 | Range response budget | 8 MiB |
-| Key | 1,024 bytes |
-| Conflict boundary | 1,025 bytes |
-| Value or atomic parameter | 1 MiB |
-| Scope component | 512 bytes |
+| Key | 2,000,000 bytes |
+| Value or ordinary atomic parameter | 2,000,000 bytes |
+| Stored key + value | 2,000,000 bytes combined |
+| Conflict boundary | 2,000,001 bytes |
+| Versionstamped key/value operand | 2,000,004 bytes |
+| Partition identity component | 512 bytes |
 | Canonical Durable Object name | 512 bytes |
-| Cursor | 2,048 bytes |
 | Error message | 4,096 bytes |
-| Mutations per commit | 1,000 |
-| Read conflict ranges per commit | 1,000 |
-| Write conflict ranges per commit | 1,000 |
+| Mutations per commit | 10,000 |
+| Read conflict ranges per commit | 10,000 |
+| Write conflict ranges per commit | 10,000 |
 | Range rows per page | 1,000 |
 | Absolute selector resolution offset | 10,000 |
-| Retained conflict entries | 65,536 |
-| Retained conflict bytes | 32 MiB |
+| Retained conflict entries | 1,048,576 |
+| Retained conflict bytes | 256 MiB |
 
-An application adapter may configure a smaller request limit. Configuration
-cannot raise the hard 16 MiB frame limit.
+The stored-pair limit follows Cloudflare's documented
+[SQLite-backed Durable Object key-and-value limit](https://developers.cloudflare.com/durable-objects/platform/limits/).
+Either component may use the full budget only when the other is empty. The
+four-byte versionstamp offset suffix is removed before storage and is therefore
+admitted in addition to the resulting stored size.
+
+An application adapter may configure smaller request limits. Configuration
+cannot raise any protocol hard limit.
 
 The Swift encoder performs an exact preflight size calculation before
 allocation. The JavaScript writer uses a bounded growing `Uint8Array`.
@@ -376,7 +383,7 @@ sequenceDiagram
 
 | Table | Responsibility |
 |---|---|
-| `storagekit_metadata` | schema, scope identity, commit version, retention counters |
+| `storagekit_metadata` | schema, partition identity, commit version, retention counters |
 | `storagekit_kv` | ordered BLOB key/value storage |
 | `storagekit_conflicts` | normalized write conflict ranges by version |
 | `storagekit_conflict_versions` | per-version retention accounting |
@@ -399,7 +406,7 @@ requests. Its adapter must:
 
 1. verify the bearer token;
 2. reject an oversized body while streaming;
-3. decode only enough to derive and validate the scope;
+3. decode only enough to derive and validate the partition identity;
 4. invoke the Durable Object's `execute(Uint8Array)` RPC through the namespace
    binding;
 5. forward the unchanged v1 frame.
@@ -442,7 +449,7 @@ DatabaseWire or execute database-framework operations.
 | overlapping committed write | transaction conflict |
 | malformed or oversized frame | invalid operation |
 | unknown version, tag, or status | invalid operation |
-| persisted scope mismatch | invalid operation |
+| persisted partition identity mismatch | invalid operation |
 | missing Durable Object binding | resource unavailable |
 | deterministic backend failure | backend failure |
 | commit transport lost after dispatch | commit unknown result on the Swift client |
@@ -482,15 +489,17 @@ Phase completion requires:
 - clear range and atomic mutation parity;
 - explicit read/write conflicts, stale-reader rejection, rollback, cancellation,
   and unknown commit outcome;
-- scope persistence and mismatch rejection;
+- partition identity persistence and mismatch rejection;
 - cold initialization and migration serialization;
-- real local Durable Object SQLite smoke tests through the private fixture;
+- real local Durable Object SQLite smoke tests through the private fixture,
+  including a 2,000,000-byte stored key-and-value pair and negative readiness
+  after Wrangler shutdown;
 - application-level deployment tests owned by the consuming runtime.
 
 ## Decision Record
 
 1. StorageKit Wire v1 is the sole Cloudflare storage protocol.
-2. One logical storage scope maps to one Durable Object.
+2. One logical storage partition identity maps to one Durable Object.
 3. Durable Object SQLite is the sole Cloudflare storage backend.
 4. The Swift transaction layer owns read-your-writes and transaction state.
 5. The SQLite host owns atomic storage primitives, persistence, and conflict

@@ -78,11 +78,23 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
         ) {
             let identifier = try allocateTransactionIdentifier()
 
-            if let existing = ActiveTransactionScope.current
+            let contextLease = ActiveTransactionContext
+                .acquireCurrentTransaction()
+            if let contextLease,
+               let existing = contextLease.transaction
                 as? SQLiteStorageTransaction,
                existing.transactionDomain === transactionDomain {
-                return try existing.makeChild(identifier: identifier)
+                do {
+                    return try existing.makeChild(
+                        identifier: identifier,
+                        contextLease: contextLease
+                    )
+                } catch {
+                    contextLease.release()
+                    throw error
+                }
             }
+            contextLease?.release()
 
             return SQLiteStorageTransaction(
                 identifier: identifier,
@@ -98,7 +110,7 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
         let transaction = try createTransaction()
-        try await ActiveTransactionScope.withActiveTransaction(
+        try await ActiveTransactionContext.withActiveTransaction(
             transaction
         ) { _ in
             do {

@@ -12,7 +12,7 @@ import {
   TestStoragePayloadTooLargeError,
 } from "./TestStorageRequestLimits.js";
 import { TestStorageRequestAuthorizer } from "./TestStorageRequestAuthorizer.js";
-import { nameForScope } from "../../src/StorageKitScope.js";
+import { nameForPartitionIdentity } from "../../src/StorageKitPartitionIdentity.js";
 import { statusCode } from "../../src/StorageKitWireConstants.js";
 import { StorageKitWire } from "../../src/StorageKitWire.js";
 
@@ -61,7 +61,7 @@ export async function handleTestStorageRequest(request, env) {
   }
   let decodedRequest;
   try {
-    decodedRequest = StorageKitWire.decodeRoutingScope(requestBytes);
+    decodedRequest = StorageKitWire.decodeRoutingPartitionIdentity(requestBytes);
   } catch (error) {
     return storageWireResponse(StorageKitWire.encodeFailure(
       statusCode.invalidOperation,
@@ -79,7 +79,7 @@ export async function handleTestStorageRequest(request, env) {
 
   let stub;
   try {
-    const durableObjectName = nameForScope(decodedRequest.scope);
+    const durableObjectName = nameForPartitionIdentity(decodedRequest.partitionIdentity);
     const id = namespace.idFromName(durableObjectName);
     stub = namespace.get(id);
   } catch (error) {

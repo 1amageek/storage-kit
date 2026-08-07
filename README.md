@@ -227,8 +227,8 @@ Embedded reactor therefore does not inherit an operating-system clock product.
 
 The storage engine and typed client use the canonical
 `CloudflareDurableObjectStorageWire` request, response, mutation, range, and
-scope values directly. The backend does not define parallel DTOs for the same
-wire semantics.
+partition identity values directly. The backend does not define parallel DTOs
+for the same wire semantics.
 
 The reusable JavaScript host lives in
 `Workers/CloudflareDurableObjectStorageHost`. An application-owned Durable
@@ -378,7 +378,7 @@ flowchart TB
 | `KeyValueRangeResult` | StorageKit | Array-backed reference result for the in-memory backend |
 | `SQLiteRangeResult` | SQLiteStorage | Lazy cursor-backed result with explicit finish and ownership handling |
 | `compareBytes` | StorageKit | `memcmp`-based lexicographic byte comparison (hot path) |
-| `ActiveTransactionScope` | StorageKit | `@TaskLocal` transaction ownership used by SQL adapters and common execution |
+| `ActiveTransactionContext` | StorageKit | `@TaskLocal` transaction ownership used by SQL adapters and common execution |
 
 ## Requirements
 

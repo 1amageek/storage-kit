@@ -24,7 +24,7 @@ struct CloudflareDurableObjectStorageWireClientTests {
         )
         let response = try await client.read(
             StorageWireReadRequest(
-                scope: try StorageWireScope(databaseID: "main"),
+                partitionIdentity: try StoragePartitionIdentity(databaseID: "main"),
                 key: [0x01],
                 snapshot: true
             )
@@ -126,12 +126,12 @@ struct CloudflareDurableObjectStorageWireClientTests {
                 )
             )
         )
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
 
         do {
             _ = try await client.commit(
                 StorageWireCommitRequest(
-                    scope: scope,
+                    partitionIdentity: partitionIdentity,
                     observedReadVersion: nil,
                     mutations: [
                         .set(
@@ -154,12 +154,12 @@ struct CloudflareDurableObjectStorageWireClientTests {
         let client = CloudflareDurableObjectStorageWireClient(
             transport: TruncatedResponseCloudflareDurableObjectStorageTransport()
         )
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
 
         do {
             _ = try await client.commit(
                 StorageWireCommitRequest(
-                    scope: scope,
+                    partitionIdentity: partitionIdentity,
                     observedReadVersion: nil,
                     mutations: [
                         .set(
@@ -182,14 +182,14 @@ struct CloudflareDurableObjectStorageWireClientTests {
         let client = CloudflareDurableObjectStorageWireClient(
             transport: MismatchedOperationCloudflareDurableObjectStorageTransport()
         )
-        let scope = try StorageWireScope(
+        let partitionIdentity = try StoragePartitionIdentity(
             databaseID: "main"
         )
 
         do {
             _ = try await client.commit(
                 StorageWireCommitRequest(
-                    scope: scope,
+                    partitionIdentity: partitionIdentity,
                     observedReadVersion: nil,
                     mutations: [
                         .set(
@@ -210,11 +210,11 @@ struct CloudflareDurableObjectStorageWireClientTests {
         let client = CloudflareDurableObjectStorageWireClient(
             transport: InMemoryCloudflareDurableObjectStorageTransport()
         )
-        let scope = try StorageWireScope(databaseID: "main")
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         return try await CloudflareDurableObjectSharedClientRouter(
             client: client,
             monotonicClock: SystemStorageClock()
-        ).engine(for: scope)
+        ).engine(for: partitionIdentity)
     }
 
     private func versionstampOperand(
