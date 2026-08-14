@@ -24,7 +24,7 @@ Add to your `Package.swift`:
 ```swift
 dependencies: [
     .package(url: "https://github.com/1amageek/database-types.git", from: "26.0730.0"),
-    .package(url: "https://github.com/1amageek/storage-kit.git", from: "26.0803.0"),
+    .package(url: "https://github.com/1amageek/storage-kit.git", from: "26.0807.0"),
 ]
 ```
 
@@ -388,4 +388,4 @@ flowchart TB
 
 ## License
 
-MIT
+Licensed under the [MIT License](LICENSE).

@@ -1,7 +1,9 @@
 {
   "name": "@storage-kit/cloudflare-durable-object-storage-host",
   "version": "0.0.0",
+  "description": "Cloudflare Durable Object SQLite host adapter for StorageKit Embedded WASM runtimes.",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": {
