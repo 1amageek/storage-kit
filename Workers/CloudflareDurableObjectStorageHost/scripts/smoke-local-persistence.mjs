@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { randomBytes } from "node:crypto";
-import { rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { StorageKitWire } from "../src/StorageKitWire.js";
 import {
@@ -26,6 +26,7 @@ const testPartitionIdentity = {
 };
 const key = new Uint8Array([0x70, 0x65, 0x72, 0x73, 0x69, 0x73, 0x74]);
 
+let originalDevVars = null;
 rmSync(statePath, { recursive: true, force: true });
 writeDevVars();
 
@@ -136,6 +137,9 @@ function expectOk(response) {
 }
 
 function writeDevVars() {
+  if (existsSync(devVarsPath)) {
+    originalDevVars = readFileSync(devVarsPath);
+  }
   writeFileSync(devVarsPath, [
     `STORAGEKIT_ACCESS_TOKEN=${accessToken}`,
     "STORAGEKIT_MAX_REQUEST_BYTES=4194304",
@@ -144,21 +148,40 @@ function writeDevVars() {
 }
 
 function removeDevVars() {
-  rmSync(devVarsPath, { force: true });
+  if (originalDevVars === null) {
+    rmSync(devVarsPath, { force: true });
+  } else {
+    writeFileSync(devVarsPath, originalDevVars);
+  }
 }
 
 async function stopWorker(child) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
+  if (child.exitCode === null && child.signalCode === null) {
+    child.stdin.end("x");
+    await Promise.race([once(child, "exit"), delay(5_000)]);
   }
-  child.stdin.write("x");
-  const exit = once(child, "exit");
-  const timeout = delay(5_000).then(() => {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGTERM");
+    const exited = await Promise.race([
+      once(child, "exit").then(() => true),
+      delay(5_000).then(() => false),
+    ]);
+    assert.equal(exited, true, "wrangler dev did not stop after SIGTERM");
+  }
+  await requireWorkerStopped();
+}
+
+async function requireWorkerStopped() {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(endpoint, { method: "GET", signal: AbortSignal.timeout(500) });
+    } catch {
+      return;
     }
-  });
-  await Promise.race([exit, timeout]);
+    await delay(100);
+  }
+  assert.fail("wrangler dev remained reachable after shutdown");
 }
 
 function delay(milliseconds) {

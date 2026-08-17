@@ -64,7 +64,7 @@ policy are test concerns, not exported production API.
 ## Commands
 
 ```bash
-npm install
+npm ci
 npm test
 npm run smoke:local
 npm run smoke:local:persistence
@@ -78,3 +78,14 @@ runtime, and requires the endpoint to become unreachable before succeeding.
 `wrangler.jsonc` points to the fixture solely so the tests exercise real local
 Durable Object SQLite. Production deployment configuration belongs to the
 application that imports this host.
+
+## Distribution
+
+The package version uses npm-compatible numeric SemVer. Git release
+`26.0817.0` therefore contains package version `26.817.0`. Consumers install
+the immutable archive attached to that GitHub release rather than depending on
+a sibling repository checkout:
+
+```bash
+npm install --save-exact https://github.com/1amageek/storage-kit/releases/download/26.0817.0/storage-kit-cloudflare-durable-object-storage-host-26.817.0.tgz
+```
