@@ -37,7 +37,7 @@ DatabaseWire:
 | Protocol | Responsibility |
 |---|---|
 | StorageKit Wire v1 | Key/value reads, range reads, conflicts, and atomic commits |
-| DatabaseWire v1 | Database queries, graph operations, ontology, SHACL, commands, and jobs |
+| DatabaseWire v3 / v5 | Database queries, graph operations, ontology, SHACL, commands, and jobs |
 
 Database operations must never be added to StorageKit Wire. Storage operations
 must never leak into the public database API.
