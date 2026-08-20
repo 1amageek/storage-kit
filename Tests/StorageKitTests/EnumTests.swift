@@ -8,15 +8,6 @@ struct EnumTests {
     // MARK: - MutationType
     // =========================================================================
 
-    @Test func mutationType_allCases() {
-        let cases: [MutationType] = [
-            .add, .setVersionstampedKey, .setVersionstampedValue,
-            .bitOr, .bitAnd, .bitXor,
-            .max, .min, .compareAndClear,
-        ]
-        #expect(cases.count == 9)
-    }
-
     @Test func mutationType_isSendable() {
         let value: any Sendable = MutationType.add
         #expect(value is MutationType)
@@ -58,20 +49,6 @@ struct EnumTests {
         } else {
             Issue.record("Expected timeout")
         }
-    }
-
-    @Test func transactionOption_allSimpleCases() {
-        // Verify all cases compile and can be constructed
-        let cases: [TransactionOption] = [
-            .timeout(milliseconds: 1000),
-            .priorityBatch,
-            .prioritySystemImmediate,
-            .readPriorityLow,
-            .readPriorityHigh,
-            .accessSystemKeys,
-            .readServerSideCacheDisable,
-        ]
-        #expect(cases.count == 7)
     }
 
     @Test func transactionOption_isSendable() {

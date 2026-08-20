@@ -40,11 +40,11 @@
   test selection. Install the FoundationDB C SDK and keep its header and client
   library available under `/usr/local/include` and `/usr/local/lib`, or set
   `FDB_SDK_INCLUDE_DIRECTORY` and `FDB_SDK_LIBRARY_DIRECTORY` explicitly.
-- The harness also runs the same target without service variables and requires
-  the exact 128-test result: 33 passed environment-independent tests, 94
-  skipped service-dependent tests, and exactly one explicit failure from
-  `PostgreSQLIntegrationEnvironmentTests.endpointIsConfigured()`. An
-  all-skipped or successful result is a false-green defect.
+- The harness also runs only
+  `PostgreSQLIntegrationEnvironmentTests.endpointIsConfigured()` without
+  service variables and requires exactly one explicit failure, zero passes,
+  zero skips, zero expected failures, and zero runtime warnings. A successful
+  result is a false-green defect.
 - Every raw engine test awaits `waitUntilShutdown()` before its test boundary
   ends. `requestShutdown()` alone is not complete cleanup for the asynchronous
   PostgreSQL connection pool.

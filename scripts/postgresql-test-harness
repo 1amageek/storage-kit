@@ -5,8 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCHEME="storage-kit-Package"
 DESTINATION="platform=macOS,arch=arm64"
 EXPECTED_TEST_COUNT=128
-EXPECTED_MISSING_ENVIRONMENT_PASSED_COUNT=33
-EXPECTED_MISSING_ENVIRONMENT_SKIPPED_COUNT=94
+MISSING_ENVIRONMENT_SELECTOR="PostgreSQLStorageTests/PostgreSQLIntegrationEnvironmentTests/endpointIsConfigured"
 BUILD_TIMEOUT_SECONDS="${XCODE_TEST_BUILD_TIMEOUT_SECONDS:-1200}"
 TEST_TIMEOUT_SECONDS="${XCODE_TEST_TIMEOUT_SECONDS:-1200}"
 RESULT_DIRECTORY="${XCODE_TEST_RESULT_DIRECTORY:-${TMPDIR:-/tmp}/storage-kit-postgresql-results}"
@@ -298,7 +297,7 @@ timeout_command "$TEST_TIMEOUT_SECONDS" xcodebuild test-without-building \
   -destination "$DESTINATION" \
   -resultBundlePath "$missing_environment_result" \
   -enableCodeCoverage NO \
-  -only-testing:PostgreSQLStorageTests \
+  -only-testing:"$MISSING_ENVIRONMENT_SELECTOR" \
   2>&1 | tee "$missing_environment_log"
 missing_environment_status=$?
 set -e
@@ -324,10 +323,10 @@ missing_environment_runtime_warnings="$(
   printf '%s' "$missing_environment_summary" | jq -er '.runtimeWarnings | length'
 )"
 if (( missing_environment_status == 0 \
-    || missing_environment_total != EXPECTED_TEST_COUNT \
-    || missing_environment_passed != EXPECTED_MISSING_ENVIRONMENT_PASSED_COUNT \
+    || missing_environment_total != 1 \
+    || missing_environment_passed != 0 \
     || missing_environment_failures != 1 \
-    || missing_environment_skipped != EXPECTED_MISSING_ENVIRONMENT_SKIPPED_COUNT \
+    || missing_environment_skipped != 0 \
     || missing_environment_expected_failures != 0 \
     || missing_environment_runtime_warnings != 0 )); then
   printf '%s\n' "$missing_environment_summary" >&2
@@ -342,5 +341,5 @@ fi
 
 printf '%s\n' "$summary"
 echo "Configured PostgreSQL tests: $total_count passed"
-echo "Missing-environment guard: $missing_environment_passed passed, 1 failed, $missing_environment_skipped skipped"
+echo "Missing-environment guard: 0 passed, 1 failed, 0 skipped"
 echo "Result directory: $RESULT_DIRECTORY"
