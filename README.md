@@ -131,6 +131,10 @@ let engine = InMemoryEngine()
 
 File-based or in-memory. Uses a `WITHOUT ROWID` table for efficient BLOB key B-tree storage. A coordinator actor owns each transaction from `BEGIN IMMEDIATE` through commit or rollback, while short synchronous connection access is protected by `Mutex`.
 
+`SQLiteStorage` resolves the native SQLite library through `pkg-config sqlite3`.
+Linux builds therefore require SQLite development headers and a matching
+library; Debian-family systems provide them through `libsqlite3-dev`.
+
 ```swift
 // File-based
 let engine = try SQLiteStorageEngine(configuration: .file("/path/to/db.sqlite"))

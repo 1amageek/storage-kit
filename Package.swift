@@ -75,10 +75,19 @@ let package = Package(
                 ),
             ]
         ),
+        .systemLibrary(
+            name: "SQLiteLibrary",
+            pkgConfig: "sqlite3",
+            providers: [
+                .brew(["sqlite3"]),
+                .apt(["libsqlite3-dev"]),
+            ]
+        ),
         .target(
             name: "SQLiteStorage",
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
+                "SQLiteLibrary",
                 "StorageKit",
             ]
         ),

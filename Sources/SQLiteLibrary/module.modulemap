@@ -1,0 +1,5 @@
+module SQLiteLibrary [system] {
+    header "shim.h"
+    link "sqlite3"
+    export *
+}

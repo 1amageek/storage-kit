@@ -1,5 +1,5 @@
 import DatabaseTypes
-import SQLite3
+import SQLiteLibrary
 import StorageKit
 
 /// SQLite copies transient cursor bindings before the Swift borrow ends.
