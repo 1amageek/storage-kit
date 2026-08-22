@@ -7,6 +7,76 @@ import Testing
 
 @Suite("FoundationDB byte ownership")
 struct FoundationDBByteOwnershipTests {
+    @Test("Explicit cluster configuration rejects an empty path before startup")
+    func explicitClusterConfigurationRejectsEmptyPathBeforeStartup() async {
+        do {
+            _ = try await FDBStorageEngine(
+                configuration: .init(clusterFilePath: "")
+            )
+            Issue.record("An empty FoundationDB cluster path was accepted")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+            #expect(error.operation == .open)
+            #expect(error.backend == .foundationDB)
+        } catch {
+            Issue.record("Expected StorageError, got \(error)")
+        }
+    }
+
+    @Test("Engine applies configured transaction options at admission")
+    func engineAppliesConfiguredTransactionOptionsAtAdmission() async throws {
+        let backend = RecordingTransaction()
+        let database = RecordingDatabase(transaction: backend)
+        let engine = try await FDBStorageEngine(
+            configuration: .init(
+                database: database,
+                transactionOptions: [
+                    .prioritySystemImmediate,
+                    .readPriorityHigh,
+                    .timeout(milliseconds: 1_234),
+                ]
+            )
+        )
+
+        let admittedTransaction = try engine.createTransaction()
+
+        #expect(backend.optionCodes.suffix(3) == [
+            FDB.TransactionOption.prioritySystemImmediate.rawValue,
+            FDB.TransactionOption.readPriorityHigh.rawValue,
+            FDB.TransactionOption.timeout.rawValue,
+        ])
+        #expect(backend.integerOptionValues.last == 1_234)
+        await engine.shutdown()
+        withExtendedLifetime(admittedTransaction) {}
+    }
+
+    @Test("Transaction option failures remain typed storage failures")
+    func transactionOptionFailuresRemainTypedStorageFailures() async throws {
+        let backend = RecordingTransaction(
+            rejectedOptionCode: FDB.TransactionOption.prioritySystemImmediate.rawValue
+        )
+        let database = RecordingDatabase(transaction: backend)
+        let engine = try await FDBStorageEngine(
+            configuration: .init(
+                database: database,
+                transactionOptions: [.prioritySystemImmediate]
+            )
+        )
+
+        do {
+            _ = try engine.createTransaction()
+            Issue.record("A rejected FoundationDB transaction option was accepted")
+        } catch let error as StorageError {
+            #expect(error.code == .backendFailure)
+            #expect(error.operation == .beginTransaction)
+            #expect(error.backend == .foundationDB)
+            #expect(error.backendCode == FDBErrorCode.invalidAPICall.rawValue)
+        } catch {
+            Issue.record("Expected StorageError, got \(error)")
+        }
+        await engine.shutdown()
+    }
+
     @Test("Write inputs preserve StorageKit buffer addresses")
     func writeInputsPreserveStorageKitBufferAddresses() throws {
         let keyOwner = BorrowCountingStorageBytesOwner(
@@ -210,17 +280,22 @@ private final class RecordingTransaction: TransactionProtocol, Sendable {
         var readInvocation: ReadInvocationRecord?
         var rangeInvocation: RangeInvocationRecord?
         var clearCount = 0
+        var optionCodes: [UInt32] = []
+        var integerOptionValues: [Int] = []
+        let rejectedOptionCode: UInt32?
     }
 
     private let state: Mutex<State>
 
     init(
         pointValue: ByteString? = nil,
-        rangePages: [RangeBatch] = []
+        rangePages: [RangeBatch] = [],
+        rejectedOptionCode: UInt32? = nil
     ) {
         self.state = Mutex(State(
             pointValue: pointValue,
-            rangePages: rangePages
+            rangePages: rangePages,
+            rejectedOptionCode: rejectedOptionCode
         ))
     }
 
@@ -228,6 +303,8 @@ private final class RecordingTransaction: TransactionProtocol, Sendable {
     var readInvocation: ReadInvocationRecord? { state.withLock { $0.readInvocation } }
     var rangeInvocation: RangeInvocationRecord? { state.withLock { $0.rangeInvocation } }
     var clearCount: Int { state.withLock { $0.clearCount } }
+    var optionCodes: [UInt32] { state.withLock { $0.optionCodes } }
+    var integerOptionValues: [Int] { state.withLock { $0.integerOptionValues } }
 
     func getValue<Key: FDB.ByteInput>(
         for key: Key,
@@ -385,11 +462,21 @@ private final class RecordingTransaction: TransactionProtocol, Sendable {
         forOption option: FDB.TransactionOption
     ) throws {
         _ = value
-        _ = option
+        try state.withLock { state in
+            if state.rejectedOptionCode == option.rawValue {
+                throw FDBError(.invalidAPICall)
+            }
+            state.optionCodes.append(option.rawValue)
+        }
     }
 
     func setOption(forOption option: FDB.TransactionOption) throws {
-        _ = option
+        try state.withLock { state in
+            if state.rejectedOptionCode == option.rawValue {
+                throw FDBError(.invalidAPICall)
+            }
+            state.optionCodes.append(option.rawValue)
+        }
     }
 
     func setOption(
@@ -397,15 +484,43 @@ private final class RecordingTransaction: TransactionProtocol, Sendable {
         forOption option: FDB.TransactionOption
     ) throws {
         _ = value
-        _ = option
+        try state.withLock { state in
+            if state.rejectedOptionCode == option.rawValue {
+                throw FDBError(.invalidAPICall)
+            }
+            state.optionCodes.append(option.rawValue)
+        }
     }
 
     func setOption(
         to value: Int,
         forOption option: FDB.TransactionOption
     ) throws {
-        _ = value
-        _ = option
+        try state.withLock { state in
+            if state.rejectedOptionCode == option.rawValue {
+                throw FDBError(.invalidAPICall)
+            }
+            state.optionCodes.append(option.rawValue)
+            state.integerOptionValues.append(value)
+        }
+    }
+}
+
+private final class RecordingDatabase: DatabaseProtocol, Sendable {
+    private let transaction: RecordingTransaction
+
+    init(transaction: RecordingTransaction) {
+        self.transaction = transaction
+    }
+
+    func createTransaction() throws -> RecordingTransaction {
+        transaction
+    }
+
+    func withTransaction<Result: Sendable>(
+        _ operation: (RecordingTransaction) async throws -> Result
+    ) async throws -> Result {
+        try await operation(transaction)
     }
 }
 

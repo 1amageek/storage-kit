@@ -13,6 +13,14 @@ import Synchronization
 /// // Default cluster (handles FDBClient initialization internally)
 /// let engine = try await FDBStorageEngine(configuration: .init())
 ///
+/// // Explicit cluster file with defaults applied to every transaction
+/// let isolatedEngine = try await FDBStorageEngine(
+///     configuration: .init(
+///         clusterFilePath: "/run/storage/fdb.cluster",
+///         transactionOptions: [.timeout(milliseconds: 30_000)]
+///     )
+/// )
+///
 /// // Specific database instance
 /// let engine = try await FDBStorageEngine(configuration: .init(database: db))
 /// ```
@@ -20,22 +28,45 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
 
     public struct Configuration: Sendable {
         let database: (any DatabaseProtocol)?
+        let clusterFilePath: String?
+        let transactionOptions: [TransactionOption]
         let commitRequestLimit: CommitRequestLimit
 
         /// Use the default cluster. FDB client library is initialized automatically.
         public init(
+            transactionOptions: [TransactionOption] = [],
             commitRequestLimit: CommitRequestLimit = .default
         ) {
             self.database = nil
+            self.clusterFilePath = nil
+            self.transactionOptions = transactionOptions
+            self.commitRequestLimit = commitRequestLimit
+        }
+
+        /// Use the cluster selected by an explicit cluster file.
+        ///
+        /// An empty path is rejected by `FDBStorageEngine.init(configuration:)`.
+        /// The adapter never searches for a cluster file when this initializer is used.
+        public init(
+            clusterFilePath: String,
+            transactionOptions: [TransactionOption] = [],
+            commitRequestLimit: CommitRequestLimit = .default
+        ) {
+            self.database = nil
+            self.clusterFilePath = clusterFilePath
+            self.transactionOptions = transactionOptions
             self.commitRequestLimit = commitRequestLimit
         }
 
         /// Use a specific database instance.
         public init(
             database: any DatabaseProtocol,
+            transactionOptions: [TransactionOption] = [],
             commitRequestLimit: CommitRequestLimit = .default
         ) {
             self.database = database
+            self.clusterFilePath = nil
+            self.transactionOptions = transactionOptions
             self.commitRequestLimit = commitRequestLimit
         }
     }
@@ -48,12 +79,18 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
     private static let clientStartup = FoundationDBClientStartup()
 
     private actor FoundationDBClientStartup {
-        private var initialized = false
+        private var startupTask: Task<Void, any Error>?
 
         func ensureInitialized() async throws {
-            guard !initialized else { return }
-            try await FDBClient.initialize()
-            initialized = true
+            if FDBClient.isInitialized { return }
+            if let startupTask {
+                return try await startupTask.value
+            }
+            let startupTask = Task {
+                try await FDBClient.initialize()
+            }
+            self.startupTask = startupTask
+            try await startupTask.value
         }
     }
 
@@ -61,6 +98,7 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
 
     private let database: Mutex<(any DatabaseProtocol)?>
     private let transactionDomain = StorageTransactionDomain()
+    private let transactionOptions: [TransactionOption]
     private let commitRequestLimit: CommitRequestLimit
     private let storageLifecycle = StorageEngineLifecycle()
 
@@ -69,12 +107,36 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         if let configuredDatabase = configuration.database {
             database = configuredDatabase
         } else {
+            if let clusterFilePath = configuration.clusterFilePath,
+               clusterFilePath.isEmpty {
+                throw StorageError(
+                    code: .invalidOperation,
+                    operation: .open,
+                    backend: .foundationDB,
+                    message: "FoundationDB cluster file path must not be empty"
+                )
+            }
             if !FDBClient.isInitialized {
                 try await Self.clientStartup.ensureInitialized()
             }
-            database = try FDBClient.openDatabase()
+            do {
+                database = try FDBClient.openDatabase(
+                    clusterFilePath: configuration.clusterFilePath
+                )
+            } catch let error as FDBError {
+                throw FDBStorageTransaction.convertFDBError(
+                    error,
+                    operation: .open
+                )
+            } catch {
+                throw FDBStorageTransaction.convertBackendError(
+                    error,
+                    operation: .open
+                )
+            }
         }
         self.database = Mutex(database)
+        self.transactionOptions = configuration.transactionOptions
         self.commitRequestLimit = configuration.commitRequestLimit
     }
 
@@ -86,14 +148,28 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
             let database = try retainedDatabase(operation: .beginTransaction)
             do {
                 let fdbTx = try database.createTransaction()
-                return try FDBStorageTransaction(
+                let transaction = try FDBStorageTransaction(
                     fdbTx,
                     database: database,
                     transactionDomain: transactionDomain,
                     commitRequestLimit: commitRequestLimit
                 )
+                for option in transactionOptions {
+                    try transaction.setOption(forOption: option)
+                }
+                return transaction
             } catch let error as FDBError {
                 throw FDBStorageTransaction.convertFDBError(error, operation: .beginTransaction)
+            } catch let error as StorageError {
+                throw StorageError(
+                    code: error.code,
+                    operation: .beginTransaction,
+                    backend: .foundationDB,
+                    message: error.message,
+                    backendCode: error.backendCode,
+                    underlyingDescription: error.underlyingDescription,
+                    byteLimitViolation: error.byteLimitViolation
+                )
             } catch {
                 throw FDBStorageTransaction.convertBackendError(error, operation: .beginTransaction)
             }
