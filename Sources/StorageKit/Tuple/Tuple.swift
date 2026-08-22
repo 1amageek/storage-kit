@@ -143,7 +143,9 @@ public struct Tuple: Sendable, Hashable, Equatable {
         }
     }
 
-    package var packedByteCount: Int {
+    /// Number of bytes produced by `pack()` without allocating the packed
+    /// representation.
+    public var packedByteCount: Int {
         var sink = TupleEncodingSink(measuringFrom: 0)
         encodePacked(to: &sink)
         return sink.byteCount

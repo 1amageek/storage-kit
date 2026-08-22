@@ -25,6 +25,16 @@ struct TupleTests {
         }
     }
 
+    @Test func packedByteCountMatchesEncodedRepresentation() {
+        let tuple = Tuple(
+            "prefix\0suffix",
+            Int64.min,
+            ByteString([0x00, 0x01, 0xFF])
+        )
+
+        #expect(tuple.packedByteCount == tuple.pack().count)
+    }
+
     // MARK: - String
 
     @Test func stringRoundTrip() throws {
