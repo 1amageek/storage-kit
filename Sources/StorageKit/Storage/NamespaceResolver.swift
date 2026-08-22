@@ -13,12 +13,12 @@ public protocol NamespaceResolver: Sendable {
     /// Resolves a namespace without creating backend metadata.
     func resolveExisting(
         path: [String],
-        transaction: any TransactionAccess
+        transaction: any TransactionReadAccess
     ) async throws -> Subspace
 
     /// Returns whether the path can be resolved without creating metadata.
     func namespaceExists(
         path: [String],
-        transaction: any TransactionAccess
+        transaction: any TransactionReadAccess
     ) async throws -> Bool
 }

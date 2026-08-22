@@ -41,7 +41,7 @@ final class NamespaceRegistry:
 
     func resolveExisting(
         path: [String],
-        transaction: any StorageKit.TransactionAccess
+        transaction: any StorageKit.TransactionReadAccess
     ) async throws -> StorageKit.Subspace {
         try await withFDBTransaction(
             transaction,
@@ -61,7 +61,7 @@ final class NamespaceRegistry:
 
     func listNamespaces(
         path: [String],
-        transaction: any StorageKit.TransactionAccess
+        transaction: any StorageKit.TransactionReadAccess
     ) async throws -> [String] {
         try await withFDBTransaction(
             transaction,
@@ -95,7 +95,7 @@ final class NamespaceRegistry:
 
     func namespaceExists(
         path: [String],
-        transaction: any StorageKit.TransactionAccess
+        transaction: any StorageKit.TransactionReadAccess
     ) async throws -> Bool {
         try await withFDBTransaction(
             transaction,
@@ -111,7 +111,7 @@ final class NamespaceRegistry:
     }
 
     private func withFDBTransaction<T: Sendable>(
-        _ transaction: any StorageKit.TransactionAccess,
+        _ transaction: any StorageKit.TransactionReadAccess,
         writes: Bool,
         operation: StorageOperation,
         _ body: (
