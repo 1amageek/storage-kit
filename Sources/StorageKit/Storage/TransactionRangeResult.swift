@@ -19,6 +19,8 @@ extension TransactionRangeResult {
             while let (key, value) = try await cursor.next() {
                 try await body(key, value)
             }
+        } catch let cleanupError as StorageRangeCleanupError {
+            throw cleanupError
         } catch {
             let iterationError = error
             do {

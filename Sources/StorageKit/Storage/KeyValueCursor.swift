@@ -147,6 +147,11 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
         let element: KeyValueCursor.Element?
         do {
             element = try await cursor.next()
+        } catch let cleanupError as StorageRangeCleanupError {
+            state = .finished(cleanupError.cleanupError)
+            lifetime.end()
+            boundary.resolve(.failure(cleanupError.cleanupError))
+            throw cleanupError
         } catch {
             let iterationError = error
             do {

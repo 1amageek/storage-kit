@@ -185,6 +185,28 @@ struct TransactionRangeCleanupTests {
         #expect(iterationRecorder.finishCount == 1)
     }
 
+    @Test func nestedCursorDoesNotWrapAnExistingCleanupFailure() async {
+        let iterationRecorder = RangeIterationRecorder(finishError: .finish)
+        let inner = KeyValueCursor(
+            consuming: FailingRows(iterationRecorder: iterationRecorder)
+        )
+        var outer = KeyValueCursor(
+            consuming: CursorWrappingRows(cursor: inner)
+        )
+
+        do {
+            _ = try await outer.next()
+            Issue.record("Expected combined failure")
+        } catch let error as StorageRangeCleanupError {
+            #expect(error.iterationError as? RangeCleanupFailure == .body)
+            #expect(error.cleanupError as? RangeCleanupFailure == .finish)
+        } catch {
+            Issue.record("Expected StorageRangeCleanupError, got \(error)")
+        }
+
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
     @Test func cursorRetainsOwnerUntilNaturalExhaustion() async throws {
         let iterationRecorder = RangeIterationRecorder()
         let lifetimeRecorder = CursorLifetimeRecorder()
@@ -445,6 +467,28 @@ private struct FailingRows: TransactionRangeResult {
             if let finishError = iterationRecorder.finishError {
                 throw finishError
             }
+        }
+    }
+}
+
+private struct CursorWrappingRows: TransactionRangeResult {
+    let cursor: KeyValueCursor
+
+    func makeCursor() -> Cursor {
+        Cursor(cursor: cursor)
+    }
+
+    struct Cursor: TransactionRangeCursor {
+        var cursor: KeyValueCursor
+
+        mutating func next() async throws -> (ByteString, ByteString)? {
+            try await cursor.next()
+        }
+
+        mutating func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {
+            try await cursor.finish()
         }
     }
 }
