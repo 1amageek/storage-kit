@@ -49,6 +49,16 @@ struct TupleTests {
         )
     }
 
+    @Test func droppingLeadingElementsReturnsZeroCopyPackedSuffix() throws {
+        let original = try Tuple(packed: Tuple("index", UInt64(7), "id").pack())
+        let suffix = try original.droppingFirstElements(2)
+
+        #expect(suffix == Tuple("id"))
+        #expect(suffix.count == 1)
+        #expect(suffix.retainedByteCount == original.retainedByteCount)
+        #expect(try original.droppingFirstElements(3).isEmpty)
+    }
+
     // MARK: - String
 
     @Test func stringRoundTrip() throws {

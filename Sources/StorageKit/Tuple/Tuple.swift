@@ -171,6 +171,38 @@ public struct Tuple: Sendable, Hashable, Equatable {
         return result
     }
 
+    /// Returns a tuple view that omits the requested leading elements.
+    ///
+    /// Packed tuples retain a bounded byte view over the original owner, so
+    /// callers can split composite keys without materializing an existential
+    /// element array or copying the suffix bytes.
+    public func droppingFirstElements(_ elementCount: Int) throws -> Tuple {
+        guard elementCount >= 0, elementCount <= count else {
+            throw TupleError.invalidElementRange(
+                lowerBound: elementCount,
+                upperBound: count,
+                count: count
+            )
+        }
+        guard elementCount > 0 else { return self }
+
+        let bytes = pack()
+        var offset = bytes.startIndex
+        for _ in 0..<elementCount {
+            let typeCode = bytes[offset]
+            offset += 1
+            _ = try Self.decodeElement(
+                typeCode: typeCode,
+                bytes: bytes,
+                at: &offset
+            )
+        }
+        return Tuple(
+            packed: bytes[offset..<bytes.endIndex],
+            elementCount: count - elementCount
+        )
+    }
+
     /// Access an element by index (returns nil if out of bounds or decoding fails).
     ///
     /// Prefer `element(at:)` when error details are important.
