@@ -65,6 +65,24 @@ struct BytesOwnershipTests {
         #expect(payloadRange.lowerBound >= packedRange.lowerBound)
         #expect(payloadRange.upperBound <= packedRange.upperBound)
         #expect(try tuple.element(at: 1) as? Int64 == 7)
+        #expect(tuple.retainedByteCount == packed.retainedByteCount)
+    }
+
+    @Test func packedTupleRetainsOnlyItsMeasurablePackedOwner() throws {
+        let releaseRecorder = ByteReleaseRecorder()
+        var packed: ByteString? = makeOwnedBytes(
+            Tuple("identifier", Int64(42)).pack().copyBytes(),
+            releaseRecorder: releaseRecorder
+        )
+        var tuple: Tuple? = try Tuple(packed: packed!)
+
+        #expect(tuple?.retainedByteCount == packed?.retainedByteCount)
+        packed = nil
+        #expect(releaseRecorder.releaseCount == 0)
+        #expect(try tuple?.element(at: 0) as? String == "identifier")
+
+        tuple = nil
+        #expect(releaseRecorder.releaseCount == 1)
     }
 
     @Test func sourceAllocationLivesUntilItsLastStorageViewReleases() {

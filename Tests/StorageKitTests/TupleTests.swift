@@ -35,6 +35,20 @@ struct TupleTests {
         #expect(tuple.packedByteCount == tuple.pack().count)
     }
 
+    @Test func appendingToPackedTuplePreservesCanonicalBytes() throws {
+        let original = Tuple("prefix", Int64(42))
+        let packed = try Tuple(packed: original.pack())
+
+        #expect(
+            packed.appending(ByteString([0x01, 0x02])).pack()
+                == Tuple("prefix", Int64(42), ByteString([0x01, 0x02])).pack()
+        )
+        #expect(
+            packed.appending(Tuple("suffix", true)).pack()
+                == Tuple("prefix", Int64(42), "suffix", true).pack()
+        )
+    }
+
     // MARK: - String
 
     @Test func stringRoundTrip() throws {

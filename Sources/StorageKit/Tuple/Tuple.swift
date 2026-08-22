@@ -17,33 +17,68 @@ import DatabaseTypes
 /// - +0.0 != -0.0 (different bit patterns)
 /// - NaN == NaN (same bit pattern)
 public struct Tuple: Sendable, Hashable, Equatable {
-    private let storedElements: [any TupleElement]
+    private enum Storage: Sendable {
+        case decoded([any TupleElement])
+        case packed(ByteString, elementCount: Int)
+    }
+
+    private let storage: Storage
 
     /// Number of elements.
-    public var count: Int { storedElements.count }
+    public var count: Int {
+        switch storage {
+        case .decoded(let elements):
+            elements.count
+        case .packed(_, let elementCount):
+            elementCount
+        }
+    }
 
     /// Whether the tuple is empty.
-    public var isEmpty: Bool { storedElements.isEmpty }
+    public var isEmpty: Bool { count == 0 }
+
+    /// Complete byte-owner storage retained by a tuple decoded from packed
+    /// bytes. Tuples assembled from arbitrary elements return `nil` because
+    /// their elements may own storage that cannot be measured generically.
+    public var retainedByteCount: Int? {
+        switch storage {
+        case .decoded:
+            nil
+        case .packed(let bytes, _):
+            bytes.retainedByteCount
+        }
+    }
 
     // MARK: - Initializers
 
     public init(_ elements: any TupleElement...) {
-        storedElements = elements
+        storage = .decoded(elements)
     }
 
     public init(_ elements: [any TupleElement]) {
-        storedElements = elements
+        storage = .decoded(elements)
     }
 
     /// Decode packed tuple bytes directly into owned tuple storage.
     /// Byte-backed element payloads remain views over the input byte owner.
     public init(packed bytes: ByteString) throws {
-        self = try Self.unpackTuple(from: bytes)
+        var offset = bytes.startIndex
+        var elementCount = 0
+        while offset < bytes.endIndex {
+            let typeCode = bytes[offset]
+            offset += 1
+            _ = try Self.decodeElement(
+                typeCode: typeCode,
+                bytes: bytes,
+                at: &offset
+            )
+            elementCount += 1
+        }
+        storage = .packed(bytes, elementCount: elementCount)
     }
 
-    /// Construct directly from decoded elements.
-    private init(decodedElements: [any TupleElement]) {
-        storedElements = decodedElements
+    private init(packed bytes: ByteString, elementCount: Int) {
+        storage = .packed(bytes, elementCount: elementCount)
     }
 
     // MARK: - Element Access
@@ -53,10 +88,28 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// - Parameter index: The element index.
     /// - Throws: `TupleError` if the index is out of bounds or decoding fails.
     public func element(at index: Int) throws -> any TupleElement {
-        guard index >= 0 && index < storedElements.count else {
+        guard index >= 0 && index < count else {
             throw TupleError.unexpectedEndOfData
         }
-        return storedElements[index]
+        switch storage {
+        case .decoded(let elements):
+            return elements[index]
+        case .packed(let bytes, _):
+            var offset = bytes.startIndex
+            for currentIndex in 0...index {
+                let typeCode = bytes[offset]
+                offset += 1
+                let element = try Self.decodeElement(
+                    typeCode: typeCode,
+                    bytes: bytes,
+                    at: &offset
+                )
+                if currentIndex == index {
+                    return element
+                }
+            }
+            throw TupleError.unexpectedEndOfData
+        }
     }
 
     /// Access a decoded element without runtime type casting.
@@ -79,22 +132,41 @@ public struct Tuple: Sendable, Hashable, Equatable {
         if let range {
             requestedRange = range
         } else {
-            requestedRange = 0..<storedElements.count
+            requestedRange = 0..<count
         }
         guard requestedRange.lowerBound >= 0,
               requestedRange.upperBound >= requestedRange.lowerBound,
-              requestedRange.upperBound <= storedElements.count else {
+              requestedRange.upperBound <= count else {
             throw TupleError.invalidElementRange(
                 lowerBound: requestedRange.lowerBound,
                 upperBound: requestedRange.upperBound,
-                count: storedElements.count
+                count: count
             )
         }
 
         var result: [any TupleElement] = []
         result.reserveCapacity(requestedRange.count)
-        for index in requestedRange {
-            result.append(storedElements[index])
+        switch storage {
+        case .decoded(let elements):
+            for index in requestedRange {
+                result.append(elements[index])
+            }
+        case .packed(let bytes, _):
+            var offset = bytes.startIndex
+            var index = 0
+            while index < requestedRange.upperBound {
+                let typeCode = bytes[offset]
+                offset += 1
+                let element = try Self.decodeElement(
+                    typeCode: typeCode,
+                    bytes: bytes,
+                    at: &offset
+                )
+                if requestedRange.contains(index) {
+                    result.append(element)
+                }
+                index += 1
+            }
         }
         return result
     }
@@ -114,6 +186,9 @@ public struct Tuple: Sendable, Hashable, Equatable {
 
     /// Encode all elements into a byte array.
     public func pack() -> ByteString {
+        if case .packed(let bytes, _) = storage {
+            return bytes
+        }
         var measuringSink = TupleEncodingSink(measuringFrom: 0)
         encodePacked(to: &measuringSink)
         let byteCount = measuringSink.byteCount
@@ -125,8 +200,15 @@ public struct Tuple: Sendable, Hashable, Equatable {
     }
 
     package func encodePacked(to sink: inout TupleEncodingSink) {
-        for element in storedElements {
-            element.encodeTuple(to: &sink)
+        switch storage {
+        case .decoded(let elements):
+            for element in elements {
+                element.encodeTuple(to: &sink)
+            }
+        case .packed(let bytes, _):
+            bytes.withUnsafeBytes { source in
+                sink.writeBytes(source)
+            }
         }
     }
 
@@ -146,6 +228,9 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// Number of bytes produced by `pack()` without allocating the packed
     /// representation.
     public var packedByteCount: Int {
+        if case .packed(let bytes, _) = storage {
+            return bytes.count
+        }
         var sink = TupleEncodingSink(measuringFrom: 0)
         encodePacked(to: &sink)
         return sink.byteCount
@@ -174,22 +259,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// Decode directly into owned tuple storage without first materializing a
     /// separate existential array. Used by subspace scans on the hot key path.
     static func unpackTuple(from bytes: ByteString) throws -> Tuple {
-        var decodedElements: [any TupleElement] = []
-        var offset = bytes.startIndex
-
-        while offset < bytes.endIndex {
-            let typeCode = bytes[offset]
-            offset += 1
-            decodedElements.append(
-                try decodeElement(
-                    typeCode: typeCode,
-                    bytes: bytes,
-                    at: &offset
-                )
-            )
-        }
-
-        return Tuple(decodedElements: decodedElements)
+        try Tuple(packed: bytes)
     }
 
     /// Decode a single element based on the type code and update the offset.
@@ -296,7 +366,7 @@ public struct Tuple: Sendable, Hashable, Equatable {
                     } else {
                         innerBytes = bytes[start..<end]
                     }
-                    return Tuple(try unpack(from: innerBytes))
+                    return try Tuple(packed: innerBytes)
                 }
             } else {
                 decodedCount += 1
@@ -339,13 +409,49 @@ extension Tuple {
 extension Tuple {
     /// Return a new Tuple with an element appended.
     public func appending(_ element: any TupleElement) -> Tuple {
-        var appendedElements = storedElements
-        appendedElements.append(element)
-        return Tuple(decodedElements: appendedElements)
+        let existingBytes = pack()
+        var measuringSink = TupleEncodingSink(measuringFrom: 0)
+        element.encodeTuple(to: &measuringSink)
+        let appendedByteCount = measuringSink.byteCount
+        let (resultCount, overflow) = existingBytes.count
+            .addingReportingOverflow(appendedByteCount)
+        precondition(!overflow)
+        let result = ByteString.copying(count: resultCount) { destination in
+            existingBytes.withUnsafeBytes { source in
+                UnsafeMutableRawBufferPointer(
+                    rebasing: destination[..<source.count]
+                ).copyMemory(from: source)
+            }
+            var sink = TupleEncodingSink(
+                buffer: destination,
+                startingAt: existingBytes.count
+            )
+            element.encodeTuple(to: &sink)
+            sink.validateFinalByteCount(resultCount)
+        }
+        return Tuple(packed: result, elementCount: count + 1)
     }
 
     /// Return a new Tuple with all elements of another Tuple appended.
     public func appending(_ other: Tuple) -> Tuple {
-        Tuple(decodedElements: storedElements + other.storedElements)
+        let lhs = pack()
+        let rhs = other.pack()
+        let (resultCount, overflow) = lhs.count.addingReportingOverflow(
+            rhs.count
+        )
+        precondition(!overflow)
+        let result = ByteString.copying(count: resultCount) { destination in
+            lhs.withUnsafeBytes { source in
+                UnsafeMutableRawBufferPointer(
+                    rebasing: destination[..<source.count]
+                ).copyMemory(from: source)
+            }
+            rhs.withUnsafeBytes { source in
+                UnsafeMutableRawBufferPointer(
+                    rebasing: destination[lhs.count..<resultCount]
+                ).copyMemory(from: source)
+            }
+        }
+        return Tuple(packed: result, elementCount: count + other.count)
     }
 }
