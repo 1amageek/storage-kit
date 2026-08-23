@@ -1,4 +1,5 @@
 import DatabaseTypes
+
 /// Read and mutation access to one storage transaction.
 ///
 /// Higher-level runtimes use this capability without acquiring authority to
@@ -20,49 +21,13 @@ import DatabaseTypes
 ///
 /// `atomicOp` must be implemented by every backend. Backends that support
 /// versionstamp mutations materialize them with the transaction's commit version.
-public protocol TransactionAccess: Sendable {
+public protocol TransactionAccess: TransactionReadAccess {
 
     /// Optional semantics implemented by this concrete backend.
     var capabilities: TransactionCapabilities { get }
 
     /// Physical compaction access when the concrete backend supports it.
     var compaction: StorageCompactionAccess? { get }
-
-    // MARK: - Read
-
-    /// Get the value for a key (returns nil if the key does not exist).
-    ///
-    /// - Parameters:
-    ///   - key: The key to retrieve.
-    ///   - snapshot: If true, performs a snapshot read (FDB: does not add to conflict range).
-    func getValue(
-        for key: ByteString,
-        snapshot: Bool
-    ) async throws -> ByteString?
-
-    /// Serializable point read convenience implemented by each backend.
-    func getValue(for key: ByteString) async throws -> ByteString?
-
-    /// Get the key at the position specified by a KeySelector.
-    ///
-    /// - Parameters:
-    ///   - selector: The key selection criteria.
-    ///   - snapshot: If true, performs a snapshot read.
-    func getKey(selector: KeySelector, snapshot: Bool) async throws -> ByteString?
-
-    /// Opens a type-erased cursor without copying backend-owned key/value bytes.
-    ///
-    /// This requirement is the range boundary used through
-    /// `any TransactionAccess`. Concrete backends retain `RangeResult` for
-    /// static dispatch, while framework layers consume this cursor directly.
-    func rangeCursor(
-        from begin: KeySelector,
-        to end: KeySelector,
-        limit: Int,
-        reverse: Bool,
-        snapshot: Bool,
-        streamingMode: StreamingMode
-    ) -> KeyValueCursor
 
     // MARK: - Write
 
@@ -142,8 +107,9 @@ public protocol TransactionAccess: Sendable {
 /// Owns the commit and cancellation lifecycle of one storage transaction.
 ///
 /// Only the component coordinating retries and transaction completion should
-/// receive this capability. Database semantics and index implementations
-/// should depend on `TransactionAccess`.
+/// receive this capability. Database semantics and index implementations that
+/// mutate storage should depend on `TransactionAccess`; read-only index
+/// execution should depend on `TransactionReadAccess`.
 public protocol Transaction: TransactionAccess {
     /// The storage engine instance that owns this transaction.
     var transactionDomain: StorageTransactionDomain { get }
@@ -189,11 +155,6 @@ extension TransactionAccess {
     /// FDB compatible: set option with a string value.
     public func setOption(to value: String, forOption option: TransactionOption) throws {
         try setOption(to: ByteString(utf8: value), forOption: option)
-    }
-
-    /// Serializable key selection convenience.
-    public func getKey(selector: KeySelector) async throws -> ByteString? {
-        try await getKey(selector: selector, snapshot: false)
     }
 }
 
