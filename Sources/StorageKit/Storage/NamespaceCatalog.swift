@@ -7,7 +7,7 @@ public protocol NamespaceCatalog: Sendable {
     /// Lists direct child namespace names under `path`.
     func listNamespaces(
         path: [String],
-        transaction: any TransactionReadAccess
+        transaction: any TransactionAccess
     ) async throws -> [String]
 
     /// Removes the namespace metadata and contents at `path`.

@@ -16,7 +16,7 @@ public struct DeterministicNamespaceResolver: NamespaceResolver, Sendable {
 
     public func resolveExisting(
         path: [String],
-        transaction: any TransactionReadAccess
+        transaction: any TransactionAccess
     ) async throws -> Subspace {
         _ = transaction
         return subspace(for: path)
@@ -24,7 +24,7 @@ public struct DeterministicNamespaceResolver: NamespaceResolver, Sendable {
 
     public func namespaceExists(
         path: [String],
-        transaction: any TransactionReadAccess
+        transaction: any TransactionAccess
     ) async throws -> Bool {
         _ = path
         _ = transaction

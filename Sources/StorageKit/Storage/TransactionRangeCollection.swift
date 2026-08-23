@@ -7,7 +7,7 @@ import DatabaseTypes
 /// the payload copies implied by that result type.
 public enum TransactionRangeCollection {
     public static func collect(
-        using transaction: any TransactionReadAccess,
+        using transaction: any TransactionAccess,
         from begin: KeySelector,
         to end: KeySelector,
         limit: Int = 0,
@@ -45,7 +45,7 @@ public enum TransactionRangeCollection {
     }
 }
 
-public extension TransactionReadAccess {
+public extension TransactionAccess {
     /// Materializes a selector-bounded range at an explicit ownership boundary.
     func collectRange(
         from begin: KeySelector,

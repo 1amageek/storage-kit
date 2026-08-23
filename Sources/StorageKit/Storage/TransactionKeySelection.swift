@@ -4,7 +4,7 @@ import DatabaseTypes
 public enum TransactionKeySelection {
     public static func resolve(
         _ selector: KeySelector,
-        in transaction: any TransactionReadAccess,
+        in transaction: any TransactionAccess,
         snapshot: Bool
     ) async throws -> ByteString? {
         let (nextOffset, overflow) = selector.offset.addingReportingOverflow(1)

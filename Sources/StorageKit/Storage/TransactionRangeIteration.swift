@@ -6,7 +6,7 @@ import DatabaseTypes
 /// duration of each call. No intermediate range collection is materialized.
 public enum TransactionRangeIteration {
     public static func forEach(
-        in transaction: any TransactionReadAccess,
+        in transaction: any TransactionAccess,
         from begin: KeySelector,
         to end: KeySelector,
         limit: Int = 0,
@@ -43,7 +43,7 @@ public enum TransactionRangeIteration {
     }
 }
 
-public extension TransactionReadAccess {
+public extension TransactionAccess {
     /// Streams a range without materializing an owned collection.
     func forEachInRange(
         from begin: KeySelector,

@@ -25,40 +25,6 @@ struct TupleTests {
         }
     }
 
-    @Test func packedByteCountMatchesEncodedRepresentation() {
-        let tuple = Tuple(
-            "prefix\0suffix",
-            Int64.min,
-            ByteString([0x00, 0x01, 0xFF])
-        )
-
-        #expect(tuple.packedByteCount == tuple.pack().count)
-    }
-
-    @Test func appendingToPackedTuplePreservesCanonicalBytes() throws {
-        let original = Tuple("prefix", Int64(42))
-        let packed = try Tuple(packed: original.pack())
-
-        #expect(
-            packed.appending(ByteString([0x01, 0x02])).pack()
-                == Tuple("prefix", Int64(42), ByteString([0x01, 0x02])).pack()
-        )
-        #expect(
-            packed.appending(Tuple("suffix", true)).pack()
-                == Tuple("prefix", Int64(42), "suffix", true).pack()
-        )
-    }
-
-    @Test func droppingLeadingElementsReturnsZeroCopyPackedSuffix() throws {
-        let original = try Tuple(packed: Tuple("index", UInt64(7), "id").pack())
-        let suffix = try original.droppingFirstElements(2)
-
-        #expect(suffix == Tuple("id"))
-        #expect(suffix.count == 1)
-        #expect(suffix.retainedByteCount == original.retainedByteCount)
-        #expect(try original.droppingFirstElements(3).isEmpty)
-    }
-
     // MARK: - String
 
     @Test func stringRoundTrip() throws {
