@@ -330,6 +330,21 @@ struct TupleTests {
         #expect(elements[5] is TupleNil)
     }
 
+    @Test func packedByteCountMatchesMaterializedEncoding() {
+        let tuples = [
+            Tuple(),
+            Tuple("embedded\0string", Int64.min, UInt64.max),
+            Tuple(
+                ByteString([0x00, 0xff, 0x00]),
+                Tuple("nested\0value", Double.pi)
+            ),
+        ]
+
+        for tuple in tuples {
+            #expect(tuple.packedByteCount == tuple.pack().count)
+        }
+    }
+
     @Test func emptyTuple() throws {
         let tuple = Tuple([any TupleElement]())
         let packed = tuple.pack()
