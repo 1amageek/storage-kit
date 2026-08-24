@@ -57,6 +57,10 @@ public struct KeyValueCursor: Sendable {
                 // `next()` has already performed terminal cleanup and preserved
                 // both failures. Do not wrap the same cleanup failure again.
                 throw cleanupError
+            } catch let cleanupError as StorageRangeTerminalCleanupError {
+                // `next()` reached a terminal state before automatic cleanup
+                // failed. There is no iteration failure to combine with it.
+                throw cleanupError
             } catch {
                 let iterationError = error
                 do {
@@ -176,7 +180,7 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
                 state = .finished(error)
                 lifetime.end()
                 boundary.resolve(.failure(error))
-                throw error
+                throw StorageRangeTerminalCleanupError(cleanupError: error)
             }
             return element
         }

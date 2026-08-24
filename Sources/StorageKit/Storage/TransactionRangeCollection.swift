@@ -24,23 +24,9 @@ public enum TransactionRangeCollection {
             snapshot: snapshot,
             streamingMode: streamingMode
         )
-        do {
-            while let row = try await cursor.next() {
-                rows.append(row)
-            }
-        } catch {
-            let iterationError = error
-            do {
-                try await cursor.finish()
-            } catch {
-                throw StorageRangeCleanupError(
-                    iterationError: iterationError,
-                    cleanupError: error
-                )
-            }
-            throw iterationError
+        try await cursor.consume { key, value in
+            rows.append((key, value))
         }
-        try await cursor.finish()
         return rows
     }
 }

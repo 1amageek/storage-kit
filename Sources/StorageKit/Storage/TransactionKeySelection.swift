@@ -27,10 +27,13 @@ public enum TransactionKeySelection {
             snapshot: snapshot,
             streamingMode: .exact
         )
+        let key: ByteString?
         do {
-            let key = try await cursor.next()?.0
-            try await cursor.finish()
-            return key
+            key = try await cursor.next()?.0
+        } catch let cleanupError as StorageRangeTerminalCleanupError {
+            throw cleanupError
+        } catch let cleanupError as StorageRangeCleanupError {
+            throw cleanupError
         } catch {
             let selectionError = error
             do {
@@ -43,5 +46,11 @@ public enum TransactionKeySelection {
             }
             throw selectionError
         }
+        do {
+            try await cursor.finish()
+        } catch {
+            throw StorageRangeTerminalCleanupError(cleanupError: error)
+        }
+        return key
     }
 }

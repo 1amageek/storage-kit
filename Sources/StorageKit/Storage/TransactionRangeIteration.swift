@@ -23,23 +23,7 @@ public enum TransactionRangeIteration {
             snapshot: snapshot,
             streamingMode: streamingMode
         )
-        do {
-            while let (key, value) = try await cursor.next() {
-                try await body(key, value)
-            }
-        } catch {
-            let iterationError = error
-            do {
-                try await cursor.finish()
-            } catch {
-                throw StorageRangeCleanupError(
-                    iterationError: iterationError,
-                    cleanupError: error
-                )
-            }
-            throw iterationError
-        }
-        try await cursor.finish()
+        try await cursor.consume(body)
     }
 }
 

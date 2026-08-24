@@ -185,6 +185,54 @@ struct TransactionRangeCleanupTests {
         #expect(iterationRecorder.finishCount == 1)
     }
 
+    @Test func cursorReportsNaturalExhaustionCleanupFailureSeparately() async {
+        let iterationRecorder = RangeIterationRecorder(finishError: .finish)
+        var cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [],
+                iterationRecorder: iterationRecorder
+            )
+        )
+
+        do {
+            _ = try await cursor.next()
+            Issue.record("Expected terminal cleanup failure")
+        } catch let error as StorageRangeTerminalCleanupError {
+            #expect(error.cleanupError as? RangeCleanupFailure == .finish)
+        } catch {
+            Issue.record(
+                "Expected StorageRangeTerminalCleanupError, got \(error)"
+            )
+        }
+
+        #expect(iterationRecorder.nextCount == 1)
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
+    @Test func cursorConsumptionPreservesTerminalCleanupFailure() async {
+        let iterationRecorder = RangeIterationRecorder(finishError: .finish)
+        var cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [],
+                iterationRecorder: iterationRecorder
+            )
+        )
+
+        do {
+            try await cursor.consume { _, _ in }
+            Issue.record("Expected terminal cleanup failure")
+        } catch let error as StorageRangeTerminalCleanupError {
+            #expect(error.cleanupError as? RangeCleanupFailure == .finish)
+        } catch {
+            Issue.record(
+                "Expected StorageRangeTerminalCleanupError, got \(error)"
+            )
+        }
+
+        #expect(iterationRecorder.nextCount == 1)
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
     @Test func cursorRetainsOwnerUntilNaturalExhaustion() async throws {
         let iterationRecorder = RangeIterationRecorder()
         let lifetimeRecorder = CursorLifetimeRecorder()
