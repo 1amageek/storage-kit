@@ -7,6 +7,12 @@ import DatabaseTypes
 /// and versionstamp requests. Components that only inspect the admitted
 /// transaction view should depend on this protocol.
 public protocol TransactionReadAccess: Sendable {
+    /// The storage engine instance whose physical state this transaction reads.
+    ///
+    /// Read-side caches include this identity in their keys so equal logical
+    /// keys from independent engines can never share process-local state.
+    var transactionDomain: StorageTransactionDomain { get }
+
     /// Gets the value for a key, or `nil` when the key does not exist.
     func getValue(
         for key: ByteString,

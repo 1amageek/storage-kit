@@ -13,6 +13,7 @@ struct TransactionReadAccessTests {
 
             let access: any TransactionReadAccess = transaction
 
+            #expect(access.transactionDomain === transaction.transactionDomain)
             #expect(try await access.getValue(for: [0x01]) == [0xA1])
             #expect(
                 try await access.getKey(

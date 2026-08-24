@@ -111,9 +111,6 @@ public protocol TransactionAccess: TransactionReadAccess {
 /// mutate storage should depend on `TransactionAccess`; read-only index
 /// execution should depend on `TransactionReadAccess`.
 public protocol Transaction: TransactionAccess {
-    /// The storage engine instance that owns this transaction.
-    var transactionDomain: StorageTransactionDomain { get }
-
     /// The authoritative storage failure recorded by this transaction.
     ///
     /// Higher layers use this state after an arbitrary operation error has
