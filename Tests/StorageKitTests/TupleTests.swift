@@ -157,6 +157,39 @@ struct TupleTests {
         }
     }
 
+    @Test("Tuple cursor decodes signed integers without generic materialization")
+    func tupleCursorRequiresInt64() throws {
+        let encoded = Tuple(Int64.min, Int64(0), Int64.max).pack()
+        var cursor = TupleCursor(bytes: encoded)
+
+        #expect(try cursor.requireInt64() == .min)
+        #expect(try cursor.requireInt64() == 0)
+        #expect(try cursor.requireInt64() == .max)
+        #expect(cursor.isAtEnd)
+    }
+
+    @Test("Tuple cursor rejects a non-integer before decoding its payload")
+    func tupleCursorRejectsNonIntegerBeforePayloadDecode() {
+        var bytes = [UInt8](
+            repeating: 0x61,
+            count: 1_024 * 1_024 + 2
+        )
+        bytes[0] = TupleTypeCode.string.rawValue
+        bytes[bytes.count - 1] = 0x00
+        let encoded = ByteString(bytes)
+        var cursor = TupleCursor(bytes: encoded)
+
+        #expect {
+            _ = try cursor.requireInt64()
+        } throws: { error in
+            guard case TupleError.invalidTypeCode(let typeCode) = error else {
+                return false
+            }
+            return typeCode == TupleTypeCode.string.rawValue
+        }
+        #expect(cursor.consumedByteCount == 0)
+    }
+
     // MARK: - Int
 
     @Test func platformIntegerRoundTrip() throws {

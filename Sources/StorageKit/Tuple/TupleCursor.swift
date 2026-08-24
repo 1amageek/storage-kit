@@ -39,6 +39,21 @@ public struct TupleCursor {
         return element
     }
 
+    /// Decodes one signed integer without materializing an existential or
+    /// decoding a payload of an unexpected tuple type.
+    public mutating func requireInt64() throws -> Int64 {
+        guard offset < bytes.endIndex else {
+            throw TupleError.unexpectedEndOfData
+        }
+        let typeCode = bytes[offset]
+        let intZero = TupleTypeCode.intZero.rawValue
+        guard typeCode >= intZero - 9, typeCode <= intZero + 9 else {
+            throw TupleError.invalidTypeCode(typeCode)
+        }
+        offset += 1
+        return try Int64.decodeTuple(from: bytes, at: &offset)
+    }
+
     /// Decodes one bytes element as a view into the retained tuple storage.
     ///
     /// The returned value keeps the source owner alive. Canonical payloads that
