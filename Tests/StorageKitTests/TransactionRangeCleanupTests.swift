@@ -449,6 +449,29 @@ struct TransactionRangeCleanupTests {
         #expect(iterationRecorder.finishCount == 1)
     }
 
+    @Test func preAdvanceValidationPreservesAdmittedAdvanceAndRejectsLaterAdvance() async throws {
+        let iterationRecorder = RangeIterationRecorder()
+        let scope = CursorScopeValidity()
+        var cursor = KeyValueCursor(
+            consuming: ScopeRevokingRows(
+                scope: scope,
+                iterationRecorder: iterationRecorder
+            )
+        ).validatingBeforeAdvance {
+            try scope.validate()
+        }
+
+        let row = try await cursor.next()
+        #expect(row?.0 == [0x01])
+        #expect(row?.1 == [0x11])
+
+        await #expect(throws: RangeCleanupFailure.body) {
+            _ = try await cursor.next()
+        }
+        #expect(iterationRecorder.nextCount == 1)
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
     @Test func repeatedScopeValidationCannotRemoveExistingAuthority() async {
         let iterationRecorder = RangeIterationRecorder()
         let originalScope = CursorScopeValidity()

@@ -11,7 +11,8 @@ public struct KeyValueCursor: Sendable {
 
     private let state: any KeyValueCursorState
     private let lifetime: KeyValueCursorLifetime
-    private let validateScope: (@Sendable () throws -> Void)?
+    private let validateBeforeAdvance: (@Sendable () throws -> Void)?
+    private let validateAfterAdvance: (@Sendable () throws -> Void)?
 
     /// Erases a backend range result while retaining its native buffers.
     public init<Result: TransactionRangeResult>(
@@ -23,7 +24,8 @@ public struct KeyValueCursor: Sendable {
             lifetime: lifetime
         )
         self.lifetime = lifetime
-        self.validateScope = nil
+        self.validateBeforeAdvance = nil
+        self.validateAfterAdvance = nil
     }
 
     /// Returns an unopened cursor whose first advance is governed entirely by
@@ -42,17 +44,20 @@ public struct KeyValueCursor: Sendable {
             lifetime: lifetime
         )
         self.lifetime = lifetime
-        self.validateScope = validateScope
+        self.validateBeforeAdvance = validateScope
+        self.validateAfterAdvance = validateScope
     }
 
     private init(
         state: any KeyValueCursorState,
         lifetime: KeyValueCursorLifetime,
-        validateScope: @escaping @Sendable () throws -> Void
+        validateBeforeAdvance: (@Sendable () throws -> Void)?,
+        validateAfterAdvance: (@Sendable () throws -> Void)?
     ) {
         self.state = state
         self.lifetime = lifetime
-        self.validateScope = validateScope
+        self.validateBeforeAdvance = validateBeforeAdvance
+        self.validateAfterAdvance = validateAfterAdvance
     }
 
     /// Returns a cursor that keeps `owner` alive until terminal cursor cleanup.
@@ -76,19 +81,37 @@ public struct KeyValueCursor: Sendable {
     public consuming func validatingScope(
         _ validate: @escaping @Sendable () throws -> Void
     ) -> KeyValueCursor {
-        let combinedValidation: @Sendable () throws -> Void
-        if let existingValidation = validateScope {
-            combinedValidation = {
-                try existingValidation()
-                try validate()
-            }
-        } else {
-            combinedValidation = validate
-        }
         return KeyValueCursor(
             state: state,
             lifetime: lifetime,
-            validateScope: combinedValidation
+            validateBeforeAdvance: Self.combining(
+                validateBeforeAdvance,
+                with: validate
+            ),
+            validateAfterAdvance: Self.combining(
+                validateAfterAdvance,
+                with: validate
+            )
+        )
+    }
+
+    /// Restricts admission of each advance without invalidating work that has
+    /// already passed validation.
+    ///
+    /// Validation runs before consulting cursor state, including after natural
+    /// exhaustion. A validation failure is terminal and awaits backend cleanup.
+    /// This method does not add a cursor state or materialize key/value buffers.
+    public consuming func validatingBeforeAdvance(
+        _ validate: @escaping @Sendable () throws -> Void
+    ) -> KeyValueCursor {
+        KeyValueCursor(
+            state: state,
+            lifetime: lifetime,
+            validateBeforeAdvance: Self.combining(
+                validateBeforeAdvance,
+                with: validate
+            ),
+            validateAfterAdvance: validateAfterAdvance
         )
     }
 
@@ -97,9 +120,9 @@ public struct KeyValueCursor: Sendable {
     /// Cancellation is terminal. A cursor that has started iteration closes its
     /// backend iterator before cancellation escapes to the caller.
     public mutating func next() async throws -> Element? {
-        if let validateScope {
+        if let validateBeforeAdvance {
             do {
-                try validateScope()
+                try validateBeforeAdvance()
             } catch {
                 return try await finish(afterScopeFailure: error)
             }
@@ -107,9 +130,9 @@ public struct KeyValueCursor: Sendable {
 
         let element = try await state.next()
 
-        if let validateScope {
+        if let validateAfterAdvance {
             do {
-                try validateScope()
+                try validateAfterAdvance()
             } catch {
                 return try await finish(afterScopeFailure: error)
             }
@@ -133,6 +156,19 @@ public struct KeyValueCursor: Sendable {
             )
         }
         throw scopeError
+    }
+
+    private static func combining(
+        _ existing: (@Sendable () throws -> Void)?,
+        with added: @escaping @Sendable () throws -> Void
+    ) -> @Sendable () throws -> Void {
+        guard let existing else {
+            return added
+        }
+        return {
+            try existing()
+            try added()
+        }
     }
 
     /// Consumes the cursor and makes backend cleanup authoritative.
