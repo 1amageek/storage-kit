@@ -735,6 +735,81 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
+    /// Resolves one standard FDB key selector without synthesizing a second
+    /// range boundary. SQL backends cannot represent the arbitrary offset that
+    /// `TransactionKeySelection` uses as an exclusive end selector.
+    private func selectKey(
+        _ selector: KeySelector,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        let nestedWriteCount = try state.withLock { state -> Int in
+            switch state.lifecycle {
+            case .open:
+                return isNested ? state.writeBuffer.count : 0
+            default:
+                throw Self.error(
+                    for: state.lifecycle,
+                    operation: .rangeRead
+                )
+            }
+        }
+        if isNested {
+            guard nestedWriteCount == 0 else {
+                throw Self.invalidOperation(
+                    "Nested PostgreSQL key selection with uncommitted child writes is not supported; "
+                        + "commit or cancel the nested transaction before selecting a key",
+                    operation: .rangeRead
+                )
+            }
+            guard let parent else {
+                throw Self.invalidOperation(
+                    "Nested PostgreSQL key selection has no parent transaction",
+                    operation: .rangeRead
+                )
+            }
+            return try await parent.selectKey(
+                selector,
+                snapshot: snapshot
+            )
+        }
+
+        let boundary = try SQLRangeBoundary.begin(selector)
+        do {
+            let connection = try await ensureConnection()
+            try await flushWriteBuffer(connection: connection)
+
+            var bindValues: [ByteString] = []
+            let clause = Self.boundaryClause(
+                boundary,
+                tableName: tableName
+            ) { key in
+                bindValues.append(key)
+                return "$\(bindValues.count)"
+            }
+            let sql = "SELECT key FROM \(tableName) WHERE \(clause) "
+                + "ORDER BY key ASC LIMIT 1"
+            var bindings = PostgresBindings()
+            for value in bindValues {
+                bindings.append(
+                    PostgreSQLBindingBytes.copyToOwnedBuffer(value),
+                    context: .default
+                )
+            }
+            let rows = try await connection.query(
+                PostgresQuery(unsafeSQL: sql, binds: bindings),
+                logger: logger
+            )
+            for try await keyBuffer in rows.decode(ByteBuffer.self) {
+                return resultBytesFactory.makeByteString(
+                    retaining: keyBuffer
+                )
+            }
+            return nil
+        } catch {
+            throw markFailed(error, operation: .rangeRead)
+        }
+    }
+
     /// Render a resolved range boundary into a SQL predicate, appending its bind.
     ///
     /// The `'\x'::bytea` fallback is the empty byte string (the minimum key):
@@ -750,7 +825,9 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             return "key \(op) \(placeholder(key))"
         case .resolvedSubquery(let op, let subqueryOp, let key):
             return "key \(op) COALESCE("
-                + "(SELECT max(key) FROM \(tableName) WHERE key \(subqueryOp) \(placeholder(key))), "
+                + "(SELECT key FROM \(tableName) "
+                + "WHERE key \(subqueryOp) \(placeholder(key)) "
+                + "ORDER BY key DESC LIMIT 1), "
                 + "'\\x'::bytea)"
         }
     }
@@ -1512,11 +1589,7 @@ extension PostgreSQLStorageTransaction {
         selector: KeySelector,
         snapshot: Bool
     ) async throws -> ByteString? {
-        try await TransactionKeySelection.resolve(
-            selector,
-            in: self,
-            snapshot: snapshot
-        )
+        try await selectKey(selector, snapshot: snapshot)
     }
 
     public func getValue(for key: ByteString) async throws -> ByteString? {

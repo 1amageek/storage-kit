@@ -12,8 +12,8 @@ import DatabaseTypes
 /// |---|---|---|
 /// | firstGreaterOrEqual(k) | (orEqual: false, offset: 1) | `key >= k` |
 /// | firstGreaterThan(k) | (orEqual: true, offset: 1) | `key > k` |
-/// | lastLessOrEqual(k) | (orEqual: true, offset: 0) | `key >= (SELECT max(key) WHERE key <= k)` |
-/// | lastLessThan(k) | (orEqual: false, offset: 0) | `key >= (SELECT max(key) WHERE key < k)` |
+/// | lastLessOrEqual(k) | (orEqual: true, offset: 0) | `key >= (SELECT last key WHERE key <= k)` |
+/// | lastLessThan(k) | (orEqual: false, offset: 0) | `key >= (SELECT last key WHERE key < k)` |
 ///
 /// ## Mapping (end boundary — result keys are `<` the resolved key, EXCLUSIVE)
 ///
@@ -21,8 +21,8 @@ import DatabaseTypes
 /// |---|---|---|
 /// | firstGreaterOrEqual(k) | (orEqual: false, offset: 1) | `key < k` |
 /// | firstGreaterThan(k) | (orEqual: true, offset: 1) | `key <= k` |
-/// | lastLessOrEqual(k) | (orEqual: true, offset: 0) | `key < (SELECT max(key) WHERE key <= k)` |
-/// | lastLessThan(k) | (orEqual: false, offset: 0) | `key < (SELECT max(key) WHERE key < k)` |
+/// | lastLessOrEqual(k) | (orEqual: true, offset: 0) | `key < (SELECT last key WHERE key <= k)` |
+/// | lastLessThan(k) | (orEqual: false, offset: 0) | `key < (SELECT last key WHERE key < k)` |
 ///
 /// The subquery cases follow FDB semantics: the selector resolves to a concrete
 /// key first, then the range includes (begin) or excludes (end) that key.
@@ -39,7 +39,7 @@ import DatabaseTypes
 package enum SQLRangeBoundary: Sendable, Hashable {
     /// `key {op} $key` — the selector key is compared directly.
     case direct(op: String, key: ByteString)
-    /// `key {op} COALESCE((SELECT max(key) FROM t WHERE key {subqueryOp} $key), <empty>)`
+    /// `key {op} COALESCE((SELECT last key WHERE key {subqueryOp} $key), <empty>)`
     /// — the selector is resolved to a concrete key by a scalar subquery first.
     case resolvedSubquery(op: String, subqueryOp: String, key: ByteString)
 

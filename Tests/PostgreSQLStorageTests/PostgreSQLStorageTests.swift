@@ -144,6 +144,54 @@ struct PostgreSQLStorageTests {
         #expect(results[2].0 == [0x1E])
     }
 
+    @Test func getKeySupportsStandardSelectorsAndReadYourWrites() async throws {
+        let engine = try await makeEngine()
+        defer { await engine.waitUntilShutdown() }
+
+        let selected = try await engine.withTransaction { transaction in
+            try transaction.setValue([1], for: [0x10])
+            try transaction.setValue([2], for: [0x20])
+            try transaction.setValue([3], for: [0x30])
+            let firstGreaterOrEqual = try await transaction.getKey(
+                selector: .firstGreaterOrEqual([0x18]),
+                snapshot: false
+            )
+            let firstGreaterThan = try await transaction.getKey(
+                selector: .firstGreaterThan([0x20]),
+                snapshot: false
+            )
+            let lastLessOrEqual = try await transaction.getKey(
+                selector: .lastLessOrEqual([0x20]),
+                snapshot: false
+            )
+            let lastLessThan = try await transaction.getKey(
+                selector: .lastLessThan([0x20]),
+                snapshot: false
+            )
+            let resolvedRange = try await transaction.collectRange(
+                from: .lastLessOrEqual([0x20]),
+                to: .lastLessOrEqual([0x30]),
+                limit: 0,
+                reverse: false,
+                snapshot: false,
+                streamingMode: .iterator
+            )
+            return (
+                firstGreaterOrEqual,
+                firstGreaterThan,
+                lastLessOrEqual,
+                lastLessThan,
+                resolvedRange.map(\.0)
+            )
+        }
+
+        #expect(selected.0 == [0x20])
+        #expect(selected.1 == [0x30])
+        #expect(selected.2 == [0x20])
+        #expect(selected.3 == [0x10])
+        #expect(selected.4 == [[0x20]])
+    }
+
     // =========================================================================
     // MARK: - Write Buffer Reverse Scan
     //
