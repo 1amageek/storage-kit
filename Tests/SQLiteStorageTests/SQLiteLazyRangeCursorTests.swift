@@ -74,6 +74,32 @@ struct SQLiteLazyRangeCursorTests {
         try await transaction.cancel()
     }
 
+    @Test("Returned row bytes outlive cursor and transaction cleanup")
+    func rowBytesSurviveTerminalCleanup() async throws {
+        let engine = try SQLiteStorageEngine(configuration: .inMemory)
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([0x10, 0x11], for: [0x01])
+            try transaction.setValue([0x20, 0x21], for: [0x02])
+        }
+
+        let transaction = try engine.createTransaction()
+        let baseline = engine.rangeInstrumentation
+        var cursor = transaction.range(
+            begin: [0x00],
+            end: [0xFF]
+        ).makeCursor()
+        let first = try #require(try await cursor.next())
+
+        try await cursor.finish()
+        try await transaction.cancel()
+
+        let measured = engine.rangeInstrumentation
+        #expect(measured.finalizeCount == baseline.finalizeCount + 1)
+        #expect(measured.openCursorCount == 0)
+        #expect(first.0 == [0x01])
+        #expect(first.1 == [0x10, 0x11])
+    }
+
     @Test("Copied cursor values share one cursor and one advancement state")
     func copiedIteratorsShareOneCursor() async throws {
         let engine = try SQLiteStorageEngine(configuration: .inMemory)

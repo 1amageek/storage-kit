@@ -283,6 +283,210 @@ struct TransactionRangeCleanupTests {
         #expect(lifetimeRecorder.releaseCount == 1)
     }
 
+    @Test func cancelledAdvanceFinishesAndReleasesOwnerExactlyOnce() async throws {
+        let iterationRecorder = RangeIterationRecorder()
+        let lifetimeRecorder = CursorLifetimeRecorder()
+        let cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [([0x01], [0x11]), ([0x02], [0x12])],
+                iterationRecorder: iterationRecorder
+            )
+        ).retainingLifetime(
+            of: CursorLifetimeOwner(recorder: lifetimeRecorder)
+        )
+        var primingCursor = cursor
+        _ = try await primingCursor.next()
+        let cancelledAdvance = Task {
+            var cancelledCursor = cursor
+            withUnsafeCurrentTask { task in
+                task?.cancel()
+            }
+            await #expect(throws: CancellationError.self) {
+                _ = try await cancelledCursor.next()
+            }
+        }
+        try await cancelledAdvance.value
+
+        withExtendedLifetime(cursor) {
+            #expect(iterationRecorder.finishCount == 1)
+            #expect(lifetimeRecorder.releaseCount == 1)
+        }
+    }
+
+    @Test func cancellationDuringAdvanceIsTerminalAfterBackendReturns() async {
+        let iterationGate = RangeIterationGate()
+        let iterationRecorder = RangeIterationRecorder()
+        let lifetimeRecorder = CursorLifetimeRecorder()
+        let cursor = KeyValueCursor(
+            consuming: SuspendedRows(
+                iterationGate: iterationGate,
+                iterationRecorder: iterationRecorder
+            )
+        ).retainingLifetime(
+            of: CursorLifetimeOwner(recorder: lifetimeRecorder)
+        )
+        var advancingCursor = cursor
+        let advance = Task {
+            try await advancingCursor.next()
+        }
+        await iterationGate.waitUntilAdvanceStarts()
+
+        advance.cancel()
+        iterationGate.resumeAdvance(with: ([0x01], [0x11]))
+
+        do {
+            _ = try await advance.value
+            Issue.record("Expected cancellation to terminate the cursor")
+        } catch is CancellationError {
+        } catch {
+            Issue.record("Expected CancellationError, got \(error)")
+        }
+        withExtendedLifetime(cursor) {
+            #expect(iterationRecorder.finishCount == 1)
+            #expect(lifetimeRecorder.releaseCount == 1)
+        }
+    }
+
+    @Test func cancelledAdvancePreservesCleanupFailure() async throws {
+        let iterationRecorder = RangeIterationRecorder(finishError: .finish)
+        let lifetimeRecorder = CursorLifetimeRecorder()
+        let cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [([0x01], [0x11]), ([0x02], [0x12])],
+                iterationRecorder: iterationRecorder
+            )
+        ).retainingLifetime(
+            of: CursorLifetimeOwner(recorder: lifetimeRecorder)
+        )
+        var primingCursor = cursor
+        _ = try await primingCursor.next()
+        let cancelledAdvance = Task {
+            var cancelledCursor = cursor
+            withUnsafeCurrentTask { task in
+                task?.cancel()
+            }
+            do {
+                _ = try await cancelledCursor.next()
+                Issue.record("Expected cancellation and cleanup failure")
+            } catch let error as StorageRangeCleanupError {
+                #expect(error.iterationError is CancellationError)
+                #expect(error.cleanupError as? RangeCleanupFailure == .finish)
+            } catch {
+                Issue.record("Expected StorageRangeCleanupError, got \(error)")
+            }
+        }
+        try await cancelledAdvance.value
+
+        withExtendedLifetime(cursor) {
+            #expect(iterationRecorder.finishCount == 1)
+            #expect(lifetimeRecorder.releaseCount == 1)
+        }
+    }
+
+    @Test func iterationFailureReleasesOwnerExactlyOnce() async {
+        let iterationRecorder = RangeIterationRecorder()
+        let lifetimeRecorder = CursorLifetimeRecorder()
+        var cursor = KeyValueCursor(
+            consuming: FailingRows(iterationRecorder: iterationRecorder)
+        ).retainingLifetime(
+            of: CursorLifetimeOwner(recorder: lifetimeRecorder)
+        )
+
+        await #expect(throws: RangeCleanupFailure.body) {
+            _ = try await cursor.next()
+        }
+
+        withExtendedLifetime(cursor) {
+            #expect(iterationRecorder.finishCount == 1)
+            #expect(lifetimeRecorder.releaseCount == 1)
+        }
+    }
+
+    @Test func returnedRowBuffersOutliveCursorCleanupWithoutCopying() async throws {
+        let cursorLifetimeRecorder = CursorLifetimeRecorder()
+        let keyLifetimeRecorder = CursorLifetimeRecorder()
+        let valueLifetimeRecorder = CursorLifetimeRecorder()
+        let fixture = makeOwnedRowCursor(
+            key: [0x01, 0x02, 0x03],
+            value: [0x11, 0x12, 0x13],
+            cursorLifetimeRecorder: cursorLifetimeRecorder,
+            keyLifetimeRecorder: keyLifetimeRecorder,
+            valueLifetimeRecorder: valueLifetimeRecorder
+        )
+        var cursor = fixture.cursor
+        var row = try await cursor.next()
+        try await cursor.finish()
+
+        withExtendedLifetime(cursor) {
+            #expect(cursorLifetimeRecorder.releaseCount == 1)
+            #expect(keyLifetimeRecorder.releaseCount == 0)
+            #expect(valueLifetimeRecorder.releaseCount == 0)
+            #expect(row?.0 == [0x01, 0x02, 0x03])
+            #expect(row?.1 == [0x11, 0x12, 0x13])
+            #expect(byteAddress(of: row?.0) == fixture.keyAddress)
+            #expect(byteAddress(of: row?.1) == fixture.valueAddress)
+        }
+
+        row = nil
+        #expect(keyLifetimeRecorder.releaseCount == 1)
+        #expect(valueLifetimeRecorder.releaseCount == 1)
+    }
+
+    @Test func selectedKeyOutlivesCursorCleanupWithoutCopying() async throws {
+        let cursorLifetimeRecorder = CursorLifetimeRecorder()
+        let keyLifetimeRecorder = CursorLifetimeRecorder()
+        let fixture = makeOwnedKeyCursor(
+            key: [0x01, 0x02, 0x03],
+            cursorLifetimeRecorder: cursorLifetimeRecorder,
+            keyLifetimeRecorder: keyLifetimeRecorder
+        )
+        var selectedKey: ByteString? = try await TransactionKeySelection.resolve(
+            .firstGreaterOrEqual([0x01]),
+            in: ScriptedReadAccess(
+                cursor: fixture.cursor
+            ),
+            snapshot: false
+        )
+
+        #expect(cursorLifetimeRecorder.releaseCount == 1)
+        #expect(keyLifetimeRecorder.releaseCount == 0)
+        #expect(selectedKey == [0x01, 0x02, 0x03])
+        let selectedAddress = try #require(
+            selectedKey?.withUnsafeBytes {
+                $0.baseAddress.map(UInt.init(bitPattern:))
+            }
+        )
+        #expect(selectedAddress == fixture.keyAddress)
+
+        selectedKey = nil
+        #expect(keyLifetimeRecorder.releaseCount == 1)
+    }
+
+    @Test func keySelectionFailureReleasesCursorOwnerExactlyOnce() async {
+        let iterationRecorder = RangeIterationRecorder()
+        let lifetimeRecorder = CursorLifetimeRecorder()
+        let access = ScriptedReadAccess(
+            cursor: KeyValueCursor(
+                consuming: FailingRows(iterationRecorder: iterationRecorder)
+            ).retainingLifetime(
+                of: CursorLifetimeOwner(recorder: lifetimeRecorder)
+            )
+        )
+
+        await #expect(throws: RangeCleanupFailure.body) {
+            _ = try await TransactionKeySelection.resolve(
+                .firstGreaterOrEqual([0x01]),
+                in: access,
+                snapshot: false
+            )
+        }
+
+        withExtendedLifetime(access) {
+            #expect(iterationRecorder.finishCount == 1)
+            #expect(lifetimeRecorder.releaseCount == 1)
+        }
+    }
+
 }
 
 private enum RangeCleanupFailure: Error, Equatable, Sendable {
@@ -341,6 +545,140 @@ private final class CursorLifetimeOwner: Sendable {
 
     deinit {
         recorder.recordRelease()
+    }
+}
+
+private final class ReleaseTrackedBytesOwner: ByteStringOwner, Sendable {
+    let count: Int
+
+    private let bytes: [UInt8]
+    private let recorder: CursorLifetimeRecorder
+
+    init(bytes: [UInt8], recorder: CursorLifetimeRecorder) {
+        self.bytes = bytes
+        self.count = bytes.count
+        self.recorder = recorder
+    }
+
+    deinit {
+        recorder.recordRelease()
+    }
+
+    func borrowBytes(
+        _ body: (UnsafeRawBufferPointer) throws -> Void
+    ) rethrows {
+        try bytes.withUnsafeBytes(body)
+    }
+}
+
+private struct ScriptedReadAccess: TransactionReadAccess {
+    let transactionDomain = StorageTransactionDomain()
+    let cursor: KeyValueCursor
+
+    func getValue(
+        for key: ByteString,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        nil
+    }
+
+    func getValue(for key: ByteString) async throws -> ByteString? {
+        nil
+    }
+
+    func getKey(
+        selector: KeySelector,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        nil
+    }
+
+    func rangeCursor(
+        from begin: KeySelector,
+        to end: KeySelector,
+        limit: Int,
+        reverse: Bool,
+        snapshot: Bool,
+        streamingMode: StreamingMode
+    ) -> KeyValueCursor {
+        cursor
+    }
+}
+
+private struct OwnedKeyCursorFixture: Sendable {
+    let cursor: KeyValueCursor
+    let keyAddress: UInt?
+}
+
+private struct OwnedRowCursorFixture: Sendable {
+    let cursor: KeyValueCursor
+    let keyAddress: UInt?
+    let valueAddress: UInt?
+}
+
+private func makeOwnedKeyCursor(
+    key: [UInt8],
+    cursorLifetimeRecorder: CursorLifetimeRecorder,
+    keyLifetimeRecorder: CursorLifetimeRecorder
+) -> OwnedKeyCursorFixture {
+    let key = ByteString(
+        retaining: ReleaseTrackedBytesOwner(
+            bytes: key,
+            recorder: keyLifetimeRecorder
+        )
+    )
+    let keyAddress = key.withUnsafeBytes {
+        $0.baseAddress.map(UInt.init(bitPattern:))
+    }
+    return OwnedKeyCursorFixture(
+        cursor: KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [(key, [0x11])],
+                iterationRecorder: RangeIterationRecorder()
+            )
+        ).retainingLifetime(
+            of: CursorLifetimeOwner(recorder: cursorLifetimeRecorder)
+        ),
+        keyAddress: keyAddress
+    )
+}
+
+private func makeOwnedRowCursor(
+    key: [UInt8],
+    value: [UInt8],
+    cursorLifetimeRecorder: CursorLifetimeRecorder,
+    keyLifetimeRecorder: CursorLifetimeRecorder,
+    valueLifetimeRecorder: CursorLifetimeRecorder
+) -> OwnedRowCursorFixture {
+    let key = ByteString(
+        retaining: ReleaseTrackedBytesOwner(
+            bytes: key,
+            recorder: keyLifetimeRecorder
+        )
+    )
+    let value = ByteString(
+        retaining: ReleaseTrackedBytesOwner(
+            bytes: value,
+            recorder: valueLifetimeRecorder
+        )
+    )
+    return OwnedRowCursorFixture(
+        cursor: KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [(key, value)],
+                iterationRecorder: RangeIterationRecorder()
+            )
+        ).retainingLifetime(
+            of: CursorLifetimeOwner(recorder: cursorLifetimeRecorder)
+        ),
+        keyAddress: byteAddress(of: key),
+        valueAddress: byteAddress(of: value)
+    )
+}
+
+private func byteAddress(of bytes: ByteString?) -> UInt? {
+    bytes?.withUnsafeBytes {
+        $0.baseAddress.map(UInt.init(bitPattern:))
     }
 }
 

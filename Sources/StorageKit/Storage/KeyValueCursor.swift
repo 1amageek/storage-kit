@@ -36,6 +36,9 @@ public struct KeyValueCursor: Sendable {
     }
 
     /// Advances this single-consumer cursor.
+    ///
+    /// Cancellation is terminal. A cursor that has started iteration closes its
+    /// backend iterator before cancellation escapes to the caller.
     public mutating func next() async throws -> Element? {
         try await state.next()
     }
@@ -128,14 +131,27 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
     }
 
     func next() async throws -> KeyValueCursor.Element? {
-        try ensureStorageTaskIsActive()
-
         var cursor: Result.Cursor
         switch state {
         case .unopened(let result):
+            do {
+                try ensureStorageTaskIsActive()
+            } catch {
+                state = .finished(nil)
+                lifetime.end()
+                throw error
+            }
             cursor = result.makeCursor()
         case .ready(let storedCursor):
             cursor = storedCursor
+            do {
+                try ensureStorageTaskIsActive()
+            } catch {
+                try await finishReadyCursor(
+                    &cursor,
+                    after: error
+                )
+            }
         case .advancing:
             throw concurrentOperationError("Concurrent cursor advance")
         case .finishing:
@@ -151,6 +167,7 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
         let element: KeyValueCursor.Element?
         do {
             element = try await cursor.next()
+            try ensureStorageTaskIsActive()
         } catch {
             let iterationError = error
             do {
@@ -188,6 +205,29 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
         state = .ready(cursor)
         boundary.resolve(.success(()))
         return element
+    }
+
+    private func finishReadyCursor(
+        _ cursor: inout Result.Cursor,
+        after iterationError: any Error
+    ) async throws -> Never {
+        let boundary = CursorFinishBoundary()
+        state = .finishing(boundary)
+        do {
+            try await cursor.finish(isolation: self)
+            state = .finished(nil)
+            lifetime.end()
+            boundary.resolve(.success(()))
+        } catch {
+            state = .finished(error)
+            lifetime.end()
+            boundary.resolve(.failure(error))
+            throw StorageRangeCleanupError(
+                iterationError: iterationError,
+                cleanupError: error
+            )
+        }
+        throw iterationError
     }
 
     func finish() async throws {

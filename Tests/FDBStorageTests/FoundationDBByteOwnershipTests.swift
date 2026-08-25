@@ -227,6 +227,46 @@ struct FoundationDBByteOwnershipTests {
         returnedRow = (ByteString(), ByteString())
     }
 
+    @Test("Range row owners outlive cursor cleanup and release with the row")
+    func rangeRowOwnersFollowReturnedRowLifetime() async throws {
+        let keyReleaseRecorder = ByteReleaseRecorder()
+        let valueReleaseRecorder = ByteReleaseRecorder()
+        let backend = RecordingTransaction(
+            rangePages: [
+                makeReleaseTrackedRangeBatch(
+                    keyReleaseRecorder: keyReleaseRecorder,
+                    valueReleaseRecorder: valueReleaseRecorder
+                )
+            ]
+        )
+        let transaction = try FDBStorageTransaction(
+            backend,
+            transactionDomain: StorageTransactionDomain()
+        )
+        let range = transaction.getRange(
+            from: .firstGreaterOrEqual([0x00]),
+            to: .firstGreaterOrEqual([0xFF]),
+            limit: 0,
+            reverse: false,
+            snapshot: true,
+            streamingMode: .iterator
+        )
+        var cursor: FDBStorageRangeResult.Cursor? = range.makeCursor()
+        var row = try await cursor?.next()
+
+        try await cursor?.finish()
+        cursor = nil
+
+        #expect(!keyReleaseRecorder.wasReleased)
+        #expect(!valueReleaseRecorder.wasReleased)
+        #expect(row?.0 == [0x31, 0x32])
+        #expect(row?.1 == [0x41, 0x42, 0x43])
+
+        row = nil
+        #expect(keyReleaseRecorder.wasReleased)
+        #expect(valueReleaseRecorder.wasReleased)
+    }
+
     @Test("Oversized StorageKit inputs fail before borrowing or dispatch")
     func oversizedInputsFailBeforeBorrowingOrDispatch() throws {
         let owner = OversizedBorrowCountingStorageBytesOwner(
@@ -576,6 +616,31 @@ private final class ByteReleaseRecorder: Sendable {
     func recordRelease() {
         state.withLock { $0 = true }
     }
+}
+
+private func makeReleaseTrackedRangeBatch(
+    keyReleaseRecorder: ByteReleaseRecorder,
+    valueReleaseRecorder: ByteReleaseRecorder
+) -> RangeBatch {
+    RangeBatch(
+        records: [
+            FDB.KeyValue(
+                key: ByteString(
+                    retaining: ReleaseTrackedByteStringOwner(
+                        bytes: [0x31, 0x32],
+                        releaseRecorder: keyReleaseRecorder
+                    )
+                ),
+                value: ByteString(
+                    retaining: ReleaseTrackedByteStringOwner(
+                        bytes: [0x41, 0x42, 0x43],
+                        releaseRecorder: valueReleaseRecorder
+                    )
+                )
+            )
+        ],
+        hasMore: false
+    )
 }
 
 private final class OversizedBorrowCountingStorageBytesOwner: ByteStringOwner, Sendable {
