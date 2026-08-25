@@ -62,8 +62,35 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     private let runTask: Task<Void, Never>
     private let transactionDomain = StorageTransactionDomain()
     private let storageLifecycle = StorageEngineLifecycle()
+    private let resultBytesFactory: PostgreSQLResultBytesFactory
 
-    public init(configuration: PostgreSQLConfiguration) async throws {
+    public convenience init(
+        configuration: PostgreSQLConfiguration
+    ) async throws {
+        try await self.init(
+            configuration: configuration,
+            resultBytesFactory: .production
+        )
+    }
+
+    /// Internal composition point for integration evidence from real queries.
+    convenience init(
+        configuration: PostgreSQLConfiguration,
+        resultBytesLifecycleObserver:
+            any PostgreSQLResultBytesLifecycleObserver
+    ) async throws {
+        try await self.init(
+            configuration: configuration,
+            resultBytesFactory: PostgreSQLResultBytesFactory(
+                lifecycleObserver: resultBytesLifecycleObserver
+            )
+        )
+    }
+
+    private init(
+        configuration: PostgreSQLConfiguration,
+        resultBytesFactory: PostgreSQLResultBytesFactory
+    ) async throws {
         // Validate the table name before constructing any SQL. The name is
         // interpolated into DDL/DML text, so an invalid identifier must fail
         // loudly here rather than corrupt a query downstream.
@@ -71,6 +98,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
 
         self.configuration = configuration
         self.logger = configuration.backgroundLogger
+        self.resultBytesFactory = resultBytesFactory
         self.client = PostgresClient(
             configuration: configuration.clientConfiguration,
             backgroundLogger: configuration.backgroundLogger
@@ -212,7 +240,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                 beginStatement: configuration.beginStatement,
                 tableName: configuration.tableName,
                 logger: logger,
-                transactionDomain: transactionDomain
+                transactionDomain: transactionDomain,
+                resultBytesFactory: resultBytesFactory
             )
         }
     }
@@ -248,7 +277,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                     connection: conn,
                     tableName: configuration.tableName,
                     logger: logger,
-                    transactionDomain: transactionDomain
+                    transactionDomain: transactionDomain,
+                    resultBytesFactory: resultBytesFactory
                 )
 
                 return try await ActiveTransactionContext

@@ -11,6 +11,7 @@ public struct KeyValueCursor: Sendable {
 
     private let state: any KeyValueCursorState
     private let lifetime: KeyValueCursorLifetime
+    private let validateScope: (@Sendable () throws -> Void)?
 
     /// Erases a backend range result while retaining its native buffers.
     public init<Result: TransactionRangeResult>(
@@ -22,6 +23,36 @@ public struct KeyValueCursor: Sendable {
             lifetime: lifetime
         )
         self.lifetime = lifetime
+        self.validateScope = nil
+    }
+
+    /// Returns an unopened cursor whose first advance is governed entirely by
+    /// `validateScope`.
+    ///
+    /// This is used by nonthrowing transaction cursor factories when their
+    /// caller-owned read scope has already ended. It creates no backend cursor;
+    /// the validation failure is reported by `next()` through the ordinary
+    /// cursor error contract.
+    public init(
+        validatingScope validateScope: @escaping @Sendable () throws -> Void
+    ) {
+        let lifetime = KeyValueCursorLifetime()
+        self.state = TypedKeyValueCursorState(
+            result: EmptyTransactionRangeResult(),
+            lifetime: lifetime
+        )
+        self.lifetime = lifetime
+        self.validateScope = validateScope
+    }
+
+    private init(
+        state: any KeyValueCursorState,
+        lifetime: KeyValueCursorLifetime,
+        validateScope: @escaping @Sendable () throws -> Void
+    ) {
+        self.state = state
+        self.lifetime = lifetime
+        self.validateScope = validateScope
     }
 
     /// Returns a cursor that keeps `owner` alive until terminal cursor cleanup.
@@ -35,17 +66,73 @@ public struct KeyValueCursor: Sendable {
         return self
     }
 
+    /// Restricts iteration to a caller-owned scope without adding another
+    /// cursor state or materializing backend-owned key/value buffers.
+    ///
+    /// Validation runs before and after every advance. A validation failure is
+    /// terminal and awaits the same backend cursor's cleanup before escaping.
+    /// Explicit `finish()` remains valid after the scope ends because cleanup
+    /// is not a read capability.
+    public consuming func validatingScope(
+        _ validate: @escaping @Sendable () throws -> Void
+    ) -> KeyValueCursor {
+        let combinedValidation: @Sendable () throws -> Void
+        if let existingValidation = validateScope {
+            combinedValidation = {
+                try existingValidation()
+                try validate()
+            }
+        } else {
+            combinedValidation = validate
+        }
+        return KeyValueCursor(
+            state: state,
+            lifetime: lifetime,
+            validateScope: combinedValidation
+        )
+    }
+
     /// Advances this single-consumer cursor.
     ///
     /// Cancellation is terminal. A cursor that has started iteration closes its
     /// backend iterator before cancellation escapes to the caller.
     public mutating func next() async throws -> Element? {
-        try await state.next()
+        if let validateScope {
+            do {
+                try validateScope()
+            } catch {
+                return try await finish(afterScopeFailure: error)
+            }
+        }
+
+        let element = try await state.next()
+
+        if let validateScope {
+            do {
+                try validateScope()
+            } catch {
+                return try await finish(afterScopeFailure: error)
+            }
+        }
+        return element
     }
 
     /// Closes the backend iterator and awaits all native cleanup.
     public mutating func finish() async throws {
         try await state.finish()
+    }
+
+    private func finish(afterScopeFailure scopeError: any Error) async throws
+        -> Element? {
+        do {
+            try await state.finish()
+        } catch {
+            throw StorageRangeCleanupError(
+                iterationError: scopeError,
+                cleanupError: error
+            )
+        }
+        throw scopeError
     }
 
     /// Consumes the cursor and makes backend cleanup authoritative.
@@ -94,6 +181,22 @@ public struct KeyValueCursor: Sendable {
             }
         }
         try await finish()
+    }
+}
+
+private struct EmptyTransactionRangeResult: TransactionRangeResult {
+    func makeCursor() -> Cursor {
+        Cursor()
+    }
+
+    struct Cursor: TransactionRangeCursor {
+        mutating func next() async throws -> (ByteString, ByteString)? {
+            nil
+        }
+
+        mutating func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {}
     }
 }
 

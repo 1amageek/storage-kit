@@ -305,7 +305,7 @@ struct TransactionRangeCleanupTests {
                 _ = try await cancelledCursor.next()
             }
         }
-        try await cancelledAdvance.value
+        await cancelledAdvance.value
 
         withExtendedLifetime(cursor) {
             #expect(iterationRecorder.finishCount == 1)
@@ -375,7 +375,7 @@ struct TransactionRangeCleanupTests {
                 Issue.record("Expected StorageRangeCleanupError, got \(error)")
             }
         }
-        try await cancelledAdvance.value
+        await cancelledAdvance.value
 
         withExtendedLifetime(cursor) {
             #expect(iterationRecorder.finishCount == 1)
@@ -400,6 +400,72 @@ struct TransactionRangeCleanupTests {
             #expect(iterationRecorder.finishCount == 1)
             #expect(lifetimeRecorder.releaseCount == 1)
         }
+    }
+
+    @Test func invalidScopeDoesNotOpenBackendCursor() async throws {
+        let iterationRecorder = RangeIterationRecorder()
+        var cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [([0x01], [0x11])],
+                iterationRecorder: iterationRecorder
+            )
+        ).validatingScope {
+            throw RangeCleanupFailure.body
+        }
+
+        await #expect(throws: RangeCleanupFailure.body) {
+            _ = try await cursor.next()
+        }
+        try await cursor.finish()
+
+        #expect(iterationRecorder.nextCount == 0)
+        #expect(iterationRecorder.finishCount == 0)
+    }
+
+    @Test func scopeRevocationCleansUpWithoutCorruptingFailure() async throws {
+        let iterationRecorder = RangeIterationRecorder()
+        let scope = CursorScopeValidity()
+        var cursor = KeyValueCursor(
+            consuming: ScopeRevokingRows(
+                scope: scope,
+                iterationRecorder: iterationRecorder
+            )
+        ).validatingScope {
+            try scope.validate()
+        }
+
+        do {
+            _ = try await cursor.next()
+            Issue.record("Expected scope revocation failure")
+        } catch let error as RangeCleanupFailure {
+            #expect(error == .body)
+        } catch {
+            Issue.record("Expected RangeCleanupFailure, got \(error)")
+        }
+
+        // Cleanup remains a terminal operation rather than a read authority.
+        try await cursor.finish()
+        #expect(iterationRecorder.nextCount == 1)
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
+    @Test func repeatedScopeValidationCannotRemoveExistingAuthority() async {
+        let iterationRecorder = RangeIterationRecorder()
+        let originalScope = CursorScopeValidity()
+        originalScope.revoke()
+        var cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [([0x01], [0x11])],
+                iterationRecorder: iterationRecorder
+            )
+        ).validatingScope {
+            try originalScope.validate()
+        }.validatingScope {}
+
+        await #expect(throws: RangeCleanupFailure.body) {
+            _ = try await cursor.next()
+        }
+        #expect(iterationRecorder.nextCount == 0)
     }
 
     @Test func returnedRowBuffersOutliveCursorCleanupWithoutCopying() async throws {
@@ -533,6 +599,20 @@ private final class CursorLifetimeRecorder: Sendable {
 
     func recordRelease() {
         releases.withLock { $0 += 1 }
+    }
+}
+
+private final class CursorScopeValidity: Sendable {
+    private let valid = Mutex(true)
+
+    func validate() throws {
+        guard valid.withLock({ $0 }) else {
+            throw RangeCleanupFailure.body
+        }
+    }
+
+    func revoke() {
+        valid.withLock { $0 = false }
     }
 }
 
@@ -713,6 +793,32 @@ private struct FinishRecordingRows: TransactionRangeResult {
             if let finishError = iterationRecorder.finishError {
                 throw finishError
             }
+        }
+    }
+}
+
+private struct ScopeRevokingRows: TransactionRangeResult {
+    let scope: CursorScopeValidity
+    let iterationRecorder: RangeIterationRecorder
+
+    func makeCursor() -> Cursor {
+        Cursor(scope: scope, iterationRecorder: iterationRecorder)
+    }
+
+    struct Cursor: TransactionRangeCursor {
+        let scope: CursorScopeValidity
+        let iterationRecorder: RangeIterationRecorder
+
+        mutating func next() async throws -> (ByteString, ByteString)? {
+            iterationRecorder.recordNext()
+            scope.revoke()
+            return ([0x01], [0x11])
+        }
+
+        mutating func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {
+            iterationRecorder.recordFinish()
         }
     }
 }

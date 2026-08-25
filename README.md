@@ -203,7 +203,7 @@ POSTGRES_TEST_DB=storage_kit_test \
 scripts/postgresql-test-harness
 ```
 
-The harness requires exactly 128 successful integration tests, then repeats the
+The harness requires exactly 132 successful integration tests, then repeats the
 same target without service variables and verifies that a missing endpoint is
 an explicit failure rather than an all-skipped success. Static Musl portability
 is checked separately with the command documented in `AGENTS.md`.

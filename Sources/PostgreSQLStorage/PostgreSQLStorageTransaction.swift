@@ -79,6 +79,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     private let state: Mutex<MutableState>
     private let mutationByteMeter: TransactionMutationByteMeter
     private let versionstampCompletion: TransactionVersionstampCompletion
+    private let resultBytesFactory: PostgreSQLResultBytesFactory
 
     /// Maximum rows bound per chunked statement. Each upsert row uses two
     /// parameters, so 1000 rows stays well under PostgreSQL's 65535 limit.
@@ -136,7 +137,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         connection: PostgresConnection,
         tableName: String,
         logger: Logger,
-        transactionDomain: StorageTransactionDomain
+        transactionDomain: StorageTransactionDomain,
+        resultBytesFactory: PostgreSQLResultBytesFactory = .production
     ) {
         self.isNested = false
         self.tableName = tableName
@@ -149,6 +151,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         self.state = Mutex(MutableState(connection: connection))
         self.mutationByteMeter = TransactionMutationByteMeter()
         self.versionstampCompletion = TransactionVersionstampCompletion()
+        self.resultBytesFactory = resultBytesFactory
     }
 
     /// Nested-transaction init (parent owns the connection).
@@ -168,6 +171,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         self.state = Mutex(MutableState())
         self.mutationByteMeter = parent.mutationByteMeter
         self.versionstampCompletion = parent.versionstampCompletion
+        self.resultBytesFactory = parent.resultBytesFactory
     }
 
     /// Lazy-connection init (this transaction owns the connection).
@@ -176,7 +180,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         beginStatement: String,
         tableName: String,
         logger: Logger,
-        transactionDomain: StorageTransactionDomain
+        transactionDomain: StorageTransactionDomain,
+        resultBytesFactory: PostgreSQLResultBytesFactory = .production
     ) {
         self.isNested = false
         self.tableName = tableName
@@ -189,6 +194,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         self.state = Mutex(MutableState())
         self.mutationByteMeter = TransactionMutationByteMeter()
         self.versionstampCompletion = TransactionVersionstampCompletion()
+        self.resultBytesFactory = resultBytesFactory
     }
 
     public func configureMutationByteLimit(maximumBytes: Int?) throws {
@@ -588,7 +594,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             let sql = "SELECT value FROM \(tableName) WHERE key = $1"
             let rows = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
             for try await (value) in rows.decode(ByteBuffer.self) {
-                return ByteString(retaining: PostgreSQLResultBytesOwner(buffer: value))
+                return resultBytesFactory.makeByteString(retaining: value)
             }
             return nil
         } catch {
@@ -718,8 +724,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             for try await (keyBuffer, valueBuffer) in rows.decode((ByteBuffer, ByteBuffer).self) {
                 results.append(
                     (
-                        ByteString(retaining: PostgreSQLResultBytesOwner(buffer: keyBuffer)),
-                        ByteString(retaining: PostgreSQLResultBytesOwner(buffer: valueBuffer))
+                        resultBytesFactory.makeByteString(retaining: keyBuffer),
+                        resultBytesFactory.makeByteString(retaining: valueBuffer)
                     )
                 )
             }
@@ -1468,7 +1474,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         )
         var current: ByteString?
         for try await (value) in rows.decode(ByteBuffer.self) {
-            current = ByteString(retaining: PostgreSQLResultBytesOwner(buffer: value))
+            current = resultBytesFactory.makeByteString(retaining: value)
         }
 
         // Versionstamp mutations throw here (unsupported by non-FDB backends).

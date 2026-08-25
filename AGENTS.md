@@ -33,7 +33,7 @@
   16 database.
 - The harness uses the `storage-kit-Package` Xcode scheme, selects only the
   `PostgreSQLStorageTests` target, injects the snapshot
-  testing runtime and service environment into `.xctestrun`, and requires 128
+  testing runtime and service environment into `.xctestrun`, and requires 132
   tests with zero failures, skips, expected failures, runtime warnings, and
   PostgresClient startup-order warnings.
 - The Xcode package scheme compiles every package target before applying the
