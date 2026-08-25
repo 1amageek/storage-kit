@@ -26,7 +26,8 @@ public struct TupleCursor {
     }
 
     /// Decodes one element while admitting retained allocations before they
-    /// are created.
+    /// are created. The callback is invoked synchronously and is never
+    /// retained.
     public mutating func next(
         admitting allocation: @escaping (Int) throws -> Void
     ) throws -> (any TupleElement)? {
@@ -61,7 +62,8 @@ public struct TupleCursor {
     }
 
     /// Decodes every remaining element directly into one tuple owner while
-    /// admitting retained allocations before they are created.
+    /// admitting retained allocations before they are created. The callback
+    /// is invoked synchronously and is never retained.
     public mutating func remainingTuple(
         admitting allocation: @escaping (Int) throws -> Void
     ) throws -> Tuple {

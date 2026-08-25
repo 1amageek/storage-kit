@@ -47,7 +47,8 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// The callback receives canonical retained-byte increments for decoded
     /// element storage and copied payload owners. Throwing rejects the decode
     /// before the corresponding allocation. The caller owns rollback of any
-    /// increments admitted before a later decoding failure.
+    /// increments admitted before a later decoding failure. It is invoked
+    /// synchronously during this initializer and is never retained.
     public init(
         packed bytes: ByteString,
         admitting allocation: @escaping (Int) throws -> Void
