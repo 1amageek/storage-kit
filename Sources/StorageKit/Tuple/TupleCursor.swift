@@ -22,13 +22,29 @@ public struct TupleCursor {
     }
 
     public mutating func next() throws -> (any TupleElement)? {
+        try next(admitting: nil)
+    }
+
+    /// Decodes one element while admitting retained allocations before they
+    /// are created.
+    public mutating func next(
+        admitting allocation: @escaping (Int) throws -> Void
+    ) throws -> (any TupleElement)? {
+        let optionalAllocation: ((Int) throws -> Void)? = allocation
+        return try next(admitting: optionalAllocation)
+    }
+
+    private mutating func next(
+        admitting allocation: ((Int) throws -> Void)?
+    ) throws -> (any TupleElement)? {
         guard offset < bytes.endIndex else { return nil }
         let typeCode = bytes[offset]
         offset += 1
         return try Tuple.decodeElement(
             typeCode: typeCode,
             bytes: bytes,
-            at: &offset
+            at: &offset,
+            admitting: allocation
         )
     }
 
@@ -37,6 +53,36 @@ public struct TupleCursor {
             throw TupleError.unexpectedEndOfData
         }
         return element
+    }
+
+    /// Decodes every remaining element directly into one tuple owner.
+    public mutating func remainingTuple() throws -> Tuple {
+        try remainingTuple(admitting: nil)
+    }
+
+    /// Decodes every remaining element directly into one tuple owner while
+    /// admitting retained allocations before they are created.
+    public mutating func remainingTuple(
+        admitting allocation: @escaping (Int) throws -> Void
+    ) throws -> Tuple {
+        let optionalAllocation: ((Int) throws -> Void)? = allocation
+        return try remainingTuple(admitting: optionalAllocation)
+    }
+
+    private mutating func remainingTuple(
+        admitting allocation: ((Int) throws -> Void)?
+    ) throws -> Tuple {
+        var elements: [any TupleElement] = []
+        var accountedCapacity = 0
+        while let element = try next(admitting: allocation) {
+            try Tuple.appendDecoded(
+                element,
+                to: &elements,
+                accountedCapacity: &accountedCapacity,
+                admitting: allocation
+            )
+        }
+        return Tuple(decodedElements: elements)
     }
 
     /// Decodes one signed integer without materializing an existential or

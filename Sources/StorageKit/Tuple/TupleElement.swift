@@ -111,6 +111,7 @@ public enum TupleError: Error, Sendable {
     case cannotIncrementKey
     case prefixMismatch
     case elementHasNoCanonicalValue
+    case decodedStorageOverflow
 }
 
 /// Byte count limit table for each type (used in variable-length integer encoding).

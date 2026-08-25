@@ -5,8 +5,73 @@ import Testing
 
 @testable import StorageKit
 
+private enum TupleDecodeAdmissionTestError: Error {
+    case rejected
+}
+
 @Suite("Tuple Layer Tests")
 struct TupleTests {
+
+    @Test("Tuple decoding admits storage before malformed input can allocate past a limit")
+    func tupleDecodeAdmissionPrecedesAllocation() {
+        let encoded = ByteString(
+            [UInt8](repeating: TupleTypeCode.boolFalse.rawValue, count: 1_024)
+                + [0xFF]
+        )
+        var admittedBytes = 0
+
+        #expect(throws: TupleDecodeAdmissionTestError.rejected) {
+            _ = try Tuple(packed: encoded) { requestedBytes in
+                guard requestedBytes <= 4_096 - admittedBytes else {
+                    throw TupleDecodeAdmissionTestError.rejected
+                }
+                admittedBytes += requestedBytes
+            }
+        }
+        #expect(admittedBytes <= 4_096)
+    }
+
+    @Test("String allocation is rejected before materialization")
+    func stringAllocationRequiresAdmission() {
+        let encoded = Tuple(String(repeating: "x", count: 4_096)).pack()
+
+        #expect(throws: TupleDecodeAdmissionTestError.rejected) {
+            _ = try Tuple(packed: encoded) { _ in
+                throw TupleDecodeAdmissionTestError.rejected
+            }
+        }
+    }
+
+    @Test("Escaped byte allocation is rejected before materialization")
+    func escapedByteAllocationRequiresAdmission() {
+        let encoded = Tuple(ByteString(repeating: 0x00, count: 4_096)).pack()
+
+        #expect(throws: TupleDecodeAdmissionTestError.rejected) {
+            _ = try Tuple(packed: encoded) { _ in
+                throw TupleDecodeAdmissionTestError.rejected
+            }
+        }
+    }
+
+    @Test("Tuple cursor materializes remaining elements once with admission")
+    func tupleCursorAdmitsRemainingTuple() throws {
+        let encoded = Tuple(
+            Int64(42),
+            "tenant",
+            ByteString([0x01, 0x00, 0x02])
+        ).pack()
+        var cursor = TupleCursor(bytes: encoded)
+        var admittedBytes = 0
+
+        #expect(try cursor.requireInt64() == 42)
+        let remaining = try cursor.remainingTuple { requestedBytes in
+            admittedBytes += requestedBytes
+        }
+
+        #expect(remaining == Tuple("tenant", ByteString([0x01, 0x00, 0x02])))
+        #expect(admittedBytes > 0)
+        #expect(cursor.isAtEnd)
+    }
 
     @Test func validatedElementRangePreservesValues() throws {
         let tuple = Tuple("prefix", Int64(42), ByteString([0x01, 0x02]))

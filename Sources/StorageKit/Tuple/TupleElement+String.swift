@@ -20,10 +20,31 @@ extension String: TupleElement {
     }
 
     public static func decodeTuple(from bytes: ByteString, at offset: inout Int) throws -> String {
-        let raw = try decodeNullTerminated(from: bytes, at: &offset)
+        try decodeTuple(
+            from: bytes,
+            at: &offset,
+            admitting: nil
+        )
+    }
+
+    static func decodeTuple(
+        from bytes: ByteString,
+        at offset: inout Int,
+        admitting allocation: ((Int) throws -> Void)?
+    ) throws -> String {
+        let raw = try decodeNullTerminated(
+            from: bytes,
+            at: &offset,
+            admitting: allocation
+        )
         guard raw.hasValidUTF8Encoding else {
             throw TupleError.invalidUTF8
         }
+        let (retainedBytes, overflow) = raw.count.addingReportingOverflow(32)
+        guard !overflow else {
+            throw TupleError.decodedStorageOverflow
+        }
+        try allocation?(retainedBytes)
         return raw.withUnsafeBytes { source in
             String(
                 decoding: source.bindMemory(to: UInt8.self),
@@ -134,7 +155,23 @@ extension ByteString: TupleElement {
         from bytes: ByteString,
         at offset: inout Int
     ) throws -> ByteString {
-        try decodeNullTerminated(from: bytes, at: &offset)
+        try decodeNullTerminated(
+            from: bytes,
+            at: &offset,
+            admitting: nil
+        )
+    }
+
+    static func decodeTuple(
+        from bytes: ByteString,
+        at offset: inout Int,
+        admitting allocation: ((Int) throws -> Void)?
+    ) throws -> ByteString {
+        try decodeNullTerminated(
+            from: bytes,
+            at: &offset,
+            admitting: allocation
+        )
     }
 }
 
@@ -142,7 +179,11 @@ extension ByteString: TupleElement {
 ///
 /// - 0x00 followed by 0xFF: escaped 0x00 (a null byte contained in the data).
 /// - 0x00 not followed by 0xFF: terminator.
-package func decodeNullTerminated(from bytes: ByteString, at offset: inout Int) throws -> ByteString {
+package func decodeNullTerminated(
+    from bytes: ByteString,
+    at offset: inout Int,
+    admitting allocation: ((Int) throws -> Void)? = nil
+) throws -> ByteString {
     let start = offset
     var cursor = offset
     var decodedCount = 0
@@ -161,6 +202,12 @@ package func decodeNullTerminated(from bytes: ByteString, at offset: inout Int) 
                 guard containsEscape else {
                     return bytes[start..<end]
                 }
+                let (retainedBytes, overflow) = decodedCount
+                    .addingReportingOverflow(32)
+                guard !overflow else {
+                    throw TupleError.decodedStorageOverflow
+                }
+                try allocation?(retainedBytes)
                 return ByteString.copying(count: decodedCount) { output in
                     var source = start
                     var destination = 0

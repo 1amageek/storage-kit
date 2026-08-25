@@ -41,8 +41,25 @@ public struct Tuple: Sendable, Hashable, Equatable {
         self = try Self.unpackTuple(from: bytes)
     }
 
+    /// Decodes packed tuple bytes while admitting every retained allocation
+    /// before it is created.
+    ///
+    /// The callback receives canonical retained-byte increments for decoded
+    /// element storage and copied payload owners. Throwing rejects the decode
+    /// before the corresponding allocation. The caller owns rollback of any
+    /// increments admitted before a later decoding failure.
+    public init(
+        packed bytes: ByteString,
+        admitting allocation: @escaping (Int) throws -> Void
+    ) throws {
+        self = try Self.unpackTuple(
+            from: bytes,
+            admitting: allocation
+        )
+    }
+
     /// Construct directly from decoded elements.
-    private init(decodedElements: [any TupleElement]) {
+    init(decodedElements: [any TupleElement]) {
         storedElements = decodedElements
     }
 
@@ -177,18 +194,31 @@ public struct Tuple: Sendable, Hashable, Equatable {
     /// Decode directly into owned tuple storage without first materializing a
     /// separate existential array. Used by subspace scans on the hot key path.
     static func unpackTuple(from bytes: ByteString) throws -> Tuple {
+        try unpackTuple(from: bytes, admitting: nil)
+    }
+
+    static func unpackTuple(
+        from bytes: ByteString,
+        admitting allocation: ((Int) throws -> Void)?
+    ) throws -> Tuple {
         var decodedElements: [any TupleElement] = []
+        var accountedCapacity = 0
         var offset = bytes.startIndex
 
         while offset < bytes.endIndex {
             let typeCode = bytes[offset]
             offset += 1
-            decodedElements.append(
-                try decodeElement(
-                    typeCode: typeCode,
-                    bytes: bytes,
-                    at: &offset
-                )
+            let element = try decodeElement(
+                typeCode: typeCode,
+                bytes: bytes,
+                at: &offset,
+                admitting: allocation
+            )
+            try appendDecoded(
+                element,
+                to: &decodedElements,
+                accountedCapacity: &accountedCapacity,
+                admitting: allocation
             )
         }
 
@@ -202,6 +232,20 @@ public struct Tuple: Sendable, Hashable, Equatable {
     ///   - bytes: The full byte array.
     ///   - offset: The byte position after the type code (updated after decoding).
     package static func decodeElement(typeCode: UInt8, bytes: ByteString, at offset: inout Int) throws -> any TupleElement {
+        try decodeElement(
+            typeCode: typeCode,
+            bytes: bytes,
+            at: &offset,
+            admitting: nil
+        )
+    }
+
+    static func decodeElement(
+        typeCode: UInt8,
+        bytes: ByteString,
+        at offset: inout Int,
+        admitting allocation: ((Int) throws -> Void)?
+    ) throws -> any TupleElement {
         let intZero = TupleTypeCode.intZero.rawValue
 
         switch typeCode {
@@ -209,13 +253,25 @@ public struct Tuple: Sendable, Hashable, Equatable {
             return TupleNil()
 
         case TupleTypeCode.bytes.rawValue:
-            return try ByteString.decodeTuple(from: bytes, at: &offset)
+            return try ByteString.decodeTuple(
+                from: bytes,
+                at: &offset,
+                admitting: allocation
+            )
 
         case TupleTypeCode.string.rawValue:
-            return try String.decodeTuple(from: bytes, at: &offset)
+            return try String.decodeTuple(
+                from: bytes,
+                at: &offset,
+                admitting: allocation
+            )
 
         case TupleTypeCode.nested.rawValue:
-            return try decodeNestedTuple(from: bytes, at: &offset)
+            return try decodeNestedTuple(
+                from: bytes,
+                at: &offset,
+                admitting: allocation
+            )
 
         case intZero:
             return Int64(0)
@@ -254,6 +310,44 @@ public struct Tuple: Sendable, Hashable, Equatable {
         }
     }
 
+    static func appendDecoded(
+        _ element: any TupleElement,
+        to elements: inout [any TupleElement],
+        accountedCapacity: inout Int,
+        admitting allocation: ((Int) throws -> Void)?
+    ) throws {
+        let requiredCount = elements.count + 1
+        if requiredCount > accountedCapacity {
+            var nextCapacity = max(1, accountedCapacity)
+            while nextCapacity < requiredCount {
+                let (doubled, overflow) = nextCapacity
+                    .multipliedReportingOverflow(by: 2)
+                guard !overflow else {
+                    throw TupleError.decodedStorageOverflow
+                }
+                nextCapacity = doubled
+            }
+            let additionalCapacity = nextCapacity - accountedCapacity
+            let (slotBytes, slotOverflow) = additionalCapacity
+                .multipliedReportingOverflow(
+                    by: max(1, MemoryLayout<any TupleElement>.stride)
+                )
+            guard !slotOverflow else {
+                throw TupleError.decodedStorageOverflow
+            }
+            let ownerBytes = accountedCapacity == 0 ? 32 : 0
+            let (admittedBytes, byteOverflow) = slotBytes
+                .addingReportingOverflow(ownerBytes)
+            guard !byteOverflow else {
+                throw TupleError.decodedStorageOverflow
+            }
+            try allocation?(admittedBytes)
+            elements.reserveCapacity(nextCapacity)
+            accountedCapacity = nextCapacity
+        }
+        elements.append(element)
+    }
+
     // MARK: - Nested Tuple
 
     /// Encode a Nested Tuple (type code 0x05).
@@ -268,7 +362,11 @@ public struct Tuple: Sendable, Hashable, Equatable {
     ///
     /// Collects internal bytes while restoring the null-escape pattern (0x00 + 0xFF),
     /// and detects termination at a non-escaped 0x00. No depth tracking is needed.
-    private static func decodeNestedTuple(from bytes: ByteString, at offset: inout Int) throws -> Tuple {
+    private static func decodeNestedTuple(
+        from bytes: ByteString,
+        at offset: inout Int,
+        admitting allocation: ((Int) throws -> Void)? = nil
+    ) throws -> Tuple {
         let start = offset
         var cursor = offset
         var decodedCount = 0
@@ -286,6 +384,12 @@ public struct Tuple: Sendable, Hashable, Equatable {
                     offset = cursor
                     let innerBytes: ByteString
                     if containsEscape {
+                        let (retainedBytes, overflow) = decodedCount
+                            .addingReportingOverflow(32)
+                        guard !overflow else {
+                            throw TupleError.decodedStorageOverflow
+                        }
+                        try allocation?(retainedBytes)
                         innerBytes = ByteString.copying(count: decodedCount) { output in
                             var source = start
                             var destination = 0
@@ -299,7 +403,10 @@ public struct Tuple: Sendable, Hashable, Equatable {
                     } else {
                         innerBytes = bytes[start..<end]
                     }
-                    return Tuple(try unpack(from: innerBytes))
+                    return try unpackTuple(
+                        from: innerBytes,
+                        admitting: allocation
+                    )
                 }
             } else {
                 decodedCount += 1
