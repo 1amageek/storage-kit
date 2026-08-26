@@ -194,7 +194,7 @@ The PostgreSQL release gate uses an isolated PostgreSQL 16 database and the
 pinned Swift 6.4 snapshot:
 
 ```bash
-TOOLCHAINS=org.swift.64202607231a \
+TOOLCHAINS=org.swift.64202608141a \
 POSTGRES_TEST_HOST=database.test \
 POSTGRES_TEST_PORT=5432 \
 POSTGRES_TEST_USER=postgres \
@@ -203,10 +203,11 @@ POSTGRES_TEST_DB=storage_kit_test \
 scripts/postgresql-test-harness
 ```
 
-The harness requires exactly 132 successful integration tests, then repeats the
-same target without service variables and verifies that a missing endpoint is
-an explicit failure rather than an all-skipped success. Static Musl portability
-is checked separately with the command documented in `AGENTS.md`.
+The harness enforces its reviewed exact successful integration-test count, then
+repeats the same target without service variables and verifies that a missing
+endpoint is an explicit failure rather than an all-skipped success. Static
+Musl portability is checked separately with the command documented in
+`AGENTS.md`.
 
 ### Cloudflare Durable Object SQLite
 

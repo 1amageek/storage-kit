@@ -521,7 +521,40 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
 
     // MARK: - Read
 
-    public func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString? {
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        try await readValue(
+            for: key,
+            snapshot: snapshot,
+            maximumByteCount: nil
+        )
+    }
+
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int
+    ) async throws -> ByteString? {
+        guard maximumByteCount >= 0 else {
+            throw StorageError.invalidPointReadMaximum(
+                maximumByteCount,
+                backend: .postgreSQL
+            )
+        }
+        return try await readValue(
+            for: key,
+            snapshot: snapshot,
+            maximumByteCount: maximumByteCount
+        )
+    }
+
+    private func readValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int?
+    ) async throws -> ByteString? {
         let writeBuffer = try state.withLock { state in
             switch state.lifecycle {
             case .open:
@@ -561,7 +594,20 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             }
         }
 
-        var value = baseDetermined ? base : try await fetchBaseValue(key: key, snapshot: snapshot)
+        // A native bound is safe only when the base value is the final value.
+        // Atomic replay can reduce an oversized base (for example, a short
+        // add or compare-and-clear), so fetch that base unbounded and enforce
+        // the caller's bound after replay at the API boundary.
+        let fetchMaximumByteCount = collectedAtomics.isEmpty
+            ? maximumByteCount
+            : nil
+        var value = baseDetermined
+            ? base
+            : try await fetchBaseValue(
+                key: key,
+                snapshot: snapshot,
+                maximumByteCount: fetchMaximumByteCount
+            )
         // collectedAtomics is newest-first; replay oldest-first.
         for entry in collectedAtomics.reversed() {
             switch try entry.mutationType.apply(to: value, param: entry.param) {
@@ -573,17 +619,43 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 break
             }
         }
+        if let maximumByteCount, let value {
+            guard value.count <= maximumByteCount else {
+                throw StorageError.pointReadValueTooLarge(
+                    observedByteCount: value.count,
+                    maximumByteCount: maximumByteCount,
+                    backend: .postgreSQL
+                )
+            }
+        }
         return value
     }
 
-    private func fetchBaseValue(key: ByteString, snapshot: Bool) async throws -> ByteString? {
+    private func fetchBaseValue(
+        key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int?
+    ) async throws -> ByteString? {
         if let parent {
+            if let maximumByteCount {
+                return try await parent.getValue(
+                    for: key,
+                    snapshot: snapshot,
+                    maximumByteCount: maximumByteCount
+                )
+            }
             return try await parent.getValue(for: key, snapshot: snapshot)
         }
-        return try await fetchValueFromDatabase(key: key)
+        return try await fetchValueFromDatabase(
+            key: key,
+            maximumByteCount: maximumByteCount
+        )
     }
 
-    private func fetchValueFromDatabase(key: ByteString) async throws -> ByteString? {
+    private func fetchValueFromDatabase(
+        key: ByteString,
+        maximumByteCount: Int?
+    ) async throws -> ByteString? {
         do {
             let connection = try await ensureConnection()
             var bindings = PostgresBindings()
@@ -594,10 +666,22 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             let sql = "SELECT value FROM \(tableName) WHERE key = $1"
             let rows = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
             for try await (value) in rows.decode(ByteBuffer.self) {
+                if let maximumByteCount,
+                   value.readableBytes > maximumByteCount {
+                    throw StorageError.pointReadValueTooLarge(
+                        observedByteCount: value.readableBytes,
+                        maximumByteCount: maximumByteCount,
+                        backend: .postgreSQL
+                    )
+                }
                 return resultBytesFactory.makeByteString(retaining: value)
             }
             return nil
         } catch {
+            if let storageError = error as? StorageError,
+               storageError.isPointReadValueTooLarge {
+                throw storageError
+            }
             throw markFailed(error, operation: .read)
         }
     }

@@ -19,6 +19,22 @@ public protocol TransactionReadAccess: Sendable {
         snapshot: Bool
     ) async throws -> ByteString?
 
+    /// Gets a value while enforcing an exact upper bound before the value is
+    /// returned to the caller.
+    ///
+    /// A maximum of zero permits only an empty stored value. A negative
+    /// maximum is invalid. Backend implementations should inspect their
+    /// native result length before constructing a `ByteString` whenever that
+    /// boundary is available; the default implementation preserves the
+    /// contract for custom transactions by validating before returning. A
+    /// value-limit violation is caller-owned and does not invalidate the
+    /// transaction.
+    func getValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int
+    ) async throws -> ByteString?
+
     /// Performs a serializable point read.
     func getValue(for key: ByteString) async throws -> ByteString?
 
@@ -37,6 +53,28 @@ public protocol TransactionReadAccess: Sendable {
 }
 
 public extension TransactionReadAccess {
+    /// Bounded point-read fallback for custom transaction implementations.
+    func getValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int
+    ) async throws -> ByteString? {
+        guard maximumByteCount >= 0 else {
+            throw StorageError.invalidPointReadMaximum(maximumByteCount)
+        }
+        guard let value = try await getValue(for: key, snapshot: snapshot)
+        else {
+            return nil
+        }
+        guard value.count <= maximumByteCount else {
+            throw StorageError.pointReadValueTooLarge(
+                observedByteCount: value.count,
+                maximumByteCount: maximumByteCount
+            )
+        }
+        return value
+    }
+
     /// Serializable key selection convenience.
     func getKey(selector: KeySelector) async throws -> ByteString? {
         try await getKey(selector: selector, snapshot: false)

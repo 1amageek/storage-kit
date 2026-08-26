@@ -72,6 +72,137 @@ struct PostgreSQLStorageTests {
         #expect(storedValue.retainedByteCount == nil)
     }
 
+    @Test("PostgreSQL bounded point reads preserve read-your-writes and bounds")
+    func boundedPointReadPreservesReadYourWritesAndBounds() async throws {
+        let engine = try await makeEngine()
+        defer { await engine.waitUntilShutdown() }
+        let key: ByteString = [0x09]
+        let value: ByteString = [0x01, 0x02, 0x03]
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue(value, for: key)
+            #expect(
+                try await transaction.getValue(
+                    for: key,
+                    snapshot: false,
+                    maximumByteCount: value.count
+                ) == value
+            )
+        }
+
+        let transaction = try engine.createTransaction()
+        var failure: StorageError?
+        do {
+            _ = try await transaction.getValue(
+                for: key,
+                snapshot: true,
+                maximumByteCount: value.count - 1
+            )
+        } catch let error as StorageError {
+            failure = error
+        }
+        #expect(failure?.code == .valueTooLarge)
+        #expect(failure?.backend == .postgreSQL)
+        #expect(
+            failure?.byteLimitViolation?.observedByteCount
+                == UInt64(value.count)
+        )
+        #expect(
+            failure?.byteLimitViolation?.maximumByteCount
+                == UInt64(value.count - 1)
+        )
+        #expect(transaction.storageFailure == nil)
+
+        // A caller-owned bound violation does not invalidate the transaction.
+        // The same transaction must still read and cancel after the failed
+        // native fetch.
+        #expect(
+            try await transaction.getValue(
+                for: key,
+                snapshot: true,
+                maximumByteCount: value.count
+            ) == value
+        )
+        try await transaction.cancel()
+
+        let missing = try await engine.withTransaction { transaction in
+            try await transaction.getValue(
+                for: [0xFF],
+                snapshot: true,
+                maximumByteCount: 0
+            )
+        }
+        #expect(missing == nil)
+
+        do {
+            _ = try await engine.withTransaction { transaction in
+                try await transaction.getValue(
+                    for: key,
+                    snapshot: true,
+                    maximumByteCount: -1
+                )
+            }
+            Issue.record("Expected an invalid point-read maximum")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+            #expect(error.backend == .postgreSQL)
+        }
+    }
+
+    @Test("PostgreSQL bounded reads apply atomics before enforcing the final bound")
+    func boundedPointReadReplaysAtomicsBeforeApplyingBound() async throws {
+        let engine = try await makeEngine()
+        defer { await engine.waitUntilShutdown() }
+
+        let addKey: ByteString = [0x0A]
+        let compareAndClearKey: ByteString = [0x0B]
+        let oversizedValue: ByteString = [0xFF, 0xFF, 0xFF]
+        let compareValue: ByteString = [0xA1, 0xB2, 0xC3]
+
+        try await engine.withTransaction { transaction in
+            try transaction.setValue(oversizedValue, for: addKey)
+            try transaction.setValue(compareValue, for: compareAndClearKey)
+        }
+
+        let transaction = try engine.createTransaction()
+        try transaction.atomicOp(
+            key: addKey,
+            param: [0x01],
+            mutationType: .add
+        )
+        #expect(
+            try await transaction.getValue(
+                for: addKey,
+                snapshot: true,
+                maximumByteCount: 1
+            ) == [0x00]
+        )
+
+        try transaction.atomicOp(
+            key: compareAndClearKey,
+            param: compareValue,
+            mutationType: .compareAndClear
+        )
+        #expect(
+            try await transaction.getValue(
+                for: compareAndClearKey,
+                snapshot: true,
+                maximumByteCount: 0
+            ) == nil
+        )
+        #expect(transaction.storageFailure == nil)
+
+        // The same transaction remains usable after both bounded reads.
+        #expect(
+            try await transaction.getValue(
+                for: addKey,
+                snapshot: true,
+                maximumByteCount: 1
+            ) == [0x00]
+        )
+        try await transaction.cancel()
+    }
+
     @Test func clearKey() async throws {
         let engine = try await makeEngine()
         defer { await engine.waitUntilShutdown() }

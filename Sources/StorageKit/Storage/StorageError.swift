@@ -102,6 +102,18 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
     /// Whether a generic transaction runner may replay the whole transaction.
     public var isRetryable: Bool { retryDisposition == .safe }
 
+    /// Whether this error reports a caller-owned bounded point-read limit.
+    ///
+    /// The backend completed the read successfully; the value was rejected at
+    /// the API boundary because returning it would exceed the caller's bound.
+    /// This error must not poison the owning transaction.
+    public var isPointReadValueTooLarge: Bool {
+        code == .valueTooLarge
+            && operation == .read
+            && byteLimitViolation?.resource == .value
+            && byteLimitViolation?.measurement == .exact
+    }
+
     public var description: String {
         var parts = [
             "StorageError(\(code.rawValue))",
@@ -128,6 +140,42 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
 // MARK: - Convenience factories
 
 extension StorageError {
+    /// Reports an invalid upper bound supplied to a bounded point read.
+    public static func invalidPointReadMaximum(
+        _ maximumByteCount: Int,
+        backend: StorageBackend = .unknown
+    ) -> StorageError {
+        return StorageError(
+            code: .invalidOperation,
+            operation: .read,
+            backend: backend,
+            message: "Point-read maximumByteCount must be non-negative",
+            underlyingDescription: "maximumByteCount=\(maximumByteCount)"
+        )
+    }
+
+    /// Reports a value that cannot cross a bounded point-read boundary.
+    public static func pointReadValueTooLarge(
+        observedByteCount: Int,
+        maximumByteCount: Int,
+        backend: StorageBackend = .unknown
+    ) -> StorageError {
+        precondition(observedByteCount >= 0)
+        precondition(maximumByteCount >= 0)
+        return StorageError(
+            code: .valueTooLarge,
+            operation: .read,
+            backend: backend,
+            message: "Point-read value exceeds maximumByteCount",
+            byteLimitViolation: StorageByteLimitViolation(
+                resource: .value,
+                observedByteCount: UInt64(observedByteCount),
+                maximumByteCount: UInt64(maximumByteCount),
+                measurement: .exact
+            )
+        )
+    }
+
     public static var transactionConflict: StorageError {
         StorageError(
             code: .transactionConflict,

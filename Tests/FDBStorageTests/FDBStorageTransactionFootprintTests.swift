@@ -7,6 +7,71 @@ import Testing
 
 @Suite("FoundationDB transaction footprint admission")
 struct FDBStorageTransactionFootprintTests {
+    @Test("FoundationDB bounded point reads preserve the exact value bound")
+    func boundedPointReadPreservesExactValueBound() async throws {
+        let value: ByteString = [0x01, 0x02, 0x03]
+        let backend = SizeReportingTransaction(
+            approximateSize: 0,
+            pointValue: value
+        )
+        let transaction = try FDBStorageTransaction(
+            backend,
+            transactionDomain: StorageTransactionDomain()
+        )
+
+        #expect(
+            try await transaction.getValue(
+                for: [0x41],
+                snapshot: true,
+                maximumByteCount: value.count
+            ) == value
+        )
+
+        var failure: StorageError?
+        do {
+            _ = try await transaction.getValue(
+                for: [0x41],
+                snapshot: true,
+                maximumByteCount: value.count - 1
+            )
+        } catch let error as StorageError {
+            failure = error
+        }
+        #expect(failure?.code == .valueTooLarge)
+        #expect(failure?.backend == .foundationDB)
+        #expect(
+            failure?.byteLimitViolation?.observedByteCount
+                == UInt64(value.count)
+        )
+        #expect(
+            failure?.byteLimitViolation?.maximumByteCount
+                == UInt64(value.count - 1)
+        )
+        #expect(transaction.storageFailure == nil)
+
+        // A caller-owned bound violation does not invalidate the transaction.
+        #expect(
+            try await transaction.getValue(
+                for: [0x41],
+                snapshot: true,
+                maximumByteCount: value.count
+            ) == value
+        )
+
+        do {
+            _ = try await transaction.getValue(
+                for: [0x41],
+                snapshot: true,
+                maximumByteCount: -1
+            )
+            Issue.record("Expected an invalid point-read maximum")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+            #expect(error.backend == .foundationDB)
+        }
+        try await transaction.commit()
+    }
+
     @Test("Commit request limits reject values outside FoundationDB's range", arguments: [31, 10_000_001])
     func rejectsInvalidConfiguredLimit(value: Int) {
         #expect(throws: CommitRequestLimitError.self) {
@@ -921,6 +986,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
     private let commitGate: OperationGate?
     private let valueReadGate: OperationGate?
     private let rangeReadGate: OperationGate?
+    private let pointValue: ByteString?
 
     init(
         approximateSize: Int,
@@ -931,7 +997,8 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
         footprintReadGate: OperationGate? = nil,
         commitGate: OperationGate? = nil,
         valueReadGate: OperationGate? = nil,
-        rangeReadGate: OperationGate? = nil
+        rangeReadGate: OperationGate? = nil,
+        pointValue: ByteString? = nil
     ) {
         self.state = Mutex(State(
             approximateSize: approximateSize,
@@ -944,6 +1011,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
         self.commitGate = commitGate
         self.valueReadGate = valueReadGate
         self.rangeReadGate = rangeReadGate
+        self.pointValue = pointValue
     }
 
     var approximateSizeRequestCount: Int {
@@ -977,7 +1045,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
         if let valueReadGate {
             await valueReadGate.suspendOperation()
         }
-        return nil
+        return pointValue
     }
 
     func setValue<Value: FDB.ByteInput, Key: FDB.ByteInput>(

@@ -239,7 +239,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     // MARK: - Read
 
-    public func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString? {
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool
+    ) async throws -> ByteString? {
         try beginOperation(.read)
         defer { finishOperation() }
         do {
@@ -247,6 +250,45 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 for: key,
                 snapshot: snapshot
             )
+            return value
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as FDBError {
+            throw Self.convertFDBError(error, operation: .read)
+        } catch {
+            throw Self.convertBackendError(error, operation: .read)
+        }
+    }
+
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int
+    ) async throws -> ByteString? {
+        guard maximumByteCount >= 0 else {
+            throw StorageError.invalidPointReadMaximum(
+                maximumByteCount,
+                backend: .foundationDB
+            )
+        }
+        try beginOperation(.read)
+        defer { finishOperation() }
+        do {
+            let value = try await fdbTransaction.getValue(
+                for: key,
+                snapshot: snapshot
+            )
+            guard let value else { return nil }
+            // The current FoundationDB bindings expose no native length-only
+            // result API. Check immediately after receiving the retained
+            // ByteString so the bounded path adds no materialization or copy.
+            guard value.count <= maximumByteCount else {
+                throw StorageError.pointReadValueTooLarge(
+                    observedByteCount: value.count,
+                    maximumByteCount: maximumByteCount,
+                    backend: .foundationDB
+                )
+            }
             return value
         } catch is CancellationError {
             throw CancellationError()

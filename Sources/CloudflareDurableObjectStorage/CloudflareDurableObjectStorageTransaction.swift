@@ -65,7 +65,40 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         self.transactionDomain = transactionDomain
     }
 
-    public func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString? {
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        try await readValue(
+            for: key,
+            snapshot: snapshot,
+            maximumByteCount: nil
+        )
+    }
+
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int
+    ) async throws -> ByteString? {
+        guard maximumByteCount >= 0 else {
+            throw StorageError.invalidPointReadMaximum(
+                maximumByteCount,
+                backend: .cloudflareDurableObject
+            )
+        }
+        return try await readValue(
+            for: key,
+            snapshot: snapshot,
+            maximumByteCount: maximumByteCount
+        )
+    }
+
+    private func readValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int?
+    ) async throws -> ByteString? {
         try validateKey(key)
         let (phase, mutations, observedReadVersion) = state.withLock {
             ($0.phase, $0.mutations, $0.observedReadVersion)
@@ -92,11 +125,21 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             )
         }
 
-        return try value(
+        let result = try value(
             for: key,
             committed: response.value,
             applying: mutations
         )
+        if let maximumByteCount, let result {
+            guard result.count <= maximumByteCount else {
+                throw StorageError.pointReadValueTooLarge(
+                    observedByteCount: result.count,
+                    maximumByteCount: maximumByteCount,
+                    backend: .cloudflareDurableObject
+                )
+            }
+        }
+        return result
     }
 
     public func getRange(

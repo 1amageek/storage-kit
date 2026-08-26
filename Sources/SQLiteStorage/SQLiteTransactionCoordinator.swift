@@ -80,7 +80,8 @@ actor SQLiteTransactionCoordinator {
         rootIdentifier: UInt64,
         transactionIdentifier: UInt64,
         writes: [SQLiteWriteOperation],
-        key: ByteString
+        key: ByteString,
+        maximumByteCount: Int? = nil
     ) async throws -> ByteString? {
         try await ensureRoot(identifier: rootIdentifier)
         try requireTopTransaction(
@@ -89,6 +90,12 @@ actor SQLiteTransactionCoordinator {
             operation: .read
         )
         try apply(writes)
+        if let maximumByteCount {
+            return try connection.get(
+                key: key,
+                maximumByteCount: maximumByteCount
+            )
+        }
         return try connection.get(key: key)
     }
 

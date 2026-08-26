@@ -27,15 +27,16 @@
 ## PostgreSQL Test Harness
 
 - Run PostgreSQL integration coverage with `scripts/postgresql-test-harness`.
-- Set `TOOLCHAINS=org.swift.64202607231a` and explicitly provide
+- Set `TOOLCHAINS=org.swift.64202608141a` and explicitly provide
   `POSTGRES_TEST_HOST`, `POSTGRES_TEST_PORT`, `POSTGRES_TEST_USER`,
   `POSTGRES_TEST_PASSWORD`, and `POSTGRES_TEST_DB` for an isolated PostgreSQL
   16 database.
 - The harness uses the `storage-kit-Package` Xcode scheme, selects only the
   `PostgreSQLStorageTests` target, injects the snapshot
-  testing runtime and service environment into `.xctestrun`, and requires 132
-  tests with zero failures, skips, expected failures, runtime warnings, and
-  PostgresClient startup-order warnings.
+  testing runtime and service environment into `.xctestrun`. The exact
+  expected test count is owned by the executable harness; it must pass with
+  zero failures, skips, expected failures, runtime warnings, and PostgresClient
+  startup-order warnings.
 - The Xcode package scheme compiles every package target before applying the
   test selection. Install the FoundationDB C SDK and keep its header and client
   library available under `/usr/local/include` and `/usr/local/lib`, or set

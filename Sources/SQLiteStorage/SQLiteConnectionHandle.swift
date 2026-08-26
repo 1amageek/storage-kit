@@ -39,6 +39,19 @@ final class SQLiteConnectionHandle: Sendable {
         }
     }
 
+    func get(
+        key: ByteString,
+        maximumByteCount: Int
+    ) throws -> ByteString? {
+        try connection.withLock { connection in
+            let connection = try Self.unwrap(connection)
+            return try connection.get(
+                key: key,
+                maximumByteCount: maximumByteCount
+            )
+        }
+    }
+
     func getKey(plan: SQLiteKeySelectionPlan) throws -> ByteString? {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)

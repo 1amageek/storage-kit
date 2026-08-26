@@ -113,9 +113,12 @@ public protocol TransactionAccess: TransactionReadAccess {
 public protocol Transaction: TransactionAccess {
     /// The authoritative storage failure recorded by this transaction.
     ///
-    /// Higher layers use this state after an arbitrary operation error has
-    /// crossed an untyped application boundary. Backends must record every
-    /// `StorageError` before it escapes a transaction operation.
+    /// Higher layers use this state after an arbitrary backend or transaction
+    /// error has crossed an untyped application boundary. Backends must record
+    /// failures that may invalidate their state before they escape a
+    /// transaction operation. Caller-owned validation failures, including a
+    /// bounded point-read value limit violation, must not poison the
+    /// transaction.
     var storageFailure: StorageError? { get }
 
     /// The configured portable logical mutation limit, if this transaction is

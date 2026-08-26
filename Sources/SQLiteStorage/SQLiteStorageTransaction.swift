@@ -190,6 +190,36 @@ public final class SQLiteStorageTransaction:
         }
     }
 
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int
+    ) async throws -> ByteString? {
+        guard maximumByteCount >= 0 else {
+            throw StorageError.invalidPointReadMaximum(
+                maximumByteCount,
+                backend: .sqlite
+            )
+        }
+        let writes = try takeWrites(operation: .read)
+        do {
+            try await ensureBackendStarted()
+            return try await coordinator.readValue(
+                rootIdentifier: rootIdentifier,
+                transactionIdentifier: identifier,
+                writes: writes,
+                key: key,
+                maximumByteCount: maximumByteCount
+            )
+        } catch {
+            if let storageError = error as? StorageError,
+               storageError.isPointReadValueTooLarge {
+                throw storageError
+            }
+            throw recordFailure(error, operation: .read)
+        }
+    }
+
     public func getKey(
         selector: KeySelector,
         snapshot: Bool

@@ -137,6 +137,15 @@ final class SQLiteConnection {
 
     /// SELECT value WHERE key = ?
     func get(key: ByteString) throws -> ByteString? {
+        try get(key: key, maximumByteCount: nil)
+    }
+
+    /// SELECT value WHERE key = ? while checking SQLite's native column
+    /// length before copying it into an application-owned `ByteString`.
+    func get(
+        key: ByteString,
+        maximumByteCount: Int?
+    ) throws -> ByteString? {
         guard db != nil else {
             throw StorageError.invalidOperation("Database closed")
         }
@@ -151,7 +160,8 @@ final class SQLiteConnection {
                 return try extractBlob(
                     stmt,
                     column: 0,
-                    operation: .read
+                    operation: .read,
+                    maximumByteCount: maximumByteCount
                 )
             }
             if rc == SQLITE_DONE {
@@ -713,11 +723,11 @@ final class SQLiteConnection {
     private func extractBlob(
         _ stmt: OpaquePointer?,
         column: Int32,
-        operation: StorageOperation
+        operation: StorageOperation,
+        maximumByteCount: Int? = nil
     ) throws -> ByteString? {
         let colType = sqlite3_column_type(stmt, column)
         guard colType != SQLITE_NULL else { return nil }
-        let blob = sqlite3_column_blob(stmt, column)
         let count = Int(sqlite3_column_bytes(stmt, column))
         if let db, sqlite3_errcode(db) == SQLITE_NOMEM {
             throw SQLiteErrorMapper.map(
@@ -734,7 +744,15 @@ final class SQLiteConnection {
                 message: "SQLite returned a negative blob byte count"
             )
         }
+        if let maximumByteCount, count > maximumByteCount {
+            throw StorageError.pointReadValueTooLarge(
+                observedByteCount: count,
+                maximumByteCount: maximumByteCount,
+                backend: .sqlite
+            )
+        }
         if count == 0 { return [] }
+        let blob = sqlite3_column_blob(stmt, column)
         guard let blob else {
             throw StorageError(
                 code: .dataCorruption,

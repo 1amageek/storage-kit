@@ -379,7 +379,40 @@ public final class InMemoryTransaction: Transaction, Sendable {
 
     // MARK: - Read
 
-    public func getValue(for key: ByteString, snapshot: Bool) async throws -> ByteString? {
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool
+    ) async throws -> ByteString? {
+        try readValue(for: key, snapshot: snapshot)
+    }
+
+    public func getValue(
+        for key: ByteString,
+        snapshot: Bool,
+        maximumByteCount: Int
+    ) async throws -> ByteString? {
+        guard maximumByteCount >= 0 else {
+            throw StorageError.invalidPointReadMaximum(
+                maximumByteCount,
+                backend: .inMemory
+            )
+        }
+        let value = try readValue(for: key, snapshot: snapshot)
+        guard let value else { return nil }
+        guard value.count <= maximumByteCount else {
+            throw StorageError.pointReadValueTooLarge(
+                observedByteCount: value.count,
+                maximumByteCount: maximumByteCount,
+                backend: .inMemory
+            )
+        }
+        return value
+    }
+
+    private func readValue(
+        for key: ByteString,
+        snapshot: Bool
+    ) throws -> ByteString? {
         try _state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .read)
             if !snapshot {

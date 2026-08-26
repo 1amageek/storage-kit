@@ -116,6 +116,77 @@ struct CloudflareDurableObjectStorageTransactionTests {
         }
     }
 
+    @Test("Cloudflare bounded point reads preserve snapshots and exact bounds")
+    func boundedPointReadPreservesSnapshotsAndExactBounds() async throws {
+        let client = InMemoryCloudflareDurableObjectStorageClient()
+        let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
+        let key: ByteString = [0x71]
+        let value: ByteString = [0x11, 0x22, 0x33]
+        _ = try client.commitForTesting(
+            StorageWireCommitRequest(
+                partitionIdentity: partitionIdentity,
+                observedReadVersion: nil,
+                mutations: [.set(key: key, value: value)]
+            )
+        )
+        let engine = try await makeEngine(client: client)
+        defer { await engine.waitUntilShutdown() }
+        let transaction = try engine.createTransaction()
+
+        #expect(
+            try await transaction.getValue(
+                for: key,
+                snapshot: true,
+                maximumByteCount: value.count
+            ) == value
+        )
+
+        var failure: StorageError?
+        do {
+            _ = try await transaction.getValue(
+                for: key,
+                snapshot: true,
+                maximumByteCount: value.count - 1
+            )
+        } catch let error as StorageError {
+            failure = error
+        }
+        #expect(failure?.code == .valueTooLarge)
+        #expect(failure?.backend == .cloudflareDurableObject)
+        #expect(
+            failure?.byteLimitViolation?.observedByteCount
+                == UInt64(value.count)
+        )
+        #expect(
+            failure?.byteLimitViolation?.maximumByteCount
+                == UInt64(value.count - 1)
+        )
+        #expect(transaction.storageFailure == nil)
+
+        // A caller-owned bound violation does not invalidate the transaction.
+        #expect(
+            try await transaction.getValue(
+                for: key,
+                snapshot: true,
+                maximumByteCount: value.count
+            ) == value
+        )
+
+        do {
+            _ = try await transaction.getValue(
+                for: key,
+                snapshot: true,
+                maximumByteCount: -1
+            )
+            Issue.record("Expected an invalid point-read maximum")
+        } catch let error as StorageError {
+            #expect(error.code == .invalidOperation)
+            #expect(error.backend == .cloudflareDurableObject)
+        }
+
+        try await transaction.commit()
+    }
+
     @Test func defaultLimitAllowsIndexExpandedMutationBatch() async throws {
         let engine = try await makeEngine()
         let mutationCount = 1_001
