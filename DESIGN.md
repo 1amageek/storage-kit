@@ -21,7 +21,6 @@ semantics, transaction authorization, or application-specific resource policy.
 The admission callback is a synchronous caller-owned resource boundary; it is
 not a storage transaction, backend policy, or global meter.
 
-
 ## Related Designs
 
 | Design | Relationship | Contract Used | Summary | Cautions |

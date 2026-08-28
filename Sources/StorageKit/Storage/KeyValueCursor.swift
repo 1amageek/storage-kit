@@ -28,6 +28,23 @@ public struct KeyValueCursor: Sendable {
         self.validateAfterAdvance = nil
     }
 
+    /// Internal sequencing hook used by lifecycle tests. Production callers
+    /// use the public initializer above and do not receive this observer.
+    internal init<Result: TransactionRangeResult>(
+        testing result: sending Result,
+        onFinishWhileAdvancing observer: @escaping @Sendable () -> Void
+    ) {
+        let lifetime = KeyValueCursorLifetime()
+        self.state = TypedKeyValueCursorState(
+            result: result,
+            lifetime: lifetime,
+            onFinishWhileAdvancing: observer
+        )
+        self.lifetime = lifetime
+        self.validateBeforeAdvance = nil
+        self.validateAfterAdvance = nil
+    }
+
     /// Returns an unopened cursor whose first advance is governed entirely by
     /// `validateScope`.
     ///
@@ -251,13 +268,16 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
 
     private var state: State
     private let lifetime: KeyValueCursorLifetime
+    private let onFinishWhileAdvancing: (@Sendable () -> Void)?
 
     init(
         result: sending Result,
-        lifetime: KeyValueCursorLifetime
+        lifetime: KeyValueCursorLifetime,
+        onFinishWhileAdvancing: (@Sendable () -> Void)? = nil
     ) {
         self.state = .unopened(result)
         self.lifetime = lifetime
+        self.onFinishWhileAdvancing = onFinishWhileAdvancing
     }
 
     deinit {
@@ -391,7 +411,9 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
                 throw error
             }
         case .advancing(let boundary):
-            try await boundary.requestFinish()
+            try await boundary.requestFinish(
+                onRequested: onFinishWhileAdvancing
+            )
         case .finishing(let boundary):
             try await boundary.wait()
         case .finished(let error):
@@ -473,7 +495,9 @@ private final class CursorAdvanceBoundary: Sendable {
         state.withLock { $0.finishRequested }
     }
 
-    func requestFinish() async throws {
+    func requestFinish(
+        onRequested: (@Sendable () -> Void)? = nil
+    ) async throws {
         let result = await withCheckedContinuation { continuation in
             let completed = state.withLock { state
                 -> Result<Void, CursorBoundaryFailure>? in
@@ -484,6 +508,10 @@ private final class CursorAdvanceBoundary: Sendable {
                 state.waiters.append(continuation)
                 return nil
             }
+            // The observer is test-only and is invoked after the finish
+            // request is visible to the boundary, but before the waiter is
+            // resumed. It is not part of the advance hot path.
+            onRequested?()
             if let completed {
                 continuation.resume(returning: completed)
             }

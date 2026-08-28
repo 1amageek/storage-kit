@@ -1,5 +1,5 @@
 import DatabaseTypes
-import StorageKit
+@testable import StorageKit
 import Synchronization
 import Testing
 
@@ -150,18 +150,25 @@ struct TransactionRangeCleanupTests {
     @Test func finishCannotEnterBackendCleanupBeforePostValidation() async throws {
         let iterationGate = RangeIterationGate()
         let finishGate = FinishReleaseGate()
+        let lifetimeRecorder = CursorLifetimeRecorder()
         let cursor = KeyValueCursor(
-            consuming: FinishBlockedRows(
+            testing: FinishBlockedRows(
                 iterationGate: iterationGate,
                 finishGate: finishGate
-            )
+            ),
+            onFinishWhileAdvancing: {
+                finishGate.recordAdvancingFinishObservation()
+            }
         ).validatingScope {
             let validationCount = finishGate.recordValidation()
             if validationCount == 2 {
                 #expect(!finishGate.hasStarted)
+                #expect(lifetimeRecorder.releaseCount == 0)
                 finishGate.release()
             }
-        }
+        }.retainingLifetime(
+            of: CursorLifetimeOwner(recorder: lifetimeRecorder)
+        )
 
         let advance = Task {
             var advancingCursor = cursor
@@ -169,11 +176,12 @@ struct TransactionRangeCleanupTests {
         }
         await iterationGate.waitUntilAdvanceStarts()
 
-        let finish = Task(priority: .high) {
+        let finish = Task {
             var finishingCursor = cursor
             try await finishingCursor.finish()
         }
-        await Task.yield()
+        await finishGate.waitUntilAdvancingFinishIsObserved()
+        #expect(!finishGate.hasStarted)
         iterationGate.resumeAdvance(with: ([0x01], [0x11]))
 
         let row = try await advance.value
@@ -183,6 +191,7 @@ struct TransactionRangeCleanupTests {
         #expect(finishGate.validationCount == 2)
         #expect(finishGate.hasStarted)
         #expect(finishGate.postValidationReleased)
+        #expect(lifetimeRecorder.releaseCount == 1)
     }
 
     @Test func cursorPreservesAdvanceAndCleanupFailures() async {
@@ -976,6 +985,8 @@ private final class FinishReleaseGate: Sendable {
         var validationCount = 0
         var postValidationReleased = false
         var releaseWaiter: CheckedContinuation<Void, Never>?
+        var advancingFinishObserved = false
+        var advancingFinishWaiter: CheckedContinuation<Void, Never>?
     }
 
     private let state = Mutex(State())
@@ -1001,6 +1012,31 @@ private final class FinishReleaseGate: Sendable {
 
     func recordFinishStart() {
         state.withLock { $0.finishStarted = true }
+    }
+
+    func recordAdvancingFinishObservation() {
+        let waiter = state.withLock { state in
+            state.advancingFinishObserved = true
+            let waiter = state.advancingFinishWaiter
+            state.advancingFinishWaiter = nil
+            return waiter
+        }
+        waiter?.resume()
+    }
+
+    func waitUntilAdvancingFinishIsObserved() async {
+        await withCheckedContinuation { continuation in
+            let observed = state.withLock { state in
+                if state.advancingFinishObserved {
+                    return true
+                }
+                state.advancingFinishWaiter = continuation
+                return false
+            }
+            if observed {
+                continuation.resume()
+            }
+        }
     }
 
     func release() {
