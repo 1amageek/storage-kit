@@ -31,7 +31,7 @@ active work to one Partition.
 |---|---|---|---|---|
 | [StorageKit module](../DESIGN.md) | parent | `TransactionReadAccess`, `TransactionAccess`, `StorageEngine.transactionDomain`, `StorageError`, `Subspace`, `Tuple` | Supplies the transaction and encoding contracts the catalog is built on. | Catalog keys use Tuple V1; a Tuple change is a layout change. |
 | [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess`, `PartitionLeaseRegistry.registerIntent` | Realizes the same contract over the native FoundationDB Directory Layer (layout FD-1…FD-9). | Partitions are custom-typed directories because native partitions cannot nest; layer type is verified on open; listing below a missing parent fails with `keyNotFound` there. |
-| `SQLiteStorage`, `PostgreSQLStorage`, `CloudflareDurableObjectStorage` | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL rejects `readCommitted` isolation for catalog mutation (owned by PostgreSQLStorage). |
+| [SQLiteStorage module](../../SQLiteStorage/DESIGN.md), [PostgreSQLStorage module](../../PostgreSQLStorage/DESIGN.md), [CloudflareDurableObjectStorage module](../../CloudflareDurableObjectStorage/DESIGN.md) | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL rejects `readCommitted` isolation for catalog mutation (owned by PostgreSQLStorage). |
 | database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | Framework proves its own Subspaces empty before requesting Partition removal. |
 
 ## Architecture

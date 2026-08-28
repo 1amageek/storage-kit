@@ -13,7 +13,7 @@ Durable Objects.
 | Design level | package (also the storage-kit repository root) |
 | Parent | [workspace DESIGN.md](../DESIGN.md) |
 | Product architecture authority | [SPEC.md](../SPEC.md) §7–§10.3, §12.3, §24.1, §24.2 |
-| Children | [StorageKit module](Sources/StorageKit/DESIGN.md); [FDBStorage module](Sources/FDBStorage/DESIGN.md); adapter modules `SQLiteStorage`, `PostgreSQLStorage`, `CloudflareDurableObjectStorage` (module `DESIGN.md` files pending; tracked by K-70 in the workspace `PROGRESS.md`) |
+| Children | [StorageKit module](Sources/StorageKit/DESIGN.md); [FDBStorage module](Sources/FDBStorage/DESIGN.md); [SQLiteStorage module](Sources/SQLiteStorage/DESIGN.md); [PostgreSQLStorage module](Sources/PostgreSQLStorage/DESIGN.md); [CloudflareDurableObjectStorage module](Sources/CloudflareDurableObjectStorage/DESIGN.md) |
 | Operation and test rules | [AGENTS.md](AGENTS.md) |
 
 This document owns package-level responsibilities, the module graph, the

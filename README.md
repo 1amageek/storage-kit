@@ -9,7 +9,7 @@ StorageKit provides a single `Transaction` protocol that works identically acros
 ## Features
 
 - **Unified API** — `StorageEngine` and `Transaction` protocols abstract away backend differences
-- **FDB-compatible semantics** — Lexicographic key ordering, range scans, `KeySelector`, Tuple Layer, Subspace, and namespace resolution
+- **FDB-compatible semantics** — Lexicographic key ordering, range scans, `KeySelector`, Tuple Layer, Subspace, and transactional Directory and Partition placement
 - **Zero-copy design** — backend-native range results feed an explicitly
   cleaned-up `KeyValueCursor` without materializing intermediate row arrays
 - **Swift 6.4 concurrency** — Full `Sendable` conformance, `Mutex` for synchronization, no `@unchecked Sendable`
@@ -97,7 +97,7 @@ shutdown admission closes, new transaction creation fails with a typed
 `StorageError`; a transaction admitted before the transition retains the
 backend resources required by its own terminal commit or cancellation contract.
 FoundationDB transfers its database handle to each admitted transaction so
-namespace operations can finish after the engine releases its handle. The
+Directory operations can finish after the engine releases its handle. The
 FoundationDB client network is process-global and is intentionally not stopped
 by an individual storage engine.
 
@@ -328,32 +328,54 @@ let (begin, end) = users.range()
 users.contains(key) // true
 ```
 
-### Namespace resolution and catalog capability
+### Directories, Partitions, and leases
 
-Hierarchical namespace management (equivalent to FDB's DirectoryLayer):
+Every engine exposes exactly one `DirectoryAccess` catalog through
+`engine.directoryAccess`. That catalog is the sole existence authority for
+Directories and Partitions of its backend: FoundationDB realizes it on the
+native Directory Layer, SQLite, PostgreSQL, and Cloudflare Durable Object
+realize it as catalog rows in the same store as the data, and the in-memory
+engine keeps it in memory. Every catalog operation receives the caller-owned
+transaction, so Directory metadata and application writes commit together.
 
 ```swift
-let userSpace = try await engine.resolveOrCreateNamespace(
-    path: ["app", "users"]
-)
-
 try await engine.withTransaction { transaction in
-    let indexSpace = try await engine.namespaceResolver.resolveOrCreate(
-        path: ["app", "users", "email_index"],
+    let catalog = engine.directoryAccess
+    let root = try await catalog.openOrInitializeRoot(transaction: transaction)
+    let app = try await catalog.openOrCreateDirectory("app", in: root, transaction: transaction)
+    let tenant = try await catalog.openOrCreatePartition(
+        try PartitionID([0x01]),
+        in: app,
         transaction: transaction
     )
-    // Directory metadata and application writes now share one transaction.
+
+    // A lease is a noncopyable owner bound to one Partition and one transaction.
+    let lease = try await engine.leasePartition(tenant, transaction: transaction)
+    try await lease.withWriteAccess(transaction) { access in
+        let key = tenant.root.root.pack(Tuple("answer"))
+        try access.setValue([0x2A], for: key)
+    }
+    lease.release()
 }
 ```
 
-- **FDB**: a persistent namespace registry resolves paths and also exposes `NamespaceCatalog` for enumeration and removal.
-- **SQLite / InMemory / PostgreSQL**: `DeterministicNamespaceResolver` maps every valid path directly to a `Subspace` and does not expose a catalog.
-
-Every resolver and catalog operation receives the caller-owned transaction.
-The one-shot `StorageEngine` helpers create a transaction for convenience; use
-the transaction-aware capability whenever namespace metadata and data mutations
-must commit atomically. Catalog absence is represented by `nil`, rather than by
-methods that exist only to throw unsupported-operation errors.
+- Read operations (`openRoot`, `openDirectory`, `openPartition`,
+  `listDirectories`, `listPartitions`) accept `TransactionReadAccess` and never create; absence
+  is reported as `nil`, never as an empty Directory.
+- Write operations (`openOrInitializeRoot`, `openOrCreateDirectory`,
+  `openOrCreatePartition`, `moveChild`, `removeChild`) require
+  `TransactionAccess` and are atomic with the transaction that carries them.
+- `engine.leasePartition(_:transaction:)` validates the Partition against the
+  catalog inside the transaction, binds key bounds to the Partition root, and
+  blocks moves and removals of any ancestor while the lease is active.
+- `PartitionLease.withReadAccess` / `withWriteAccess` expose bounded access
+  objects; a key outside the Partition fails with a typed error before any
+  backend call.
+- A Partition under a pending move or removal cannot be leased (`staleLease`);
+  a subtree covered by an active lease refuses `moveChild` and `removeChild`
+  with `directoryLeased`.
+- Tuple encoding is frozen as Tuple V1 by `TupleV1GoldenVectorTests`; Directory
+  root prefixes are Tuple-encoded integers allocated by the catalog.
 
 ### Physical Compaction
 
@@ -367,7 +389,7 @@ never treated as a successful no-op.
 
 ```mermaid
 flowchart TB
-    App["Application code"] --> Contract["StorageKit<br/>StorageEngine + Transaction<br/>Tuple + Subspace + Namespace capabilities"]
+    App["Application code"] --> Contract["StorageKit<br/>StorageEngine + Transaction<br/>Tuple + Subspace + Directory capabilities"]
     Contract --> Memory["InMemory<br/>snapshot reference backend"]
     Contract --> SQLite["SQLiteStorage<br/>local/native"]
     Contract --> PostgreSQL["PostgreSQLStorage<br/>server/Cloud SQL"]
