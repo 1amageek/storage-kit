@@ -48,6 +48,10 @@ let package = Package(
             name: "StorageKit",
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
+            ],
+            exclude: [
+                "DESIGN.md",
+                "Tuple/DESIGN.md",
             ]
         ),
         .target(

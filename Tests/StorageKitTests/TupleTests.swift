@@ -1,6 +1,7 @@
 import DatabaseTypes
 import Foundation
 import StorageKitFoundation
+import Synchronization
 import Testing
 
 @testable import StorageKit
@@ -9,8 +10,90 @@ private enum TupleDecodeAdmissionTestError: Error {
     case rejected
 }
 
+private enum TuplePackAdmissionTestError: Error {
+    case rejected
+}
+
+private final class TupleEncodingCounter: Sendable {
+    private let countState = Mutex(0)
+
+    var count: Int {
+        countState.withLock { $0 }
+    }
+
+    func recordEncoding() {
+        countState.withLock { $0 += 1 }
+    }
+
+    func reset() {
+        countState.withLock { $0 = 0 }
+    }
+}
+
+private struct CountingTupleElement: TupleElement {
+    let counter: TupleEncodingCounter
+
+    func encodeTuple(to sink: inout TupleEncodingSink) {
+        counter.recordEncoding()
+        sink.writeByte(TupleTypeCode.boolTrue.rawValue)
+    }
+
+    static func decodeTuple(
+        from bytes: ByteString,
+        at offset: inout Int
+    ) throws -> CountingTupleElement {
+        throw TupleError.invalidTypeCode(0xFF)
+    }
+
+    static func == (
+        lhs: CountingTupleElement,
+        rhs: CountingTupleElement
+    ) -> Bool {
+        lhs.counter === rhs.counter
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(counter))
+    }
+}
+
 @Suite("Tuple Layer Tests")
 struct TupleTests {
+
+    @Test("Admission-aware packing measures and encodes exactly once")
+    func admissionAwarePackingUsesOneMeasureAndOneEncode() throws {
+        let counter = TupleEncodingCounter()
+        let tuple = Tuple(CountingTupleElement(counter: counter))
+        let expected = tuple.pack()
+        counter.reset()
+        var admittedByteCounts: [Int] = []
+
+        let packed = try tuple.pack(admitting: { byteCount in
+            admittedByteCounts.append(byteCount)
+        })
+
+        #expect(packed == expected)
+        #expect(admittedByteCounts == [packed.count])
+        #expect(counter.count == 2)
+    }
+
+    @Test("Admission-aware packing rejects before materialization")
+    func admissionAwarePackingPreservesTypedFailure() {
+        let counter = TupleEncodingCounter()
+        let tuple = Tuple(CountingTupleElement(counter: counter))
+        let expectedByteCount = Tuple(true).pack().count
+        var admittedByteCounts: [Int] = []
+
+        #expect(throws: TuplePackAdmissionTestError.rejected) {
+            try tuple.pack(admitting: { byteCount in
+                admittedByteCounts.append(byteCount)
+                throw TuplePackAdmissionTestError.rejected
+            })
+        }
+
+        #expect(admittedByteCounts == [expectedByteCount])
+        #expect(counter.count == 1)
+    }
 
     @Test("Tuple decoding admits storage before malformed input can allocate past a limit")
     func tupleDecodeAdmissionPrecedesAllocation() {

@@ -142,6 +142,31 @@ public struct Tuple: Sendable, Hashable, Equatable {
         }
     }
 
+    /// Encode all elements after admitting the exact output allocation.
+    ///
+    /// The tuple is traversed once to measure its canonical byte count. The
+    /// synchronous callback receives that exact count and is never retained.
+    /// Only after admission succeeds is the final byte string allocated and
+    /// encoded by a second traversal.
+    ///
+    /// - Parameter admitting: A synchronous, non-retained callback that must
+    ///   admit the exact number of bytes required by the packed result.
+    /// - Returns: An owned byte string with the same bytes as `pack()`.
+    /// - Throws: The callback's error unchanged when admission is rejected.
+    public func pack<Failure: Error>(
+        admitting allocation: (Int) throws(Failure) -> Void
+    ) throws(Failure) -> ByteString {
+        var measuringSink = TupleEncodingSink(measuringFrom: 0)
+        encodePacked(to: &measuringSink)
+        let byteCount = measuringSink.byteCount
+        try allocation(byteCount)
+        return ByteString.copying(count: byteCount) { buffer in
+            var sink = TupleEncodingSink(buffer: buffer)
+            encodePacked(to: &sink)
+            sink.validateFinalByteCount(byteCount)
+        }
+    }
+
     package func encodePacked(to sink: inout TupleEncodingSink) {
         for element in storedElements {
             element.encodeTuple(to: &sink)
