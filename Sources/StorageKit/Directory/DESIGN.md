@@ -30,7 +30,7 @@ active work to one Partition.
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
 | [StorageKit module](../DESIGN.md) | parent | `TransactionReadAccess`, `TransactionAccess`, `StorageEngine.transactionDomain`, `StorageError`, `Subspace`, `Tuple` | Supplies the transaction and encoding contracts the catalog is built on. | Catalog keys use Tuple V1; a Tuple change is a layout change. |
-| `FDBStorage` module | coordinates with | `DirectoryAccess` | Realizes the same contract over the native FoundationDB Directory Layer. | Partitions are custom-typed directories because native partitions cannot nest; layer type is verified on open. |
+| [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess`, `PartitionLeaseRegistry.registerIntent` | Realizes the same contract over the native FoundationDB Directory Layer (layout FD-1…FD-9). | Partitions are custom-typed directories because native partitions cannot nest; layer type is verified on open; listing below a missing parent fails with `keyNotFound` there. |
 | `SQLiteStorage`, `PostgreSQLStorage`, `CloudflareDurableObjectStorage` | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL rejects `readCommitted` isolation for catalog mutation (owned by PostgreSQLStorage). |
 | database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | Framework proves its own Subspaces empty before requesting Partition removal. |
 
@@ -237,7 +237,7 @@ confirming node keys stay within each backend's key bound.
 | Contract | Evidence |
 |---|---|
 | Values and bounds | `Tests/StorageKitTests/DirectoryValueTests.swift` |
-| D-1…D-8, state machine, operations 1–8, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by every adapter test target and by `InMemoryDirectoryConformanceTests` |
+| D-1…D-8, state machine, operations 1–8, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests` (the layout-marker step is KV-only; FDB proves layer-type rejection in its own suite) |
 | L-4, L-5 (compile-level), L-6 escape | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 
 Changing the catalog layout, the marker bytes, or any operation semantics

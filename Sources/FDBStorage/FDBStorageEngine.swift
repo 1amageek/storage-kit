@@ -23,7 +23,15 @@ import Synchronization
 ///
 /// // Specific database instance
 /// let engine = try await FDBStorageEngine(configuration: .init(database: db))
+///
+/// // Isolated Directory root below a dedicated native path
+/// let tenantEngine = try await FDBStorageEngine(
+///     configuration: .init(rootPath: ["storage-kit", "tenant-a"])
+/// )
 /// ```
+///
+/// Directories and Partitions are realized on the native Directory Layer
+/// below `Configuration.rootPath`; see `FDBDirectoryLayout`.
 public final class FDBStorageEngine: StorageEngine, Sendable {
 
     public struct Configuration: Sendable {
@@ -31,16 +39,25 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         let clusterFilePath: String?
         let transactionOptions: [TransactionOption]
         let commitRequestLimit: CommitRequestLimit
+        /// Native Directory Layer path that owns this engine's root Directory.
+        /// Engines with distinct root paths share one cluster without seeing
+        /// each other's Directories. Every component must be non-empty.
+        let rootPath: [String]
+
+        /// Root path used when an initializer names none.
+        public static let defaultRootPath: [String] = ["storage-kit"]
 
         /// Use the default cluster. FDB client library is initialized automatically.
         public init(
             transactionOptions: [TransactionOption] = [],
-            commitRequestLimit: CommitRequestLimit = .default
+            commitRequestLimit: CommitRequestLimit = .default,
+            rootPath: [String] = Configuration.defaultRootPath
         ) {
             self.database = nil
             self.clusterFilePath = nil
             self.transactionOptions = transactionOptions
             self.commitRequestLimit = commitRequestLimit
+            self.rootPath = rootPath
         }
 
         /// Use the cluster selected by an explicit cluster file.
@@ -50,24 +67,28 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         public init(
             clusterFilePath: String,
             transactionOptions: [TransactionOption] = [],
-            commitRequestLimit: CommitRequestLimit = .default
+            commitRequestLimit: CommitRequestLimit = .default,
+            rootPath: [String] = Configuration.defaultRootPath
         ) {
             self.database = nil
             self.clusterFilePath = clusterFilePath
             self.transactionOptions = transactionOptions
             self.commitRequestLimit = commitRequestLimit
+            self.rootPath = rootPath
         }
 
         /// Use a specific database instance.
         public init(
             database: any DatabaseProtocol,
             transactionOptions: [TransactionOption] = [],
-            commitRequestLimit: CommitRequestLimit = .default
+            commitRequestLimit: CommitRequestLimit = .default,
+            rootPath: [String] = Configuration.defaultRootPath
         ) {
             self.database = database
             self.clusterFilePath = nil
             self.transactionOptions = transactionOptions
             self.commitRequestLimit = commitRequestLimit
+            self.rootPath = rootPath
         }
     }
 
@@ -104,6 +125,16 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
     private let storageLifecycle = StorageEngineLifecycle()
 
     public init(configuration: Configuration) async throws {
+        guard !configuration.rootPath.isEmpty,
+              configuration.rootPath.allSatisfy({ !$0.isEmpty })
+        else {
+            throw StorageError(
+                code: .invalidOperation,
+                operation: .open,
+                backend: .foundationDB,
+                message: "FoundationDB Directory root path requires at least one non-empty component"
+            )
+        }
         let database: any DatabaseProtocol
         if let configuredDatabase = configuration.database {
             database = configuredDatabase
@@ -139,7 +170,10 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         let domain = StorageTransactionDomain()
         self.database = Mutex(database)
         self.transactionDomain = domain
-        self.directoryAccess = FDBDirectoryAccess(transactionDomain: domain)
+        self.directoryAccess = FDBDirectoryAccess(
+            transactionDomain: domain,
+            rootPath: configuration.rootPath
+        )
         self.transactionOptions = configuration.transactionOptions
         self.commitRequestLimit = configuration.commitRequestLimit
     }
