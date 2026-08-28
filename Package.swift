@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "StorageKit", targets: ["StorageKit"]),
         .library(name: "StorageKitSystemClock", targets: ["StorageKitSystemClock"]),
         .library(name: "StorageKitFoundation", targets: ["StorageKitFoundation"]),
+        .library(name: "StorageKitConformance", targets: ["StorageKitConformance"]),
         .library(name: "CloudflareDurableObjectStorageWire", targets: ["CloudflareDurableObjectStorageWire"]),
         .library(name: "FDBStorage", targets: ["FDBStorage"]),
         .library(name: "SQLiteStorage", targets: ["SQLiteStorage"]),
@@ -61,6 +62,13 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 .product(name: "DatabaseTypesFoundation", package: "database-types"),
+                "StorageKit",
+            ]
+        ),
+        .target(
+            name: "StorageKitConformance",
+            dependencies: [
+                .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
             ]
         ),
@@ -144,6 +152,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
+                "StorageKitConformance",
                 "StorageKitFoundation",
             ]
         ),
@@ -151,6 +160,7 @@ let package = Package(
             name: "FDBStorageTests",
             dependencies: [
                 "FDBStorage",
+                "StorageKitConformance",
                 .product(name: "DatabaseTypes", package: "database-types"),
             ],
             linkerSettings: [
@@ -161,6 +171,7 @@ let package = Package(
             name: "SQLiteStorageTests",
             dependencies: [
                 "SQLiteStorage",
+                "StorageKitConformance",
                 .product(name: "DatabaseTypes", package: "database-types"),
             ]
         ),
@@ -168,6 +179,7 @@ let package = Package(
             name: "PostgreSQLStorageTests",
             dependencies: [
                 "PostgreSQLStorage",
+                "StorageKitConformance",
                 .product(name: "DatabaseTypes", package: "database-types"),
             ]
         ),
@@ -176,6 +188,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "CloudflareDurableObjectStorage",
+                "StorageKitConformance",
                 "CloudflareDurableObjectStorageTesting",
                 "CloudflareDurableObjectStorageWire",
                 "StorageKitSystemClock",

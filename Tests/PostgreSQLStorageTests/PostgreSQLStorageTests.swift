@@ -1116,22 +1116,6 @@ struct PostgreSQLStorageTests {
     }
 
     // =========================================================================
-    // MARK: - Namespace resolution
-    // =========================================================================
-
-    @Test func namespaceResolutionIsDeterministic() async throws {
-        let engine = try await makeEngine()
-        defer { await engine.waitUntilShutdown() }
-
-        let subspace1 = try await engine.resolveOrCreateNamespace(path: ["app", "users"])
-        let subspace2 = try await engine.resolveExistingNamespace(path: ["app", "users"])
-        #expect(subspace1 == subspace2)
-
-        let exists = try await engine.namespaceExists(path: ["app", "users"])
-        #expect(exists == true)
-    }
-
-    // =========================================================================
     // MARK: - PostgreSQLRangeResult Error Path
     // =========================================================================
 

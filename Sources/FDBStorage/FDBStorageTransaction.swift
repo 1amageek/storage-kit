@@ -60,8 +60,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         var activeOperationCount = 0
         var commitFollowerCount = 0
         var commitCancellationWaiterCount = 0
-        var activeNamespaceOperation: UInt64?
-        var nextNamespaceOperation: UInt64 = 1
+        var activeDirectoryOperation: UInt64?
+        var nextDirectoryOperation: UInt64 = 1
         var rangeLeaseActivity: [UInt64: Bool] = [:]
         var nextRangeLease: UInt64 = 1
         var cancellationDrain: TransactionActivityDrain?
@@ -144,7 +144,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
     }
 
-    func withNamespaceOperation<T: Sendable>(
+    func withDirectoryOperation<T: Sendable>(
         transactionDomain: StorageTransactionDomain,
         writes: Bool,
         operation: StorageOperation,
@@ -155,26 +155,26 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 code: .invalidOperation,
                 operation: operation,
                 backend: .foundationDB,
-                message: "FoundationDB namespace registry and transaction belong to different engines"
+                message: "FoundationDB Directory access and transaction belong to different engines"
             )
         }
         let token = try state.withLock { state -> UInt64 in
             try Self.validateExclusiveAccess(state, operation: operation)
-            let token = state.nextNamespaceOperation
-            state.nextNamespaceOperation &+= 1
-            state.activeNamespaceOperation = token
+            let token = state.nextDirectoryOperation
+            state.nextDirectoryOperation &+= 1
+            state.activeDirectoryOperation = token
             if writes {
                 state.hasPendingMutations = true
             }
             return token
         }
         defer {
-            finishNamespaceOperation(token)
+            finishDirectoryOperation(token)
         }
         return try await body(fdbTransaction)
     }
 
-    func retainedDatabaseForNamespaceOperation(
+    func retainedDatabaseForDirectoryOperation(
         operation: StorageOperation
     ) throws -> any DatabaseProtocol {
         guard let database else {
@@ -182,7 +182,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 code: .invalidOperation,
                 operation: operation,
                 backend: .foundationDB,
-                message: "FoundationDB namespace operations require a transaction created by FDBStorageEngine"
+                message: "FoundationDB Directory operations require a transaction created by FDBStorageEngine"
             )
         }
         return database
@@ -487,7 +487,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         let start = state.withLock { state -> Start in
             switch state.lifecycle {
             case .open:
-                guard state.activeNamespaceOperation == nil,
+                guard state.activeDirectoryOperation == nil,
                       state.activeOperationCount == 0,
                       state.rangeLeaseActivity.isEmpty else {
                     return .failed(Self.lifecycleError(
@@ -723,7 +723,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 }
                 let drain: TransactionActivityDrain?
                 if state.activeOperationCount > 0
-                    || state.activeNamespaceOperation != nil {
+                    || state.activeDirectoryOperation != nil {
                     let pendingDrain = TransactionActivityDrain()
                     state.cancellationDrain = pendingDrain
                     drain = pendingDrain
@@ -1025,7 +1025,9 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                  .transactionBusy, .invalidOperation, .unsupportedOperation,
                  .backendContractViolation, .dataCorruption,
                  .resourceUnavailable, .keyNotFound,
-                 .transactionTooLarge, .keyTooLarge, .valueTooLarge:
+                 .transactionTooLarge, .keyTooLarge, .valueTooLarge,
+                 .incompatibleStorageLayout, .directoryNotEmpty, .directoryLeased,
+                 .storageDomainMismatch, .staleLease, .invalidDirectoryAddress:
                 return storageError
             case .transactionTimedOut, .transactionCancelled, .connectionFailure,
                  .commitUnknownResult, .backendFailure:
@@ -1264,9 +1266,9 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         operation: StorageOperation
     ) throws {
         try validateOpen(state.lifecycle, operation: operation)
-        guard state.activeNamespaceOperation == nil else {
+        guard state.activeDirectoryOperation == nil else {
             throw lifecycleError(
-                "FoundationDB transaction has an active namespace operation",
+                "FoundationDB transaction has an active Directory operation",
                 operation: operation
             )
         }
@@ -1383,12 +1385,12 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         drain?.resolveIfPending()
     }
 
-    private func finishNamespaceOperation(_ token: UInt64) {
+    private func finishDirectoryOperation(_ token: UInt64) {
         let drain = state.withLock { state -> TransactionActivityDrain? in
-            guard state.activeNamespaceOperation == token else {
+            guard state.activeDirectoryOperation == token else {
                 return nil
             }
-            state.activeNamespaceOperation = nil
+            state.activeDirectoryOperation = nil
             return Self.takeCancellationDrainIfReady(&state)
         }
         drain?.resolveIfPending()
@@ -1398,7 +1400,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         _ state: inout MutableState
     ) -> TransactionActivityDrain? {
         guard state.activeOperationCount == 0,
-              state.activeNamespaceOperation == nil,
+              state.activeDirectoryOperation == nil,
               let drain = state.cancellationDrain else {
             return nil
         }

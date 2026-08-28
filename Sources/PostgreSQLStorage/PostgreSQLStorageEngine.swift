@@ -60,7 +60,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     private let configuration: PostgreSQLConfiguration
     private let logger: Logger
     private let runTask: Task<Void, Never>
-    private let transactionDomain = StorageTransactionDomain()
+    public let transactionDomain: StorageTransactionDomain
+    public let directoryAccess: any DirectoryAccess
     private let storageLifecycle = StorageEngineLifecycle()
     private let resultBytesFactory: PostgreSQLResultBytesFactory
 
@@ -96,6 +97,12 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         // loudly here rather than corrupt a query downstream.
         try Self.validateTableName(configuration.tableName)
 
+        let domain = StorageTransactionDomain()
+        self.transactionDomain = domain
+        self.directoryAccess = KeyValueDirectoryCatalog(
+            transactionDomain: domain,
+            backend: .postgreSQL
+        )
         self.configuration = configuration
         self.logger = configuration.backgroundLogger
         self.resultBytesFactory = resultBytesFactory
@@ -280,6 +287,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                     transactionDomain: transactionDomain,
                     resultBytesFactory: resultBytesFactory
                 )
+                defer { transactionDomain.leases.releaseIntents(for: tx) }
 
                 return try await ActiveTransactionContext
                     .withActiveTransaction(tx) { _ in
@@ -309,9 +317,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         }
     }
 
-    // Namespace resolution uses the deterministic default implementation.
-
     public func requestShutdown() {
+        transactionDomain.leases.requestShutdown()
         let runTask = runTask
         storageLifecycle.requestShutdown(
             prepare: {

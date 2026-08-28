@@ -53,7 +53,8 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     private let connection: SQLiteConnectionHandle
     private let lifetime: SQLiteStorageLifetime
     private let coordinator: SQLiteTransactionCoordinator
-    private let transactionDomain = StorageTransactionDomain()
+    public let transactionDomain: StorageTransactionDomain
+    public let directoryAccess: any DirectoryAccess
     private let state = Mutex(EngineState())
     private let storageLifecycle = StorageEngineLifecycle()
 
@@ -63,8 +64,14 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
             busyTimeoutMilliseconds: configuration.busyTimeoutMilliseconds
         )
         let lifetime = SQLiteStorageLifetime()
+        let domain = StorageTransactionDomain()
         self.connection = connection
         self.lifetime = lifetime
+        self.transactionDomain = domain
+        self.directoryAccess = KeyValueDirectoryCatalog(
+            transactionDomain: domain,
+            backend: .sqlite
+        )
         self.coordinator = SQLiteTransactionCoordinator(
             connection: connection,
             lifetime: lifetime
@@ -106,32 +113,8 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
         }
     }
 
-    public func executeTransaction(
-        _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
-    ) async throws {
-        let transaction = try createTransaction()
-        try await ActiveTransactionContext.withActiveTransaction(
-            transaction
-        ) { _ in
-            do {
-                try await operation(transaction)
-                try await transaction.commit()
-            } catch {
-                let operationError = error
-                do {
-                    try await transaction.cancel()
-                } catch {
-                    throw StorageTransactionCleanupError(
-                        operationError: operationError,
-                        cancellationError: error
-                    )
-                }
-                throw operationError
-            }
-        }
-    }
-
     public func requestShutdown() {
+        transactionDomain.leases.requestShutdown()
         let lifetime = lifetime
         let coordinator = coordinator
         let connection = connection

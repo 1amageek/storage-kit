@@ -53,6 +53,18 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
         case backendContractViolation = "backend_contract_violation"
         case dataCorruption = "data_corruption"
         case resourceUnavailable = "resource_unavailable"
+        /// The keyspace carries no supported storage layout marker.
+        case incompatibleStorageLayout = "incompatible_storage_layout"
+        /// A Directory or Partition still holds children or data.
+        case directoryNotEmpty = "directory_not_empty"
+        /// An active Partition lease covers the affected subtree.
+        case directoryLeased = "directory_leased"
+        /// A transaction, Directory, or Partition belongs to another engine.
+        case storageDomainMismatch = "storage_domain_mismatch"
+        /// A lease, cursor, or binding no longer matches the catalog.
+        case staleLease = "stale_lease"
+        /// A Directory path, name, or Partition identifier violates the limits.
+        case invalidDirectoryAddress = "invalid_directory_address"
     }
 
     public let code: Code
@@ -94,7 +106,9 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
              .valueTooLarge, .keyNotFound, .invalidOperation,
              .unsupportedOperation, .backendFailure, .backendContractViolation,
              .dataCorruption,
-             .resourceUnavailable:
+             .resourceUnavailable,
+             .incompatibleStorageLayout, .directoryNotEmpty, .directoryLeased,
+             .storageDomainMismatch, .staleLease, .invalidDirectoryAddress:
             return .never
         }
     }

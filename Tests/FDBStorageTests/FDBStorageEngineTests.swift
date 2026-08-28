@@ -50,59 +50,6 @@ struct FDBStorageEngineTests {
         )
     }
 
-    @Test func namespaceRegistryExposesCatalogLifecycle() async throws {
-        let engine = try await makeEngine()
-        let root = "storage-kit-\(Foundation.UUID().uuidString)"
-        let rootPath = [root]
-        let childPath = [root, "events"]
-
-        let created = try await engine.withTransaction { transaction in
-            try await engine.namespaceResolver.resolveOrCreate(
-                path: childPath,
-                transaction: transaction
-            )
-        }
-
-        try await engine.withTransaction { transaction in
-            let exists = try await engine.namespaceResolver.namespaceExists(
-                path: childPath,
-                transaction: transaction
-            )
-            let opened = try await engine.namespaceResolver.resolveExisting(
-                path: childPath,
-                transaction: transaction
-            )
-            let catalog = try #require(engine.namespaceCatalog)
-            let children = try await catalog.listNamespaces(
-                path: rootPath,
-                transaction: transaction
-            )
-            #expect(exists)
-            #expect(opened == created)
-            #expect(children == ["events"])
-        }
-
-        try await engine.withTransaction { transaction in
-            let catalog = try #require(engine.namespaceCatalog)
-            try await catalog.removeNamespace(
-                path: childPath,
-                transaction: transaction
-            )
-            try await catalog.removeNamespace(
-                path: rootPath,
-                transaction: transaction
-            )
-        }
-
-        try await engine.withTransaction { transaction in
-            let exists = try await engine.namespaceResolver.namespaceExists(
-                path: childPath,
-                transaction: transaction
-            )
-            #expect(!exists)
-        }
-    }
-
     @Test func shutdownTransfersDatabaseLifetimeToAdmittedTransaction() async throws {
         let bootstrapEngine = try await makeEngine()
         await bootstrapEngine.shutdown()
@@ -112,12 +59,11 @@ struct FDBStorageEngineTests {
         var engine: FDBStorageEngine? = try await FDBStorageEngine(
             configuration: .init(database: try #require(database))
         )
-        let namespaceResolver = try #require(engine).namespaceResolver
         var transaction: FDBStorageTransaction? = try #require(engine)
             .createTransaction()
-        let path = [
-            "storage-kit-lifecycle-\(Foundation.UUID().uuidString)"
-        ]
+        let key = ByteString(
+            Array("storage-kit-lifecycle-\(Foundation.UUID().uuidString)".utf8)
+        )
 
         database = nil
         await engine?.shutdown()
@@ -126,10 +72,7 @@ struct FDBStorageEngineTests {
         #expect(observedDatabase != nil)
         do {
             let admittedTransaction = try #require(transaction)
-            _ = try await namespaceResolver.resolveOrCreate(
-                path: path,
-                transaction: admittedTransaction
-            )
+            try admittedTransaction.setValue([1], for: key)
             try await admittedTransaction.commit()
         }
         transaction = nil
@@ -137,11 +80,7 @@ struct FDBStorageEngineTests {
 
         let cleanupEngine = try await makeEngine()
         try await cleanupEngine.withTransaction { transaction in
-            let catalog = try #require(cleanupEngine.namespaceCatalog)
-            try await catalog.removeNamespace(
-                path: path,
-                transaction: transaction
-            )
+            try transaction.clear(key: key)
         }
         await cleanupEngine.shutdown()
     }

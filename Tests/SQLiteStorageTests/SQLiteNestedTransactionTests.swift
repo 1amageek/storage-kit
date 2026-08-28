@@ -551,15 +551,4 @@ struct SQLiteNestedTransactionTests {
             }
         }
     }
-
-    // =========================================================================
-    // MARK: - Namespace resolution for SQLite
-    // =========================================================================
-
-    @Test func sqliteEngineUsesDeterministicNamespaceResolution() async throws {
-        let engine = try SQLiteStorageEngine(configuration: .inMemory)
-        #expect(engine.namespaceResolver is DeterministicNamespaceResolver)
-        #expect(engine.namespaceCatalog == nil)
-        await engine.shutdown()
-    }
 }

@@ -97,7 +97,8 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
     public typealias TransactionType = FDBStorageTransaction
 
     private let database: Mutex<(any DatabaseProtocol)?>
-    private let transactionDomain = StorageTransactionDomain()
+    public let transactionDomain: StorageTransactionDomain
+    public let directoryAccess: any DirectoryAccess
     private let transactionOptions: [TransactionOption]
     private let commitRequestLimit: CommitRequestLimit
     private let storageLifecycle = StorageEngineLifecycle()
@@ -135,7 +136,10 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
                 )
             }
         }
+        let domain = StorageTransactionDomain()
         self.database = Mutex(database)
+        self.transactionDomain = domain
+        self.directoryAccess = FDBDirectoryAccess(transactionDomain: domain)
         self.transactionOptions = configuration.transactionOptions
         self.commitRequestLimit = configuration.commitRequestLimit
     }
@@ -180,6 +184,7 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
         let tx = try createTransaction()
+        defer { transactionDomain.leases.releaseIntents(for: tx) }
         try await ActiveTransactionContext.withActiveTransaction(
             tx
         ) { _ in
@@ -224,19 +229,8 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         }
     }
 
-    public var namespaceResolver: any NamespaceResolver {
-        NamespaceRegistry(
-            transactionDomain: transactionDomain
-        )
-    }
-
-    public var namespaceCatalog: (any NamespaceCatalog)? {
-        NamespaceRegistry(
-            transactionDomain: transactionDomain
-        )
-    }
-
     public func requestShutdown() {
+        transactionDomain.leases.requestShutdown()
         storageLifecycle.requestShutdown { [self] in
             releaseDatabase()
         }

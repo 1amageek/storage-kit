@@ -214,11 +214,18 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     /// Sorted KV store and its commit version. Both change under one lock so a
     /// transaction can never observe a version that belongs to another state.
     let _store: Mutex<StoreState>
-    let transactionDomain = StorageTransactionDomain()
+    public let transactionDomain: StorageTransactionDomain
+    public let directoryAccess: any DirectoryAccess
     private let storageLifecycle = StorageEngineLifecycle()
 
     public init(configuration: Configuration = .init()) {
+        let domain = StorageTransactionDomain()
         self._store = Mutex(StoreState())
+        self.transactionDomain = domain
+        self.directoryAccess = KeyValueDirectoryCatalog(
+            transactionDomain: domain,
+            backend: .inMemory
+        )
     }
 
     public func createTransaction() throws -> InMemoryTransaction {
@@ -249,37 +256,13 @@ public final class InMemoryEngine: StorageEngine, Sendable {
         }
     }
 
-    public func executeTransaction(
-        _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
-    ) async throws {
-        let tx = try createTransaction()
-        try await ActiveTransactionContext.withActiveTransaction(
-            tx
-        ) { _ in
-            do {
-                try await operation(tx)
-                try await tx.commit()
-            } catch {
-                let operationError = error
-                do {
-                    try await tx.cancel()
-                } catch {
-                    throw StorageTransactionCleanupError(
-                        operationError: operationError,
-                        cancellationError: error
-                    )
-                }
-                throw operationError
-            }
-        }
-    }
-
     /// Current store size (for testing).
     public var count: Int {
         _store.withLock { $0.store.count }
     }
 
     public func requestShutdown() {
+        transactionDomain.leases.requestShutdown()
         storageLifecycle.requestShutdown()
     }
 

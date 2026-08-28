@@ -7,7 +7,8 @@ public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable
     public typealias TransactionType = CloudflareDurableObjectStorageTransaction
 
     public let configuration: CloudflareDurableObjectStorageConfiguration
-    private let transactionDomain: StorageTransactionDomain
+    public let transactionDomain: StorageTransactionDomain
+    public let directoryAccess: any DirectoryAccess
     private let storageLifecycle = StorageEngineLifecycle()
 
     public var monotonicClock: any StorageMonotonicClock {
@@ -16,7 +17,12 @@ public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable
 
     public init(configuration: CloudflareDurableObjectStorageConfiguration) async throws {
         self.configuration = configuration
-        self.transactionDomain = StorageTransactionDomain()
+        let domain = StorageTransactionDomain()
+        self.transactionDomain = domain
+        self.directoryAccess = KeyValueDirectoryCatalog(
+            transactionDomain: domain,
+            backend: .cloudflareDurableObject
+        )
         let readiness = try await configuration.client.readiness(
             StorageWireReadinessRequest(partitionIdentity: configuration.partitionIdentity)
         )
@@ -48,6 +54,7 @@ public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable
     }
 
     public func requestShutdown() {
+        transactionDomain.leases.requestShutdown()
         storageLifecycle.requestShutdown()
     }
 

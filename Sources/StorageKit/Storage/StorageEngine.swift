@@ -1,7 +1,8 @@
 /// Abstract protocol for KV storage backends.
 ///
-/// Each backend (FoundationDB, SQLite, InMemory) conforms to this protocol.
-/// Provides transaction creation and low-level execution hooks.
+/// Each backend (FoundationDB, SQLite, PostgreSQL, Cloudflare Durable Object,
+/// InMemory) conforms to this protocol. It provides transaction creation,
+/// the engine's Directory capability, and low-level execution hooks.
 ///
 /// ## Initialization
 ///
@@ -36,12 +37,16 @@ public protocol StorageEngine: AnyObject, Sendable {
     /// existential engine.
     func createOwnedTransaction() throws -> any Transaction
 
-    /// Hierarchical namespace resolution capability.
-    var namespaceResolver: any NamespaceResolver { get }
+    /// Identity of this engine instance.
+    ///
+    /// Every transaction, Directory, and Partition the engine produces belongs
+    /// to this domain, and every Directory operation and lease rejects
+    /// participants from another domain before performing I/O.
+    var transactionDomain: StorageTransactionDomain { get }
 
-    /// Administrative namespace catalog when the backend stores independent
-    /// namespace metadata.
-    var namespaceCatalog: (any NamespaceCatalog)? { get }
+    /// The engine's Directory capability and sole existence authority for its
+    /// Directories and Partitions.
+    var directoryAccess: any DirectoryAccess { get }
 
     /// Atomically closes admission for new work and starts backend cleanup.
     ///
@@ -69,35 +74,9 @@ public protocol StorageEngine: AnyObject, Sendable {
     func executeTransaction(
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws
-
-    /// Resolves or creates one logical namespace in an owned transaction.
-    func resolveOrCreateNamespace(path: [String]) async throws -> Subspace
-
-    /// Resolves one existing logical namespace in an owned transaction.
-    func resolveExistingNamespace(path: [String]) async throws -> Subspace
-
-    /// Lists direct children of one logical namespace.
-    func listNamespaces(path: [String]) async throws -> [String]
-
-    /// Removes one logical namespace.
-    func removeNamespace(path: [String]) async throws
-
-    /// Tests whether one logical namespace exists.
-    func namespaceExists(path: [String]) async throws -> Bool
 }
 
 extension StorageEngine {
-    /// Default deterministic namespace resolution.
-    ///
-    /// Non-FDB backends use this default. The deterministic Tuple encoding
-    /// ensures that callers such as database-framework can resolve namespace paths
-    /// without backend-specific logic.
-    public var namespaceResolver: any NamespaceResolver {
-        DeterministicNamespaceResolver()
-    }
-
-    public var namespaceCatalog: (any NamespaceCatalog)? { nil }
-
     /// Requests shutdown and awaits authoritative backend cleanup.
     public func shutdown() async {
         requestShutdown()
@@ -108,164 +87,13 @@ extension StorageEngine {
         try createTransaction()
     }
 
+    /// Default lifecycle: one owned transaction, committed on success and
+    /// cancelled on failure by `TransactionLifecycleOwner`.
     public func executeTransaction(
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
-        let transaction = try createTransaction()
-        try await ActiveTransactionContext.withActiveTransaction(
-            transaction
-        ) { _ in
-            do {
-                try await operation(transaction)
-                try await transaction.commit()
-            } catch {
-                let operationError = error
-                do {
-                    try await transaction.cancel()
-                } catch {
-                    throw StorageTransactionCleanupError(
-                        operationError: operationError,
-                        cancellationError: error
-                    )
-                }
-                throw operationError
-            }
-        }
-    }
-
-    /// Resolve or create a namespace in a one-shot transaction.
-    ///
-    /// Application write paths that already own a transaction must call the
-    /// transaction-aware `NamespaceResolver` API directly so namespace metadata
-    /// shares their commit boundary.
-    public func resolveOrCreateNamespace(path: [String]) async throws -> Subspace {
-        let transaction = try createOwnedTransaction()
-        do {
-            let subspace = try await namespaceResolver.resolveOrCreate(
-                path: path,
-                transaction: transaction
-            )
-            try await transaction.commit()
-            return subspace
-        } catch {
-            let operationError = error
-            do {
-                try await transaction.cancel()
-            } catch {
-                throw StorageTransactionCleanupError(
-                    operationError: operationError,
-                    cancellationError: error
-                )
-            }
-            throw operationError
-        }
-    }
-
-    /// Resolve an existing namespace in a one-shot transaction.
-    public func resolveExistingNamespace(path: [String]) async throws -> Subspace {
-        let transaction = try createOwnedTransaction()
-        do {
-            let subspace = try await namespaceResolver.resolveExisting(
-                path: path,
-                transaction: transaction
-            )
-            try await transaction.commit()
-            return subspace
-        } catch {
-            let operationError = error
-            do {
-                try await transaction.cancel()
-            } catch {
-                throw StorageTransactionCleanupError(
-                    operationError: operationError,
-                    cancellationError: error
-                )
-            }
-            throw operationError
-        }
-    }
-
-    /// List child namespaces in a one-shot transaction.
-    public func listNamespaces(path: [String]) async throws -> [String] {
-        guard let namespaceCatalog else {
-            throw StorageError.unsupportedOperation(
-                "This storage backend does not maintain a namespace catalog",
-                operation: .read
-            )
-        }
-        let transaction = try createOwnedTransaction()
-        do {
-            let names = try await namespaceCatalog.listNamespaces(
-                path: path,
-                transaction: transaction
-            )
-            try await transaction.commit()
-            return names
-        } catch {
-            let operationError = error
-            do {
-                try await transaction.cancel()
-            } catch {
-                throw StorageTransactionCleanupError(
-                    operationError: operationError,
-                    cancellationError: error
-                )
-            }
-            throw operationError
-        }
-    }
-
-    /// Remove a namespace in a one-shot transaction.
-    public func removeNamespace(path: [String]) async throws {
-        guard let namespaceCatalog else {
-            throw StorageError.unsupportedOperation(
-                "This storage backend does not maintain a namespace catalog",
-                operation: .delete
-            )
-        }
-        let transaction = try createOwnedTransaction()
-        do {
-            try await namespaceCatalog.removeNamespace(
-                path: path,
-                transaction: transaction
-            )
-            try await transaction.commit()
-        } catch {
-            let operationError = error
-            do {
-                try await transaction.cancel()
-            } catch {
-                throw StorageTransactionCleanupError(
-                    operationError: operationError,
-                    cancellationError: error
-                )
-            }
-            throw operationError
-        }
-    }
-
-    /// Test namespace existence in a one-shot transaction.
-    public func namespaceExists(path: [String]) async throws -> Bool {
-        let transaction = try createOwnedTransaction()
-        do {
-            let exists = try await namespaceResolver.namespaceExists(
-                path: path,
-                transaction: transaction
-            )
-            try await transaction.commit()
-            return exists
-        } catch {
-            let operationError = error
-            do {
-                try await transaction.cancel()
-            } catch {
-                throw StorageTransactionCleanupError(
-                    operationError: operationError,
-                    cancellationError: error
-                )
-            }
-            throw operationError
-        }
+        let owner = TransactionLifecycleOwner(transaction: try createTransaction())
+        try await owner.execute(operation)
     }
 
     /// Execute a transaction once.
@@ -279,4 +107,66 @@ extension StorageEngine {
         try await StorageTransactionExecutor(engine: self).withTransaction(operation)
     }
 
+    /// Issues an exclusive lease for `partition` after re-validating it in
+    /// `transaction`.
+    ///
+    /// The lease is reserved before validation so a concurrent move or removal
+    /// cannot slip between the catalog check and the registration. Validation
+    /// walks the Partition's address through the catalog; a missing node or a
+    /// different root prefix means the Partition value is stale.
+    public func leasePartition(
+        _ partition: Partition,
+        transaction: any TransactionReadAccess
+    ) async throws -> PartitionLease {
+        let backend = directoryAccess.backend
+        guard partition.domain === transactionDomain else {
+            throw StorageError.storageDomainMismatch(
+                "Partition belongs to a different storage engine",
+                operation: .open,
+                backend: backend
+            )
+        }
+        guard transaction.transactionDomain === transactionDomain else {
+            throw StorageError.storageDomainMismatch(
+                "Transaction belongs to a different storage engine",
+                operation: .open,
+                backend: backend
+            )
+        }
+        guard partition.hasConsistentAddress else {
+            throw StorageError.invalidDirectoryAddress(
+                .partitionStepRequired,
+                operation: .open,
+                backend: backend
+            )
+        }
+        let bounds = try PartitionKeyBounds(partition: partition, backend: backend)
+        let registration = try transactionDomain.leases.reserve(
+            partition.root.address,
+            backend: backend
+        )
+        let current: Directory?
+        do {
+            current = try await directoryAccess.openDirectory(
+                at: partition.root.address,
+                transaction: transaction
+            )
+        } catch {
+            registration.release()
+            throw error
+        }
+        guard let current, current.root.prefix == partition.root.root.prefix else {
+            registration.release()
+            throw StorageError.staleLease(
+                "Partition no longer exists at its address with the same root",
+                operation: .open,
+                backend: backend
+            )
+        }
+        return PartitionLease(
+            partition: partition,
+            registration: registration,
+            bounds: bounds
+        )
+    }
 }
