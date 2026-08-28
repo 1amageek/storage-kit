@@ -76,6 +76,8 @@ public struct KeyValueCursor: Sendable {
     ///
     /// Validation runs before and after every advance. A validation failure is
     /// terminal and awaits the same backend cursor's cleanup before escaping.
+    /// Post-advance validation runs inside the cursor state before a returned
+    /// row becomes observable or an in-flight finish boundary resolves.
     /// Explicit `finish()` remains valid after the scope ends because cleanup
     /// is not a read capability.
     public consuming func validatingScope(
@@ -118,7 +120,8 @@ public struct KeyValueCursor: Sendable {
     /// Advances this single-consumer cursor.
     ///
     /// Cancellation is terminal. A cursor that has started iteration closes its
-    /// backend iterator before cancellation escapes to the caller.
+    /// backend iterator before cancellation escapes to the caller. The state
+    /// performs post-advance validation before publishing the ready state.
     public mutating func next() async throws -> Element? {
         if let validateBeforeAdvance {
             do {
@@ -128,16 +131,9 @@ public struct KeyValueCursor: Sendable {
             }
         }
 
-        let element = try await state.next()
-
-        if let validateAfterAdvance {
-            do {
-                try validateAfterAdvance()
-            } catch {
-                return try await finish(afterScopeFailure: error)
-            }
-        }
-        return element
+        return try await state.next(
+            postAdvanceValidation: validateAfterAdvance
+        )
     }
 
     /// Closes the backend iterator and awaits all native cleanup.
@@ -237,7 +233,9 @@ private struct EmptyTransactionRangeResult: TransactionRangeResult {
 }
 
 private protocol KeyValueCursorState: Actor {
-    func next() async throws -> KeyValueCursor.Element?
+    func next(
+        postAdvanceValidation: (@Sendable () throws -> Void)?
+    ) async throws -> KeyValueCursor.Element?
     func finish() async throws
 }
 
@@ -269,7 +267,9 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
         lifetime.end()
     }
 
-    func next() async throws -> KeyValueCursor.Element? {
+    func next(
+        postAdvanceValidation: (@Sendable () throws -> Void)?
+    ) async throws -> KeyValueCursor.Element? {
         var cursor: Result.Cursor
         switch state {
         case .unopened(let result):
@@ -307,6 +307,7 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
         do {
             element = try await cursor.next()
             try ensureStorageTaskIsActive()
+            try postAdvanceValidation?()
         } catch {
             let iterationError = error
             do {

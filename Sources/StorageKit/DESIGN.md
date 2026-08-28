@@ -16,6 +16,10 @@ operations, lifecycle and failure semantics, and the Tuple component's
 canonical key representation. It does not own backend-specific execution,
 database-framework query planning, schema or model meaning, or authorization.
 
+`KeyValueCursor` owns the state transition for a backend range cursor. Its
+scope-validation callbacks are consumed by that state; the module does not
+create a wrapper cursor around an already stateful backend result.
+
 Tuple packing owns only representation and intrinsic encoding invariants. A
 caller-provided admission callback may account for an exact packed allocation,
 but the module does not decide what resource policy the caller applies.
@@ -56,6 +60,16 @@ storage protocols; Tuple remains usable without a live engine or transaction.
   callback's typed error unchanged.
 - The module does not derive an admission bound from source key length or
   backend limits.
+- One `KeyValueCursor` state owns one backend cursor. A scoped advance performs
+  pre-validation, one backend advance, cancellation checking, and
+  post-validation before publishing the ready state or resolving a concurrent
+  finish boundary.
+- `finish()` waits for an in-flight advance boundary and cannot release the
+  cursor lifetime owner before post-validation completes. Iteration,
+  cancellation, scope, and cleanup failures retain their typed failure
+  contract.
+- Cursor validation does not copy returned key/value bytes; returned bytes
+  retain their backend owners after cursor cleanup.
 
 ## Runtime Flows
 
@@ -71,23 +85,45 @@ caller
       -> return ByteString
 ```
 
+Range cursor callers follow this state-owned transition:
+
+```text
+one backend cursor state
+  -> pre-validation
+  -> backend advance
+  -> cancellation check
+  -> post-validation
+      -> failure: terminal cleanup and typed failure composition
+      -> success: publish row or exhaustion
+          -> resolve waiting finish
+```
+
 ## State, Ownership, and Lifecycle
 
 The module's transaction and engine owners remain unchanged. Tuple owns its
 immutable element storage and returns an owned `ByteString`; the callback and
-encoding sink are method-scoped borrows. No module-level registry or shared
-admission state is introduced.
+encoding sink are method-scoped borrows. `KeyValueCursor` state owns the
+backend cursor, advance/finish boundary, and terminal cleanup. Lifetime
+owners are released only after terminal cleanup; returned byte values keep
+their own backend owners and are not tied to the cursor's control state. No
+module-level registry or shared admission state is introduced.
 
 ## Failure, Concurrency, and Constraints
 
-Tuple admission is synchronous and non-suspending. It uses no new mutable
-shared state. Existing storage cancellation, rollback, and lifecycle failures
-remain typed and are not converted into empty or synthetic success.
+Tuple admission is synchronous and non-suspending. Cursor state uses actor
+isolation for suspendable backend I/O and finish ordering; mutexes are not
+held across `await`. Existing storage cancellation, rollback, scope
+revocation, and lifecycle failures remain typed and are not converted into
+empty or synthetic success. Cleanup failures preserve the existing
+`StorageRangeCleanupError` and `StorageRangeTerminalCleanupError` contracts.
 
 ## Verification and Change Impact
 
 The Tuple component tests provide the focused evidence for admission ordering,
 exact counts, result bytes, and typed failure propagation. Changes to storage
 protocols or backend adapters require their owning tests; this sprint changes
-none of those contracts. Database-framework integration is a dependent
-consumer check after this module publishes its committed revision.
+none of those contracts. The range cleanup tests provide focused evidence for
+validation ordering, finish/advance coordination, cancellation, typed cleanup
+failure, exactly-once cleanup, and zero-copy byte ownership. Database-framework
+integration is a dependent consumer check after this module publishes its
+committed revision.

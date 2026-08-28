@@ -147,6 +147,44 @@ struct TransactionRangeCleanupTests {
         #expect(iterationRecorder.finishCount == 1)
     }
 
+    @Test func finishCannotEnterBackendCleanupBeforePostValidation() async throws {
+        let iterationGate = RangeIterationGate()
+        let finishGate = FinishReleaseGate()
+        let cursor = KeyValueCursor(
+            consuming: FinishBlockedRows(
+                iterationGate: iterationGate,
+                finishGate: finishGate
+            )
+        ).validatingScope {
+            let validationCount = finishGate.recordValidation()
+            if validationCount == 2 {
+                #expect(!finishGate.hasStarted)
+                finishGate.release()
+            }
+        }
+
+        let advance = Task {
+            var advancingCursor = cursor
+            return try await advancingCursor.next()
+        }
+        await iterationGate.waitUntilAdvanceStarts()
+
+        let finish = Task(priority: .high) {
+            var finishingCursor = cursor
+            try await finishingCursor.finish()
+        }
+        await Task.yield()
+        iterationGate.resumeAdvance(with: ([0x01], [0x11]))
+
+        let row = try await advance.value
+        try await finish.value
+
+        #expect(row?.0 == [0x01])
+        #expect(finishGate.validationCount == 2)
+        #expect(finishGate.hasStarted)
+        #expect(finishGate.postValidationReleased)
+    }
+
     @Test func cursorPreservesAdvanceAndCleanupFailures() async {
         let iterationRecorder = RangeIterationRecorder(finishError: .finish)
         var cursor = KeyValueCursor(
@@ -445,6 +483,39 @@ struct TransactionRangeCleanupTests {
 
         // Cleanup remains a terminal operation rather than a read authority.
         try await cursor.finish()
+        #expect(iterationRecorder.nextCount == 1)
+        #expect(iterationRecorder.finishCount == 1)
+    }
+
+    @Test func postValidationFailurePreservesCleanupFailure() async {
+        let iterationRecorder = RangeIterationRecorder(finishError: .finish)
+        let validation = Mutex(0)
+        var cursor = KeyValueCursor(
+            consuming: FinishRecordingRows(
+                rows: [([0x01], [0x11])],
+                iterationRecorder: iterationRecorder
+            )
+        ).validatingScope {
+            let validationCount = validation.withLock { count in
+                count += 1
+                return count
+            }
+            if validationCount == 2 {
+                throw RangeCleanupFailure.body
+            }
+        }
+
+        do {
+            _ = try await cursor.next()
+            Issue.record("Expected post-validation failure")
+        } catch let error as StorageRangeCleanupError {
+            #expect(error.iterationError as? RangeCleanupFailure == .body)
+            #expect(error.cleanupError as? RangeCleanupFailure == .finish)
+        } catch {
+            Issue.record("Expected StorageRangeCleanupError, got \(error)")
+        }
+
+        #expect(validation.withLock { $0 } == 2)
         #expect(iterationRecorder.nextCount == 1)
         #expect(iterationRecorder.finishCount == 1)
     }
@@ -898,6 +969,67 @@ private final class RangeIterationGate: Sendable {
     }
 }
 
+private final class FinishReleaseGate: Sendable {
+    private struct State: Sendable {
+        var released = false
+        var finishStarted = false
+        var validationCount = 0
+        var postValidationReleased = false
+        var releaseWaiter: CheckedContinuation<Void, Never>?
+    }
+
+    private let state = Mutex(State())
+
+    var hasStarted: Bool {
+        state.withLock { $0.finishStarted }
+    }
+
+    var postValidationReleased: Bool {
+        state.withLock { $0.postValidationReleased }
+    }
+
+    var validationCount: Int {
+        state.withLock { $0.validationCount }
+    }
+
+    func recordValidation() -> Int {
+        state.withLock { state in
+            state.validationCount += 1
+            return state.validationCount
+        }
+    }
+
+    func recordFinishStart() {
+        state.withLock { $0.finishStarted = true }
+    }
+
+    func release() {
+        let waiter = state.withLock { state in
+            state.released = true
+            state.postValidationReleased = true
+            let waiter = state.releaseWaiter
+            state.releaseWaiter = nil
+            return waiter
+        }
+        waiter?.resume()
+    }
+
+    func waitUntilReleased() async {
+        await withCheckedContinuation { continuation in
+            let released = state.withLock { state in
+                if state.released {
+                    return true
+                }
+                state.releaseWaiter = continuation
+                return false
+            }
+            if released {
+                continuation.resume()
+            }
+        }
+    }
+}
+
 private struct SuspendedRows: TransactionRangeResult {
     typealias Element = (ByteString, ByteString)
 
@@ -932,6 +1064,41 @@ private struct SuspendedRows: TransactionRangeResult {
             if let finishError = iterationRecorder.finishError {
                 throw finishError
             }
+        }
+    }
+}
+
+private struct FinishBlockedRows: TransactionRangeResult {
+    typealias Element = (ByteString, ByteString)
+
+    let iterationGate: RangeIterationGate
+    let finishGate: FinishReleaseGate
+
+    func makeCursor() -> Cursor {
+        Cursor(
+            iterationGate: iterationGate,
+            finishGate: finishGate
+        )
+    }
+
+    struct Cursor: TransactionRangeCursor {
+        let iterationGate: RangeIterationGate
+        let finishGate: FinishReleaseGate
+        var hasAdvanced = false
+
+        mutating func next() async throws -> Element? {
+            guard !hasAdvanced else {
+                return nil
+            }
+            hasAdvanced = true
+            return await iterationGate.suspendAdvance()
+        }
+
+        mutating func finish(
+            isolation actor: isolated (any Actor)?
+        ) async throws {
+            finishGate.recordFinishStart()
+            await finishGate.waitUntilReleased()
         }
     }
 }
