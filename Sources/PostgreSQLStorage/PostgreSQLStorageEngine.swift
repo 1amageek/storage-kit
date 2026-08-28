@@ -65,6 +65,23 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     private let storageLifecycle = StorageEngineLifecycle()
     private let resultBytesFactory: PostgreSQLResultBytesFactory
 
+    /// The Directory catalog decides existence by reading a node and then
+    /// writing it in the same transaction. READ COMMITTED does not detect that
+    /// read-then-write conflict, so catalog mutation is rejected up front; reads
+    /// remain available at every isolation level.
+    private static func directoryMutationAdmission(
+        isolationLevel: PostgreSQLIsolationLevel
+    ) -> KeyValueDirectoryCatalog.MutationAdmission? {
+        guard isolationLevel == .readCommitted else { return nil }
+        return { operation in
+            throw StorageError.unsupportedOperation(
+                "Directory catalog mutation requires REPEATABLE READ or SERIALIZABLE isolation; this engine is configured with READ COMMITTED",
+                operation: operation,
+                backend: .postgreSQL
+            )
+        }
+    }
+
     public convenience init(
         configuration: PostgreSQLConfiguration
     ) async throws {
@@ -101,7 +118,10 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         self.transactionDomain = domain
         self.directoryAccess = KeyValueDirectoryCatalog(
             transactionDomain: domain,
-            backend: .postgreSQL
+            backend: .postgreSQL,
+            mutationAdmission: Self.directoryMutationAdmission(
+                isolationLevel: configuration.isolationLevel
+            )
         )
         self.configuration = configuration
         self.logger = configuration.backgroundLogger

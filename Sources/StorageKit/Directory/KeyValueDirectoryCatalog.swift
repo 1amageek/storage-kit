@@ -7,15 +7,25 @@ import DatabaseTypes
 /// transaction, so creation, move, and removal are atomic with it. The key
 /// layout is fixed by `DESIGN.md`; changing it is a layout-version change.
 public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
+    /// Backend-owned admission check run before the catalog writes anything.
+    ///
+    /// A backend whose configured isolation cannot detect the read-then-write
+    /// conflicts the catalog relies on (PostgreSQL `readCommitted`) rejects the
+    /// mutation here with a typed failure instead of committing an unsafe write.
+    public typealias MutationAdmission = @Sendable (StorageOperation) throws -> Void
+
     public let transactionDomain: StorageTransactionDomain
     public let backend: StorageBackend
+    private let mutationAdmission: MutationAdmission?
 
     public init(
         transactionDomain: StorageTransactionDomain,
-        backend: StorageBackend
+        backend: StorageBackend,
+        mutationAdmission: MutationAdmission? = nil
     ) {
         self.transactionDomain = transactionDomain
         self.backend = backend
+        self.mutationAdmission = mutationAdmission
     }
 
     // MARK: - Layout V1
@@ -100,6 +110,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         case .openV1:
             return rootDirectory
         case .uninitialized:
+            try admitMutation(operation: .initialize)
             try transaction.setValue(StorageLayoutMarker.v1, for: StorageLayoutMarker.key)
             try transaction.setValue(
                 Tuple(Layout.firstAllocatedRootNumber).pack(),
@@ -146,6 +157,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         ) {
             return directory(at: address, number: number)
         }
+        try admitMutation(operation: .write)
         let number = try await allocateRootNumber(transaction: transaction)
         try transaction.setValue(
             Tuple(number).pack(),
@@ -187,6 +199,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         ) {
             return Partition(id: id, root: directory(at: address, number: number))
         }
+        try admitMutation(operation: .write)
         let number = try await allocateRootNumber(transaction: transaction)
         try transaction.setValue(
             Tuple(number).pack(),
@@ -303,6 +316,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
                 message: "Directory '\(newName)' already exists in the destination Directory"
             )
         }
+        try admitMutation(operation: .write)
         try transactionDomain.leases.registerIntent(
             covering: movedAddress,
             transaction: transaction,
@@ -379,6 +393,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
                 backend: backend
             )
         }
+        try admitMutation(operation: .delete)
         try transactionDomain.leases.registerIntent(
             covering: address,
             transaction: transaction,
@@ -509,6 +524,11 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         guard parent.domain === transactionDomain else {
             throw domainMismatch(operation: operation, subject: "Directory")
         }
+    }
+
+    private func admitMutation(operation: StorageOperation) throws {
+        guard let mutationAdmission else { return }
+        try mutationAdmission(operation)
     }
 
     private func requireListLimit(_ limit: Int) throws {
