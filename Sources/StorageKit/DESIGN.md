@@ -31,8 +31,8 @@ transaction lifecycle owner, and the InMemory reference engine.
 |---|---|---|---|---|
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to every adapter and to database-framework. |
 | [Directory component](Directory/DESIGN.md) | child | `DirectoryAccess`, `Directory`, `Partition`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess`, `KeyValueDirectoryCatalog` | Placement, catalog authority, layout marker, leases. | Read operations accept only `TransactionReadAccess`; catalog reads never create. |
-| `Storage/` sources | child (no component design yet) | `StorageEngine`, `Transaction`, cursors, `StorageError`, `StorageEngineLifecycle`, `StorageTransactionDomain` | Transaction and bound contracts. | `StorageTransactionDomain` now also owns the lease registry. |
-| `Tuple/` sources | child (no component design yet) | `Tuple`, `Subspace`, `TupleElement`, `strinc` | Tuple V1 encoding frozen by golden vectors. | Any byte-layout change is a layout version change. |
+| [Storage component](Storage/DESIGN.md) | child | `StorageEngine`, `Transaction`, cursors, `StorageError`, `StorageEngineLifecycle`, `StorageTransactionDomain` | Transaction and bound contracts; the cursor state owns advance ordering, post-advance validation, and terminal cleanup. | `StorageTransactionDomain` now also owns the lease registry. Cursor scope validation belongs to the cursor state, not to a caller wrapper. |
+| [Tuple component](Tuple/DESIGN.md) | child | `Tuple`, `Subspace`, `TupleElement`, `strinc`, admission-aware `pack(admitting:)` | Tuple V1 encoding frozen by golden vectors; admission measures the exact packed byte count before the single result allocation. | Any byte-layout change is a layout version change. The admission callback is a caller resource boundary, never a backend limit. |
 | `InMemory/` sources | child (no component design yet) | `InMemoryEngine`, `InMemoryTransaction` | Reference engine with conflict detection and versionstamps. | Reference only; must pass every shared fixture. |
 | database-framework | used by | all public contracts | Composes containers and kernels. | Holds leases, never raw Partition addresses, as authority. |
 
@@ -136,6 +136,8 @@ design, layout marker state machine).
 |---|---|
 | Transaction, cursor, lifecycle, byte meter, versionstamp contracts | `Tests/StorageKitTests/*` |
 | Tuple V1 frozen bytes | `Tests/StorageKitTests/TupleV1GoldenVectorTests.swift` |
+| Admission-aware packing traversal and typed rejection | `Tests/StorageKitTests/TupleTests.swift` |
+| Cursor advance ordering, post-advance validation, finish coordination | `Tests/StorageKitTests/TransactionRangeCleanupTests.swift` |
 | Directory, Partition, layout marker, lease contracts on the reference engine | `Tests/StorageKitTests/InMemoryDirectoryConformanceTests.swift` driving `StorageKitConformance` |
 | Reference-only escape and compile-level attenuation | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 

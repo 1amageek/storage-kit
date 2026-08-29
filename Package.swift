@@ -49,6 +49,12 @@ let package = Package(
             name: "StorageKit",
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
+            ],
+            exclude: [
+                "DESIGN.md",
+                "Directory/DESIGN.md",
+                "Storage/DESIGN.md",
+                "Tuple/DESIGN.md",
             ]
         ),
         .target(
@@ -70,7 +76,8 @@ let package = Package(
             dependencies: [
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
-            ]
+            ],
+            exclude: ["DESIGN.md"]
         ),
         .target(
             name: "FDBStorage",
@@ -81,7 +88,8 @@ let package = Package(
                     name: "FoundationDB",
                     package: "fdb-swift-bindings"
                 ),
-            ]
+            ],
+            exclude: ["DESIGN.md"]
         ),
         .systemLibrary(
             name: "SQLiteLibrary",
@@ -97,7 +105,8 @@ let package = Package(
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "SQLiteLibrary",
                 "StorageKit",
-            ]
+            ],
+            exclude: ["DESIGN.md"]
         ),
         .target(
             name: "PostgreSQLStorage",
@@ -108,7 +117,8 @@ let package = Package(
                     name: "PostgresNIO",
                     package: "postgres-nio"
                 ),
-            ]
+            ],
+            exclude: ["DESIGN.md"]
         ),
         .target(
             name: "CloudflareDurableObjectStorage",
@@ -116,7 +126,8 @@ let package = Package(
                 .product(name: "DatabaseTypes", package: "database-types"),
                 "StorageKit",
                 "CloudflareDurableObjectStorageWire",
-            ]
+            ],
+            exclude: ["DESIGN.md"]
         ),
         .target(
             name: "CloudflareDurableObjectStorageTesting",
