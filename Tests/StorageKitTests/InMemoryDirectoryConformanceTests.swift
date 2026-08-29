@@ -26,6 +26,11 @@ struct InMemoryDirectoryConformanceTests {
         try await conformance.verifyListing()
     }
 
+    @Test("Partition contiguity", .timeLimit(.minutes(1)))
+    func partitionContiguity() async throws {
+        try await conformance.verifyPartitionContiguity()
+    }
+
     @Test("Move", .timeLimit(.minutes(1)))
     func move() async throws {
         try await conformance.verifyMove()

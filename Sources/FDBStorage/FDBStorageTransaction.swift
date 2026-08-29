@@ -1026,7 +1026,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                  .backendContractViolation, .dataCorruption,
                  .resourceUnavailable, .keyNotFound,
                  .transactionTooLarge, .keyTooLarge, .valueTooLarge,
-                 .incompatibleStorageLayout, .directoryNotEmpty, .directoryLeased,
+                 .incompatibleStorageLayout, .directoryLayerMismatch,
+                 .partitionBoundaryViolation, .directoryLeased,
                  .storageDomainMismatch, .staleLease, .invalidDirectoryAddress:
                 return storageError
             case .transactionTimedOut, .transactionCancelled, .connectionFailure,

@@ -4,12 +4,16 @@ import Testing
 
 @Suite("Partition lease")
 struct PartitionLeaseTests {
-    private let partitionID = try! PartitionID(utf8: "p")
+    private let partitionName = "p"
 
     private func makePartition(_ engine: InMemoryEngine) async throws -> Partition {
         try await engine.withTransaction { transaction in
             let root = try await engine.directoryAccess.openOrInitializeRoot(transaction: transaction)
-            return try await engine.directoryAccess.openOrCreatePartition(partitionID, in: root, transaction: transaction)
+            return try await engine.directoryAccess.openOrCreatePartition(
+                partitionName,
+                in: root,
+                transaction: transaction
+            )
         }
     }
 
@@ -21,7 +25,7 @@ struct PartitionLeaseTests {
     func cursorFailsAfterBindingScopeEnds() async throws {
         let engine = InMemoryEngine()
         let partition = try await makePartition(engine)
-        let bounds = try PartitionKeyBounds(partition: partition, backend: .inMemory)
+        let bounds = PartitionKeyBounds(partition: partition, backend: .inMemory)
         try await engine.withTransaction { transaction in
             let lease = try await engine.leasePartition(partition, transaction: transaction)
             var cursor = try await lease.withReadAccess(transaction) { access in
@@ -41,7 +45,7 @@ struct PartitionLeaseTests {
     func cursorFailsAfterLeaseRelease() async throws {
         let engine = InMemoryEngine()
         let partition = try await makePartition(engine)
-        let bounds = try PartitionKeyBounds(partition: partition, backend: .inMemory)
+        let bounds = PartitionKeyBounds(partition: partition, backend: .inMemory)
         try await engine.withTransaction { transaction in
             let lease = try await engine.leasePartition(partition, transaction: transaction)
             var cursor = try await lease.withReadAccess(transaction) { access in
@@ -57,11 +61,39 @@ struct PartitionLeaseTests {
         await engine.shutdown()
     }
 
+    /// The bound region covers the Partition's content and stops below its
+    /// nested Directory Layer node subspace.
+    @Test(.timeLimit(.minutes(1)))
+    func boundRegionCoversContentAndExcludesNestedMetadata() async throws {
+        let engine = InMemoryEngine()
+        let partition = try await makePartition(engine)
+        let bounds = PartitionKeyBounds(partition: partition, backend: .inMemory)
+        #expect(bounds.prefix == partition.keyspacePrefix)
+        #expect(bounds.end == partition.keyspacePrefix.appending(Directory.nodeSubspaceByte))
+        // The Partition's own data root and every allocated descendant prefix
+        // are inside; the nested allocator key is not.
+        #expect(bounds.contains(partition.root.root.prefix))
+        #expect(
+            !bounds.contains(
+                KeyValueDirectoryCatalog.Layout.allocatorKey(layerRoot: partition.keyspacePrefix)
+            )
+        )
+        let inner = try await engine.withTransaction { transaction in
+            try await engine.directoryAccess.openOrCreateDirectory(
+                "inner",
+                in: partition.root,
+                transaction: transaction
+            )
+        }
+        #expect(bounds.contains(inner.root.prefix))
+        await engine.shutdown()
+    }
+
     @Test(.timeLimit(.minutes(1)))
     func boundAccessRejectsKeysAndSelectorsOutsidePartition() async throws {
         let engine = InMemoryEngine()
         let partition = try await makePartition(engine)
-        let bounds = try PartitionKeyBounds(partition: partition, backend: .inMemory)
+        let bounds = PartitionKeyBounds(partition: partition, backend: .inMemory)
         let inside = key(in: partition, [0x01])
         try await engine.withTransaction { transaction in
             let lease = try await engine.leasePartition(partition, transaction: transaction)
@@ -79,6 +111,14 @@ struct PartitionLeaseTests {
                     _ = try access.rangeCursor(from: .firstGreaterOrEqual(bounds.prefix), to: .firstGreaterOrEqual([0xFF]))
                 }
                 await expectStorageError(.invalidOperation) { _ = try await access.getValue(for: [0x00]) }
+                // The nested Directory Layer is catalog metadata, not content.
+                await expectStorageError(.invalidOperation) {
+                    try access.clear(
+                        key: KeyValueDirectoryCatalog.Layout.allocatorKey(
+                            layerRoot: partition.keyspacePrefix
+                        )
+                    )
+                }
 
                 let first = try await access.getKey(selector: .firstGreaterOrEqual(bounds.prefix))
                 #expect(first == inside)
@@ -102,6 +142,15 @@ struct PartitionLeaseTests {
             }
             lease.release()
         }
+        // Clearing the whole bound region leaves the nested layer usable.
+        let recreated = try await engine.withTransaction { transaction in
+            try await engine.directoryAccess.openOrCreateDirectory(
+                "inner",
+                in: partition.root,
+                transaction: transaction
+            )
+        }
+        #expect(recreated.keyspacePrefix.starts(with: partition.keyspacePrefix))
         await engine.shutdown()
     }
 
@@ -121,15 +170,15 @@ struct PartitionLeaseTests {
                 #expect(isActive)
                 #expect(engine.transactionDomain.leases.isLeased(within: partition.root.address))
                 await expectStorageError(.directoryLeased) {
-                    try await catalog.removeChild(.partition(partitionID), in: root, transaction: transaction)
+                    try await catalog.remove(partitionName, in: root, transaction: transaction)
                 }
             }
             #expect(!engine.transactionDomain.leases.isLeased(within: partition.root.address))
-            try await catalog.removeChild(.partition(partitionID), in: root, transaction: transaction)
+            try await catalog.remove(partitionName, in: root, transaction: transaction)
         }
         let remaining = try await engine.withTransaction { transaction -> Partition? in
             guard let root = try await catalog.openRoot(transaction: transaction) else { return nil }
-            return try await catalog.openPartition(partitionID, in: root, transaction: transaction)
+            return try await catalog.openPartition(partitionName, in: root, transaction: transaction)
         }
         #expect(remaining == nil)
         await engine.shutdown()
@@ -138,11 +187,11 @@ struct PartitionLeaseTests {
     @Test(.timeLimit(.minutes(1)))
     func releaseIsIdempotentAndRegistryRejectsCoveredIntents() async throws {
         let registry = PartitionLeaseRegistry()
-        let address = try StorageAddress([.directory("a"), .partition(partitionID)])
+        let address = try StorageAddress(["a", partitionName])
         let registration = try registry.reserve(address, backend: .inMemory)
         #expect(registry.isLeased(within: address))
-        try #expect(registry.isLeased(within: StorageAddress([.directory("a")])))
-        try #expect(!registry.isLeased(within: StorageAddress([.directory("b")])))
+        try #expect(registry.isLeased(within: StorageAddress(["a"])))
+        try #expect(!registry.isLeased(within: StorageAddress(["b"])))
         #expect(registration.release())
         #expect(!registration.release())
         #expect(!registry.isLeased(within: address))
@@ -150,14 +199,14 @@ struct PartitionLeaseTests {
 
         let engine = InMemoryEngine()
         let transaction = try engine.createOwnedTransaction()
-        try registry.registerIntent(covering: StorageAddress([.directory("a")]), transaction: transaction, operation: .write, backend: .inMemory)
+        try registry.registerIntent(covering: StorageAddress(["a"]), transaction: transaction, operation: .write, backend: .inMemory)
         await expectStorageError(.staleLease) { _ = try registry.reserve(address, backend: .inMemory) }
         registry.releaseIntents(for: transaction as AnyObject)
         let second = try registry.reserve(address, backend: .inMemory)
         let secondIsActive = second.isActive
         #expect(secondIsActive)
         await expectStorageError(.directoryLeased) {
-            try registry.registerIntent(covering: StorageAddress([.directory("a")]), transaction: transaction, operation: .write, backend: .inMemory)
+            try registry.registerIntent(covering: StorageAddress(["a"]), transaction: transaction, operation: .write, backend: .inMemory)
         }
         #expect(second.release())
         try await transaction.cancel()

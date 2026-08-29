@@ -55,15 +55,17 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
         case resourceUnavailable = "resource_unavailable"
         /// The keyspace carries no supported storage layout marker.
         case incompatibleStorageLayout = "incompatible_storage_layout"
-        /// A Directory or Partition still holds children or data.
-        case directoryNotEmpty = "directory_not_empty"
+        /// A stated layer tag does not match the stored node tag.
+        case directoryLayerMismatch = "directory_layer_mismatch"
+        /// A move would cross a Partition boundary.
+        case partitionBoundaryViolation = "partition_boundary_violation"
         /// An active Partition lease covers the affected subtree.
         case directoryLeased = "directory_leased"
         /// A transaction, Directory, or Partition belongs to another engine.
         case storageDomainMismatch = "storage_domain_mismatch"
         /// A lease, cursor, or binding no longer matches the catalog.
         case staleLease = "stale_lease"
-        /// A Directory path, name, or Partition identifier violates the limits.
+        /// A Directory path, name, or layer tag violates the limits.
         case invalidDirectoryAddress = "invalid_directory_address"
     }
 
@@ -107,7 +109,8 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
              .unsupportedOperation, .backendFailure, .backendContractViolation,
              .dataCorruption,
              .resourceUnavailable,
-             .incompatibleStorageLayout, .directoryNotEmpty, .directoryLeased,
+             .incompatibleStorageLayout, .directoryLayerMismatch,
+             .partitionBoundaryViolation, .directoryLeased,
              .storageDomainMismatch, .staleLease, .invalidDirectoryAddress:
             return .never
         }

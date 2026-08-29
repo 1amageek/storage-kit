@@ -1,56 +1,57 @@
-/// Ordered steps from the root Directory; the empty address is the root.
+/// Ordered exact name components from the root Directory; empty is the root.
 public struct StorageAddress: Sendable, Hashable {
-    public let steps: [StorageAddressStep]
+    public let components: [String]
 
     public static let root = StorageAddress()
 
     public init() {
-        self.steps = []
+        self.components = []
     }
 
-    public init(_ steps: [StorageAddressStep]) throws(DirectoryAddressError) {
-        guard steps.count <= DirectoryLimits.maximumDepth else {
-            throw .depthExceeded(depth: steps.count)
+    public init(_ components: [String]) throws(DirectoryAddressError) {
+        guard components.count <= DirectoryLimits.maximumDepth else {
+            throw .depthExceeded(depth: components.count)
         }
-        for step in steps {
-            try step.validate()
+        for component in components {
+            try DirectoryPath.validateComponent(component)
         }
-        self.steps = steps
+        self.components = components
     }
 
     public init(_ path: DirectoryPath) {
-        self.steps = path.components.map { .directory($0) }
+        self.components = path.components
     }
 
-    private init(unchecked steps: [StorageAddressStep]) {
-        self.steps = steps
+    private init(unchecked components: [String]) {
+        self.components = components
     }
 
-    public var isRoot: Bool { steps.isEmpty }
+    public var isRoot: Bool { components.isEmpty }
 
-    public var depth: Int { steps.count }
+    public var depth: Int { components.count }
 
-    public var lastStep: StorageAddressStep? { steps.last }
+    public var lastComponent: String? { components.last }
 
     public var parent: StorageAddress? {
-        guard !steps.isEmpty else {
+        guard !components.isEmpty else {
             return nil
         }
-        return StorageAddress(unchecked: Array(steps.dropLast()))
+        return StorageAddress(unchecked: Array(components.dropLast()))
     }
 
     public func appending(
-        _ step: StorageAddressStep
+        _ component: String
     ) throws(DirectoryAddressError) -> StorageAddress {
-        try step.validate()
-        guard steps.count < DirectoryLimits.maximumDepth else {
-            throw .depthExceeded(depth: steps.count + 1)
+        try DirectoryPath.validateComponent(component)
+        guard components.count < DirectoryLimits.maximumDepth else {
+            throw .depthExceeded(depth: components.count + 1)
         }
-        return StorageAddress(unchecked: steps + [step])
+        return StorageAddress(unchecked: components + [component])
     }
 
     /// Whether `other` is this address or lies below it.
     public func isAncestorOrSelf(of other: StorageAddress) -> Bool {
-        other.steps.count >= steps.count && other.steps.starts(with: steps)
+        other.components.count >= components.count
+            && other.components.starts(with: components)
     }
 }

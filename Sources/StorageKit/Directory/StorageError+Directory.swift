@@ -11,13 +11,27 @@ extension StorageError {
         )
     }
 
-    public static func directoryNotEmpty(
+    public static func directoryLayerMismatch(
         _ message: String,
+        operation: StorageOperation = .open,
         backend: StorageBackend = .unknown
     ) -> StorageError {
         StorageError(
-            code: .directoryNotEmpty,
-            operation: .delete,
+            code: .directoryLayerMismatch,
+            operation: operation,
+            backend: backend,
+            message: message
+        )
+    }
+
+    public static func partitionBoundaryViolation(
+        _ message: String,
+        operation: StorageOperation = .write,
+        backend: StorageBackend = .unknown
+    ) -> StorageError {
+        StorageError(
+            code: .partitionBoundaryViolation,
+            operation: operation,
             backend: backend,
             message: message
         )

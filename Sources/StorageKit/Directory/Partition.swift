@@ -1,19 +1,27 @@
-/// An isolated Partition: its identifier and the Directory that is its root.
+import DatabaseTypes
+
+/// A Directory node whose layer tag is `LayerTag.partition`.
 ///
-/// `root.address` ends with `.partition(id)`.
+/// A Partition owns one contiguous keyspace: every descendant Directory,
+/// Partition, Subspace, and key lies inside `[keyspacePrefix, strinc(...))`.
 public struct Partition: Sendable, Hashable {
-    public let id: PartitionID
     public let root: Directory
 
-    public init(id: PartitionID, root: Directory) {
-        self.id = id
+    /// Fails when `root` is not tagged as a Partition.
+    public init?(_ root: Directory) {
+        guard root.layer.isPartition else {
+            return nil
+        }
         self.root = root
     }
 
     public var domain: StorageTransactionDomain { root.domain }
 
-    /// Whether `root.address` names this Partition as its last step.
-    public var hasConsistentAddress: Bool {
-        root.address.lastStep == .partition(id)
-    }
+    public var address: StorageAddress { root.address }
+
+    /// Exact name of this Partition in its parent Directory Layer.
+    public var name: String? { root.address.lastComponent }
+
+    /// Start of the whole Partition keyspace, including its nested layer.
+    public var keyspacePrefix: ByteString { root.keyspacePrefix }
 }

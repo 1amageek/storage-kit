@@ -5,17 +5,24 @@ import StorageKit
 /// FoundationDB realization of `DirectoryAccess` over the native Directory
 /// Layer (SPEC §7.3).
 ///
-/// Node existence, prefixes, and kinds live only in the native layer metadata
-/// below the configured root path, so the native layer is the sole existence
-/// authority for this backend. This type adds what the shared Directory
-/// contract requires on top of it: domain checks, address validation, layer
-/// type verification on every open, kind-prefixed native names, stale-parent
-/// rejection, emptiness checks before removal, and lease intents. Layout rules
-/// are owned by `FDBDirectoryLayout`.
+/// Node existence, prefixes, and layer tags live only in the native layer
+/// metadata below the configured root path, so the native layer is the sole
+/// existence authority for this backend. A Partition is a native `partition`
+/// node, which is a nested Directory Layer over one contiguous prefix, so every
+/// descendant of a Partition is allocated inside it and one range covers the
+/// whole Partition. A plain Directory allocates its children as prefix-free
+/// siblings of the layer that owns it, which contiguity does not require.
+///
+/// This type adds what the shared Directory contract requires on top of the
+/// native layer: the layout marker state machine, domain checks, address
+/// validation, layer-tag verification on every open, Partition boundary
+/// rejection, own-subtree rejection, and lease intents. Path and layer mapping
+/// is owned by `FDBDirectoryLayout`.
 ///
 /// Every native call runs inside `FDBStorageTransaction.withDirectoryOperation`,
 /// which keeps the Directory operation exclusive with the transaction's own
-/// reads and writes and marks the transaction as mutated for operations 5–8.
+/// reads and writes and marks the transaction as mutated for mutating
+/// operations.
 final class FDBDirectoryAccess: DirectoryAccess, Sendable {
     let transactionDomain: StorageTransactionDomain
     let backend: StorageBackend = .foundationDB
@@ -30,300 +37,298 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
 
     func openRoot(transaction: any TransactionReadAccess) async throws -> Directory? {
         let operation = StorageOperation.open
-        let transaction = try resolve(transaction, operation: operation)
-        return try await withLayer(transaction, writes: false, operation: operation) { layer, native in
+        let storage = try resolve(transaction, operation: operation)
+        switch try await StorageLayoutMarker.inspect(transaction: transaction) {
+        case .openV1:
+            break
+        case .uninitialized:
+            return nil
+        case .rejected(let rejection):
+            throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
+        }
+        return try await withLayer(storage, writes: false, operation: operation) { layer, native in
             // `exists` resolves the path without touching the layer version
-            // key, so an uninitialized cluster is observed without a write.
+            // key, so a cluster whose marker is set but whose root path was
+            // never created is observed without a write.
             guard try await layer.exists(path: rootPath, transaction: native) else {
                 return nil
             }
             let node = try await layer.open(path: rootPath, transaction: native)
-            try verify(node, is: FDBDirectoryLayout.directoryType)
-            return directory(at: .root, node: node)
+            return try requireRoot(node, operation: operation)
         }
     }
 
     func openOrInitializeRoot(transaction: any TransactionAccess) async throws -> Directory {
         let operation = StorageOperation.initialize
-        let transaction = try resolve(transaction, operation: operation)
-        return try await withLayer(transaction, writes: true, operation: operation) { layer, native in
+        let storage = try resolve(transaction, operation: operation)
+        switch try await StorageLayoutMarker.inspect(transaction: transaction) {
+        case .openV1:
+            break
+        case .uninitialized:
+            // The marker and the root node commit in one transaction, so a
+            // reader never observes a marked layout without its catalog.
+            try transaction.setValue(StorageLayoutMarker.v1, for: StorageLayoutMarker.key)
+        case .rejected(let rejection):
+            throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
+        }
+        return try await withLayer(storage, writes: true, operation: operation) { layer, native in
             let node = try await layer.createOrOpen(
                 path: rootPath,
-                type: FDBDirectoryLayout.directoryType,
+                type: nil,
                 transaction: native
             )
-            return directory(at: .root, node: node)
+            return try requireRoot(node, operation: operation)
         }
     }
 
     // MARK: - Children
 
-    func openDirectory(
+    func open(
         _ name: String,
-        in parent: Directory,
-        transaction: any TransactionReadAccess
-    ) async throws -> Directory? {
-        try await openChild(.directory(name), in: parent, transaction: transaction)
-    }
-
-    func openOrCreateDirectory(
-        _ name: String,
-        in parent: Directory,
-        transaction: any TransactionAccess
-    ) async throws -> Directory {
-        try await openOrCreateChild(.directory(name), in: parent, transaction: transaction)
-    }
-
-    func openPartition(
-        _ id: PartitionID,
-        in parent: Directory,
-        transaction: any TransactionReadAccess
-    ) async throws -> Partition? {
-        guard let root = try await openChild(.partition(id), in: parent, transaction: transaction) else {
-            return nil
-        }
-        return Partition(id: id, root: root)
-    }
-
-    func openOrCreatePartition(
-        _ id: PartitionID,
-        in parent: Directory,
-        transaction: any TransactionAccess
-    ) async throws -> Partition {
-        let root = try await openOrCreateChild(.partition(id), in: parent, transaction: transaction)
-        return Partition(id: id, root: root)
-    }
-
-    private func openChild(
-        _ step: StorageAddressStep,
+        expecting expected: LayerTag?,
         in parent: Directory,
         transaction: any TransactionReadAccess
     ) async throws -> Directory? {
         let operation = StorageOperation.open
-        let transaction = try resolve(transaction, operation: operation)
+        let storage = try resolve(transaction, operation: operation)
         try requireDomain(of: parent, operation: operation)
-        let address = try childAddress(of: parent, step: step, operation: operation)
-        let path = nativePath(address)
-        let expectedType = FDBDirectoryLayout.nativeType(for: step)
-        return try await withLayer(transaction, writes: false, operation: operation) { layer, native in
+        let address = try childAddress(of: parent, name, operation: operation)
+        let layerRoot = parent.childLayerRoot
+        let path = nativePath(of: address)
+        return try await withLayer(storage, writes: false, operation: operation) { layer, native in
             guard let node = try await openIfExists(layer, path: path, transaction: native) else {
                 return nil
             }
-            try verify(node, is: expectedType)
-            return directory(at: address, node: node)
+            let child = try directory(
+                at: address,
+                node: node,
+                layerRoot: layerRoot,
+                operation: operation
+            )
+            // The native layer verifies nothing when the caller states no type,
+            // so the expected tag is verified here for every open.
+            try requireLayer(child.layer, expected: expected, name: name, operation: operation)
+            return child
         }
     }
 
-    private func openOrCreateChild(
-        _ step: StorageAddressStep,
+    func openOrCreate(
+        _ name: String,
+        layer tag: LayerTag,
         in parent: Directory,
         transaction: any TransactionAccess
     ) async throws -> Directory {
         let operation = StorageOperation.write
-        let transaction = try resolve(transaction, operation: operation)
+        let storage = try resolve(transaction, operation: operation)
         try requireDomain(of: parent, operation: operation)
-        let address = try childAddress(of: parent, step: step, operation: operation)
-        let parentPath = nativePath(parent.address)
-        let path = nativePath(address)
-        let expectedType = FDBDirectoryLayout.nativeType(for: step)
-        return try await withLayer(transaction, writes: true, operation: operation) { layer, native in
-            // The native layer creates a missing parent as an untyped node;
-            // a stale parent value must fail instead of resurrecting it.
-            guard try await layer.exists(path: parentPath, transaction: native) else {
-                throw notFound("Parent Directory no longer exists", operation: operation)
-            }
-            let node = try await layer.createOrOpen(path: path, type: expectedType, transaction: native)
-            return directory(at: address, node: node)
+        let address = try childAddress(of: parent, name, operation: operation)
+        let layerRoot = parent.childLayerRoot
+        let type = try FDBDirectoryLayout.nativeType(
+            for: tag,
+            operation: operation,
+            backend: backend
+        )
+        let path = nativePath(of: address)
+        return try await withLayer(storage, writes: true, operation: operation) { layer, native in
+            // One native call opens or creates the node. Resolving the path
+            // first to inspect an existing node would descend it twice on
+            // every create, and the tag is verified below either way: the
+            // native layer rejects a stored tag that differs from a stated
+            // type, and states no type for the default tag.
+            let node = try await layer.createOrOpen(
+                path: path,
+                type: type,
+                transaction: native
+            )
+            let child = try directory(
+                at: address,
+                node: node,
+                layerRoot: layerRoot,
+                operation: operation
+            )
+            try requireLayer(child.layer, expected: tag, name: name, operation: operation)
+            return child
         }
     }
 
-    // MARK: - Listing
-
-    func listDirectories(
+    func listChildren(
         in parent: Directory,
         after: String?,
         limit: Int,
         transaction: any TransactionReadAccess
-    ) async throws -> [String] {
+    ) async throws -> [DirectoryEntry] {
         let operation = StorageOperation.rangeRead
-        let transaction = try resolve(transaction, operation: operation)
+        let storage = try resolve(transaction, operation: operation)
         try requireDomain(of: parent, operation: operation)
         try validate(limit: limit, operation: operation)
-        let path = nativePath(parent.address)
-        let afterBytes = after.map { Array($0.utf8) }
-        return try await withLayer(transaction, writes: false, operation: operation) { layer, native in
-            let components = try await layer.list(path: path, transaction: native)
-            var entries: [(bytes: [UInt8], name: String)] = []
-            for component in components {
-                guard case .directory(let name) = FDBDirectoryLayout.decode(component) else {
-                    continue
-                }
-                let bytes = Array(name.utf8)
-                if let afterBytes, !afterBytes.lexicographicallyPrecedes(bytes) {
-                    continue
-                }
-                entries.append((bytes, name))
+        if let after {
+            try validate(component: after, operation: operation)
+        }
+        let bound = after.map { ByteString(utf8: $0) }
+        let layerRoot = parent.childLayerRoot
+        let path = nativePath(of: parent.address)
+        return try await withLayer(storage, writes: false, operation: operation) { layer, native in
+            let names: [String]
+            do {
+                names = try await layer.list(path: path, transaction: native)
+            } catch DirectoryError.directoryNotFound {
+                // A stale parent has no children, matching the KeyValue catalog,
+                // which range-reads the parent's edges without resolving it.
+                return []
             }
-            entries.sort { $0.bytes.lexicographicallyPrecedes($1.bytes) }
-            return entries.prefix(limit).map(\.name)
+            // The native layer returns names in Swift `String` order, which is
+            // not UTF-8 byte order, and paginates nothing.
+            let ordered = names
+                .map { (name: $0, bytes: ByteString(utf8: $0)) }
+                .sorted { $0.bytes < $1.bytes }
+            var entries: [DirectoryEntry] = []
+            entries.reserveCapacity(min(limit, ordered.count))
+            for child in ordered {
+                if let bound, child.bytes <= bound {
+                    continue
+                }
+                guard entries.count < limit else {
+                    break
+                }
+                let address = try childAddress(of: parent, child.name, operation: operation)
+                guard let node = try await openIfExists(
+                    layer,
+                    path: nativePath(of: address),
+                    transaction: native
+                ) else {
+                    continue
+                }
+                let resolved = try directory(
+                    at: address,
+                    node: node,
+                    layerRoot: layerRoot,
+                    operation: operation
+                )
+                entries.append(DirectoryEntry(name: child.name, layer: resolved.layer))
+            }
+            return entries
         }
     }
 
-    func listPartitions(
-        in parent: Directory,
-        after: PartitionID?,
-        limit: Int,
-        transaction: any TransactionReadAccess
-    ) async throws -> [PartitionID] {
-        let operation = StorageOperation.rangeRead
-        let transaction = try resolve(transaction, operation: operation)
-        try requireDomain(of: parent, operation: operation)
-        try validate(limit: limit, operation: operation)
-        let path = nativePath(parent.address)
-        let afterBytes = after.map { $0.bytes.copyBytes() }
-        return try await withLayer(transaction, writes: false, operation: operation) { layer, native in
-            let components = try await layer.list(path: path, transaction: native)
-            var entries: [(bytes: [UInt8], id: PartitionID)] = []
-            for component in components {
-                switch FDBDirectoryLayout.decode(component) {
-                case .partition(let id):
-                    let bytes = id.bytes.copyBytes()
-                    if let afterBytes, !afterBytes.lexicographicallyPrecedes(bytes) {
-                        continue
-                    }
-                    entries.append((bytes, id))
-                case .corrupt(let component):
-                    throw StorageError(
-                        code: .dataCorruption,
-                        operation: operation,
-                        backend: backend,
-                        message: "Partition node name is not a valid identifier encoding: \(component)"
-                    )
-                case .directory, .foreign:
-                    continue
-                }
-            }
-            entries.sort { $0.bytes.lexicographicallyPrecedes($1.bytes) }
-            return entries.prefix(limit).map(\.id)
-        }
-    }
-
-    // MARK: - Move and Remove
-
-    func moveChild(
-        _ child: StorageAddressStep,
+    func move(
+        _ name: String,
         in source: Directory,
-        to newChild: StorageAddressStep,
+        to newName: String,
         in destination: Directory,
         transaction: any TransactionAccess
     ) async throws -> Directory {
         let operation = StorageOperation.write
-        let transaction = try resolve(transaction, operation: operation)
+        let storage = try resolve(transaction, operation: operation)
         try requireDomain(of: source, operation: operation)
-        try requireDomain(of: destination, operation: operation)
-        guard case .directory = child, case .directory = newChild else {
-            throw StorageError.unsupportedOperation(
-                "Partitions cannot be moved; only Directories move",
+        guard destination.domain === transactionDomain else {
+            throw StorageError.storageDomainMismatch(
+                "Destination Directory belongs to a different storage engine",
                 operation: operation,
                 backend: backend
             )
         }
-        let sourceAddress = try childAddress(of: source, step: child, operation: operation)
-        let targetAddress = try childAddress(of: destination, step: newChild, operation: operation)
-        guard !sourceAddress.isAncestorOrSelf(of: targetAddress) else {
-            throw StorageError.invalidDirectoryAddress(
-                .targetInsideMovedSubtree,
+        let movedAddress = try childAddress(of: source, name, operation: operation)
+        let targetAddress = try childAddress(of: destination, newName, operation: operation)
+        let layerRoot = source.childLayerRoot
+        // The two nodes share a Directory Layer exactly when their contents are
+        // allocated from the same content base, so this is the whole Partition
+        // boundary rule: a Partition node itself moves within its own layer,
+        // and nothing moves into or out of a Partition.
+        guard layerRoot == destination.childLayerRoot else {
+            throw StorageError.partitionBoundaryViolation(
+                "A node cannot move into or out of a Partition",
                 operation: operation,
                 backend: backend
             )
         }
-        let sourcePath = nativePath(sourceAddress)
-        let destinationPath = nativePath(destination.address)
-        let targetPath = nativePath(targetAddress)
-        return try await withLayer(transaction, writes: true, operation: operation) { layer, native in
-            guard let moved = try await openIfExists(layer, path: sourcePath, transaction: native) else {
-                throw notFound("Directory to move does not exist", operation: operation)
+        let oldPath = nativePath(of: movedAddress)
+        let newPath = nativePath(of: targetAddress)
+        let destinationPath = nativePath(of: destination.address)
+        return try await withLayer(storage, writes: true, operation: operation) { layer, native in
+            guard let node = try await openIfExists(layer, path: oldPath, transaction: native) else {
+                throw notFound(
+                    "Node '\(name)' does not exist in the source Directory",
+                    operation: operation
+                )
             }
-            try verify(moved, is: FDBDirectoryLayout.directoryType)
-            // The native layer creates a missing destination as an untyped
-            // node and would silently accept a stale destination value.
+            if movedAddress.isAncestorOrSelf(of: destination.address)
+                || destination.keyspacePrefix == ByteString(node.prefix) {
+                throw StorageError.invalidDirectoryAddress(
+                    .targetInsideMovedSubtree,
+                    operation: operation,
+                    backend: backend
+                )
+            }
+            // The native move creates a missing destination parent, so a stale
+            // destination would otherwise resurrect a removed path.
             guard try await layer.exists(path: destinationPath, transaction: native) else {
-                throw notFound("Destination Directory no longer exists", operation: operation)
+                throw notFound(
+                    "Destination Directory does not exist",
+                    operation: operation
+                )
             }
-            let targetExists = try await layer.exists(path: targetPath, transaction: native)
-            guard !targetExists else {
+            // Rejected here rather than by the native move so no lease intent is
+            // registered for a move that cannot happen.
+            guard try await layer.exists(path: newPath, transaction: native) == false else {
                 throw StorageError(
                     code: .invalidOperation,
                     operation: operation,
                     backend: backend,
-                    message: "Move target already exists"
+                    message: "Node '\(newName)' already exists in the destination Directory"
                 )
             }
-            // The intent is registered only once the move is certain to be
-            // attempted, so a rejected move leaves no pending intent behind.
             try transactionDomain.leases.registerIntent(
-                covering: sourceAddress,
-                transaction: transaction,
+                covering: movedAddress,
+                transaction: storage,
                 operation: operation,
                 backend: backend
             )
-            let node = try await layer.move(oldPath: sourcePath, newPath: targetPath, transaction: native)
-            return directory(at: targetAddress, node: node)
+            let moved = try await layer.move(
+                oldPath: oldPath,
+                newPath: newPath,
+                transaction: native
+            )
+            return try directory(
+                at: targetAddress,
+                node: moved,
+                layerRoot: layerRoot,
+                operation: operation
+            )
         }
     }
 
-    func removeChild(
-        _ child: StorageAddressStep,
+    func remove(
+        _ name: String,
         in parent: Directory,
         transaction: any TransactionAccess
     ) async throws {
         let operation = StorageOperation.delete
-        let transaction = try resolve(transaction, operation: operation)
+        let storage = try resolve(transaction, operation: operation)
         try requireDomain(of: parent, operation: operation)
-        let address = try childAddress(of: parent, step: child, operation: operation)
-        let path = nativePath(address)
-        let expectedType = FDBDirectoryLayout.nativeType(for: child)
-        try await withLayer(transaction, writes: true, operation: operation) { layer, native in
-            guard let node = try await openIfExists(layer, path: path, transaction: native) else {
-                throw notFound("Directory to remove does not exist", operation: operation)
-            }
-            try verify(node, is: expectedType)
-            let children = try await layer.list(path: path, transaction: native)
-            guard children.isEmpty else {
-                throw StorageError.directoryNotEmpty(
-                    "Directory still has child Directories or Partitions",
-                    backend: backend
+        let address = try childAddress(of: parent, name, operation: operation)
+        let path = nativePath(of: address)
+        try await withLayer(storage, writes: true, operation: operation) { layer, native in
+            guard try await layer.exists(path: path, transaction: native) else {
+                throw notFound(
+                    "Node '\(name)' does not exist in the parent Directory",
+                    operation: operation
                 )
             }
-            let range = try FoundationDB.Subspace(prefix: node.prefix).prefixRange()
-            var hasData = false
-            for try await _ in native.getRange(from: range.begin, to: range.end, limit: 1) {
-                hasData = true
-                break
-            }
-            guard !hasData else {
-                throw StorageError.directoryNotEmpty(
-                    "Directory still contains data",
-                    backend: backend
-                )
-            }
-            // The intent is registered only once the removal is certain to be
-            // attempted, so a rejected removal leaves no pending intent behind.
             try transactionDomain.leases.registerIntent(
                 covering: address,
-                transaction: transaction,
+                transaction: storage,
                 operation: operation,
                 backend: backend
             )
+            // Removal is recursive and has no emptiness precondition: the
+            // native layer clears every descendant node and the whole content
+            // range of the removed node, which for a Partition is one range.
             try await layer.remove(path: path, transaction: native)
         }
     }
 
-    // MARK: - Native access
+    // MARK: - Native layer
 
-    /// Runs `body` against a Directory Layer bound to the transaction's
-    /// retained database, inside the transaction's exclusive Directory
-    /// operation window, and converts every backend failure to `StorageError`.
     private func withLayer<T: Sendable>(
         _ transaction: FDBStorageTransaction,
         writes: Bool,
@@ -357,25 +362,50 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
     }
 
-    private func verify(_ node: DirectorySubspace, is expected: DirectoryType) throws {
-        guard node.type == expected else {
-            throw StorageError.incompatibleStorageLayout(
-                .unknownMarker(ByteString(node.type?.rawValue ?? [])),
-                backend: backend
-            )
-        }
+    private func nativePath(of address: StorageAddress) -> [String] {
+        FDBDirectoryLayout.nativePath(rootPath: rootPath, address: address)
     }
 
-    private func directory(at address: StorageAddress, node: DirectorySubspace) -> Directory {
-        Directory(
+    private func directory(
+        at address: StorageAddress,
+        node: DirectorySubspace,
+        layerRoot: ByteString,
+        operation: StorageOperation
+    ) throws -> Directory {
+        let tag = try FDBDirectoryLayout.layerTag(
+            for: node.type,
+            operation: operation,
+            backend: backend
+        )
+        return Directory(
             domain: transactionDomain,
             address: address,
-            root: StorageKit.Subspace(prefix: ByteString(node.prefix))
+            layer: tag,
+            keyspacePrefix: ByteString(node.prefix),
+            layerRoot: layerRoot
         )
     }
 
-    private func nativePath(_ address: StorageAddress) -> [String] {
-        FDBDirectoryLayout.nativePath(rootPath: rootPath, address: address)
+    /// The catalog root is a plain Directory in the native root layer, so its
+    /// children are allocated from that layer's content base.
+    private func requireRoot(
+        _ node: DirectorySubspace,
+        operation: StorageOperation
+    ) throws -> Directory {
+        let root = try directory(
+            at: .root,
+            node: node,
+            layerRoot: ByteString(),
+            operation: operation
+        )
+        guard root.layer.isDefault else {
+            throw StorageError.directoryLayerMismatch(
+                "The configured root path is not a plain Directory",
+                operation: operation,
+                backend: backend
+            )
+        }
+        return root
     }
 
     // MARK: - Validation
@@ -406,15 +436,38 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
     }
 
+    private func requireLayer(
+        _ stored: LayerTag,
+        expected: LayerTag?,
+        name: String,
+        operation: StorageOperation
+    ) throws {
+        guard let expected, stored != expected else {
+            return
+        }
+        throw StorageError.directoryLayerMismatch(
+            "Node '\(name)' carries a different layer tag than the caller expected",
+            operation: operation,
+            backend: backend
+        )
+    }
+
     private func childAddress(
         of parent: Directory,
-        step: StorageAddressStep,
+        _ name: String,
         operation: StorageOperation
     ) throws -> StorageAddress {
-        switch Result(catching: { () throws(DirectoryAddressError) in try parent.address.appending(step) }) {
-        case .success(let address):
-            return address
-        case .failure(let error):
+        do {
+            return try parent.address.appending(name)
+        } catch {
+            throw StorageError.invalidDirectoryAddress(error, operation: operation, backend: backend)
+        }
+    }
+
+    private func validate(component: String, operation: StorageOperation) throws {
+        do {
+            try DirectoryPath.validateComponent(component)
+        } catch {
             throw StorageError.invalidDirectoryAddress(error, operation: operation, backend: backend)
         }
     }
@@ -473,16 +526,26 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 backend: backend,
                 message: "Native Directory path rejected: \(reason)"
             )
-        case .layerMismatch(_, let actual):
-            return StorageError.incompatibleStorageLayout(
-                .unknownMarker(ByteString(actual?.rawValue ?? [])),
-                backend: backend
-            )
-        case .cannotCreatePartitionInPartition, .cannotMoveAcrossPartitions:
-            return StorageError.unsupportedOperation(
-                "Native FoundationDB partitions are not used by StorageKit: \(error)",
+        case .layerMismatch(let expected, let actual):
+            return StorageError.directoryLayerMismatch(
+                "Node carries layer \(actual?.rawValue ?? []) where \(expected?.rawValue ?? []) was expected",
                 operation: operation,
                 backend: backend
+            )
+        case .cannotMoveAcrossPartitions:
+            return StorageError.partitionBoundaryViolation(
+                "A node cannot move into or out of a Partition",
+                operation: operation,
+                backend: backend
+            )
+        case .cannotCreatePartitionInPartition:
+            // Nested Partition creation is permitted; the native layer no longer
+            // raises this case.
+            return StorageError(
+                code: .invalidOperation,
+                operation: operation,
+                backend: backend,
+                message: "Native Directory Layer rejected nested Partition creation: \(error)"
             )
         case .incompatibleVersion, .invalidVersion, .invalidMetadata, .directoryLayerNotInitialized:
             return StorageError(

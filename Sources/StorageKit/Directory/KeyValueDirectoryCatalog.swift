@@ -4,8 +4,14 @@ import DatabaseTypes
 ///
 /// One instance is bound to one engine domain and is that engine's sole
 /// existence authority. All catalog reads and writes go through the caller's
-/// transaction, so creation, move, and removal are atomic with it. The key
-/// layout is fixed by `DESIGN.md`; changing it is a layout-version change.
+/// transaction, so creation, move, and removal are atomic with it.
+///
+/// Every Directory Layer has a content base: the empty prefix for the domain
+/// root layer, and the Partition's own prefix for the layer nested inside a
+/// Partition. A layer keeps its allocator and its child edges under
+/// `base + 0xFE`, and allocates child content prefixes as `base + Tuple(n)`, so
+/// every descendant of a Partition lies inside that Partition's prefix range.
+/// The layout is fixed by `DESIGN.md`; changing it is a layout-version change.
 public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     /// Backend-owned admission check run before the catalog writes anything.
     ///
@@ -31,58 +37,69 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     // MARK: - Layout V1
 
     package enum Layout {
-        package static let allocatorKey: ByteString = [0xFE, 0x61]
-        package static let nodePrefix: ByteString = [0xFE, 0x6E]
+        /// First byte of every layer's node subspace; the same reserved byte
+        /// that bounds a Partition's leasable content region.
+        package static let reservedByte: UInt8 = Directory.nodeSubspaceByte
+        /// Allocator key suffix inside a layer's node subspace.
+        package static let allocatorByte: UInt8 = 0x61
+        /// Edge-key discriminator, matching the FoundationDB Directory Layer.
+        package static let childEdgeMarker: Int64 = 0
         package static let rootNumber: Int64 = 0
-        package static let firstAllocatedRootNumber: Int64 = 1
+        package static let firstNumber: Int64 = 1
 
-        package enum Kind: Int64 {
-            case directory = 0
-            case partition = 1
+        package static func nodeSubspacePrefix(layerRoot: ByteString) -> ByteString {
+            layerRoot.appending(reservedByte)
         }
 
-        package static func rootPrefix(_ number: Int64) -> ByteString {
-            Tuple(number).pack()
+        package static func allocatorKey(layerRoot: ByteString) -> ByteString {
+            nodeSubspacePrefix(layerRoot: layerRoot).appending(allocatorByte)
         }
 
-        package static func nodeKey(
+        package static func contentPrefix(
+            layerRoot: ByteString,
+            number: Int64
+        ) -> ByteString {
+            layerRoot.appending(contentsOf: Tuple(number).pack())
+        }
+
+        package static func edgeKey(
+            layerRoot: ByteString,
             parentPrefix: ByteString,
-            kind: Kind,
-            name: any TupleElement
+            name: String
         ) -> ByteString {
-            concatenate(nodePrefix, Tuple(parentPrefix, kind.rawValue, name).pack())
+            nodeSubspacePrefix(layerRoot: layerRoot)
+                .appending(contentsOf: Tuple(parentPrefix, childEdgeMarker, name).pack())
         }
 
-        package static func listPrefix(
-            parentPrefix: ByteString,
-            kind: Kind
+        package static func edgeListPrefix(
+            layerRoot: ByteString,
+            parentPrefix: ByteString
         ) -> ByteString {
-            concatenate(nodePrefix, Tuple(parentPrefix, kind.rawValue).pack())
+            nodeSubspacePrefix(layerRoot: layerRoot)
+                .appending(contentsOf: Tuple(parentPrefix, childEdgeMarker).pack())
         }
 
-        package static func subtreePrefix(rootPrefix: ByteString) -> ByteString {
-            concatenate(nodePrefix, Tuple(rootPrefix).pack())
+        package static func edgeValue(prefix: ByteString, layer: LayerTag) -> ByteString {
+            Tuple(prefix, layer.bytes).pack()
         }
+    }
 
-        // Catalog keys are built once per Directory operation, never on a
-        // repeated data path, so a materializing concatenation is acceptable.
-        private static func concatenate(
-            _ head: ByteString,
-            _ tail: ByteString
-        ) -> ByteString {
-            var bytes: [UInt8] = []
-            bytes.reserveCapacity(head.count + tail.count)
-            bytes.append(contentsOf: head)
-            bytes.append(contentsOf: tail)
-            return ByteString(bytes)
-        }
+    /// One resolved child edge: the node's content prefix and its layer tag.
+    private struct Edge {
+        let prefix: ByteString
+        let layer: LayerTag
     }
 
     private var rootDirectory: Directory {
         Directory(
             domain: transactionDomain,
             address: .root,
-            root: Subspace(prefix: Layout.rootPrefix(Layout.rootNumber))
+            layer: .default,
+            keyspacePrefix: Layout.contentPrefix(
+                layerRoot: ByteString(),
+                number: Layout.rootNumber
+            ),
+            layerRoot: ByteString()
         )
     }
 
@@ -113,8 +130,8 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             try admitMutation(operation: .initialize)
             try transaction.setValue(StorageLayoutMarker.v1, for: StorageLayoutMarker.key)
             try transaction.setValue(
-                Tuple(Layout.firstAllocatedRootNumber).pack(),
-                for: Layout.allocatorKey
+                Tuple(Layout.firstNumber).pack(),
+                for: Layout.allocatorKey(layerRoot: ByteString())
             )
             return rootDirectory
         case .rejected(let rejection):
@@ -122,152 +139,120 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         }
     }
 
-    // MARK: - Operations 1–4
+    // MARK: - Operation 1
 
-    public func openDirectory(
+    public func open(
         _ name: String,
+        expecting expected: LayerTag?,
         in parent: Directory,
         transaction: any TransactionReadAccess
     ) async throws -> Directory? {
         try requireDomain(of: transaction, parent: parent, operation: .open)
-        let address = try childAddress(of: parent, .directory(name), operation: .open)
-        guard let number = try await readNode(
-            parentPrefix: parent.root.prefix,
-            kind: .directory,
+        let address = try childAddress(of: parent, name, operation: .open)
+        let layerRoot = parent.childLayerRoot
+        guard let edge = try await readEdge(
+            layerRoot: layerRoot,
+            parentPrefix: parent.keyspacePrefix,
             name: name,
             transaction: transaction
         ) else {
             return nil
         }
-        return directory(at: address, number: number)
+        try requireLayer(edge.layer, expected: expected, name: name, operation: .open)
+        return directory(at: address, edge: edge, layerRoot: layerRoot)
     }
 
-    public func openOrCreateDirectory(
+    // MARK: - Operation 2
+
+    public func openOrCreate(
         _ name: String,
+        layer: LayerTag,
         in parent: Directory,
         transaction: any TransactionAccess
     ) async throws -> Directory {
         try requireDomain(of: transaction, parent: parent, operation: .write)
-        let address = try childAddress(of: parent, .directory(name), operation: .write)
-        if let number = try await readNode(
-            parentPrefix: parent.root.prefix,
-            kind: .directory,
+        let address = try childAddress(of: parent, name, operation: .write)
+        let layerRoot = parent.childLayerRoot
+        if let edge = try await readEdge(
+            layerRoot: layerRoot,
+            parentPrefix: parent.keyspacePrefix,
             name: name,
             transaction: transaction
         ) {
-            return directory(at: address, number: number)
+            try requireLayer(edge.layer, expected: layer, name: name, operation: .write)
+            return directory(at: address, edge: edge, layerRoot: layerRoot)
         }
         try admitMutation(operation: .write)
-        let number = try await allocateRootNumber(transaction: transaction)
+        let number = try await allocateNumber(layerRoot: layerRoot, transaction: transaction)
+        let prefix = Layout.contentPrefix(layerRoot: layerRoot, number: number)
         try transaction.setValue(
-            Tuple(number).pack(),
-            for: Layout.nodeKey(parentPrefix: parent.root.prefix, kind: .directory, name: name)
+            Layout.edgeValue(prefix: prefix, layer: layer),
+            for: Layout.edgeKey(
+                layerRoot: layerRoot,
+                parentPrefix: parent.keyspacePrefix,
+                name: name
+            )
         )
-        return directory(at: address, number: number)
-    }
-
-    public func openPartition(
-        _ id: PartitionID,
-        in parent: Directory,
-        transaction: any TransactionReadAccess
-    ) async throws -> Partition? {
-        try requireDomain(of: transaction, parent: parent, operation: .open)
-        let address = try childAddress(of: parent, .partition(id), operation: .open)
-        guard let number = try await readNode(
-            parentPrefix: parent.root.prefix,
-            kind: .partition,
-            name: id.bytes,
-            transaction: transaction
-        ) else {
-            return nil
+        if layer.isPartition {
+            // The nested layer allocates inside the Partition from its own
+            // allocator, so a missing allocator always means corruption.
+            try transaction.setValue(
+                Tuple(Layout.firstNumber).pack(),
+                for: Layout.allocatorKey(layerRoot: prefix)
+            )
         }
-        return Partition(id: id, root: directory(at: address, number: number))
-    }
-
-    public func openOrCreatePartition(
-        _ id: PartitionID,
-        in parent: Directory,
-        transaction: any TransactionAccess
-    ) async throws -> Partition {
-        try requireDomain(of: transaction, parent: parent, operation: .write)
-        let address = try childAddress(of: parent, .partition(id), operation: .write)
-        if let number = try await readNode(
-            parentPrefix: parent.root.prefix,
-            kind: .partition,
-            name: id.bytes,
-            transaction: transaction
-        ) {
-            return Partition(id: id, root: directory(at: address, number: number))
-        }
-        try admitMutation(operation: .write)
-        let number = try await allocateRootNumber(transaction: transaction)
-        try transaction.setValue(
-            Tuple(number).pack(),
-            for: Layout.nodeKey(parentPrefix: parent.root.prefix, kind: .partition, name: id.bytes)
+        return directory(
+            at: address,
+            edge: Edge(prefix: prefix, layer: layer),
+            layerRoot: layerRoot
         )
-        return Partition(id: id, root: directory(at: address, number: number))
     }
 
-    // MARK: - Operations 5–6
+    // MARK: - Operation 3
 
-    public func listDirectories(
+    public func listChildren(
         in parent: Directory,
         after: String?,
         limit: Int,
         transaction: any TransactionReadAccess
-    ) async throws -> [String] {
+    ) async throws -> [DirectoryEntry] {
         try requireDomain(of: transaction, parent: parent, operation: .rangeRead)
         try requireListLimit(limit)
         if let after {
-            try validate(.directory(after), operation: .rangeRead)
+            try validate(component: after, operation: .rangeRead)
         }
-        let listPrefix = Layout.listPrefix(parentPrefix: parent.root.prefix, kind: .directory)
-        let rows = try await listNodes(
-            parentPrefix: parent.root.prefix,
-            kind: .directory,
-            listPrefix: listPrefix,
-            after: after,
-            limit: limit,
-            transaction: transaction
+        let layerRoot = parent.childLayerRoot
+        let listPrefix = Layout.edgeListPrefix(
+            layerRoot: layerRoot,
+            parentPrefix: parent.keyspacePrefix
         )
+        let begin: KeySelector
+        if let after {
+            begin = .firstGreaterThan(
+                Layout.edgeKey(
+                    layerRoot: layerRoot,
+                    parentPrefix: parent.keyspacePrefix,
+                    name: after
+                )
+            )
+        } else {
+            begin = .firstGreaterOrEqual(listPrefix)
+        }
+        let end = KeySelector.firstGreaterOrEqual(try increment(listPrefix))
+        let rows = try await transaction.collectRange(from: begin, to: end, limit: limit)
         return try rows.map { row in
-            try decodeName(from: row.0, listPrefix: listPrefix, as: String.self)
+            let name = try decodeName(from: row.0, listPrefix: listPrefix)
+            let edge = try decodeEdge(row.1)
+            return DirectoryEntry(name: name, layer: edge.layer)
         }
     }
 
-    public func listPartitions(
-        in parent: Directory,
-        after: PartitionID?,
-        limit: Int,
-        transaction: any TransactionReadAccess
-    ) async throws -> [PartitionID] {
-        try requireDomain(of: transaction, parent: parent, operation: .rangeRead)
-        try requireListLimit(limit)
-        let listPrefix = Layout.listPrefix(parentPrefix: parent.root.prefix, kind: .partition)
-        let rows = try await listNodes(
-            parentPrefix: parent.root.prefix,
-            kind: .partition,
-            listPrefix: listPrefix,
-            after: after?.bytes,
-            limit: limit,
-            transaction: transaction
-        )
-        return try rows.map { row in
-            let bytes = try decodeName(from: row.0, listPrefix: listPrefix, as: ByteString.self)
-            do {
-                return try PartitionID(bytes)
-            } catch {
-                throw dataCorruption("Partition node name is invalid: \(error)")
-            }
-        }
-    }
+    // MARK: - Operation 4
 
-    // MARK: - Operation 7
-
-    public func moveChild(
-        _ child: StorageAddressStep,
+    public func move(
+        _ name: String,
         in source: Directory,
-        to newChild: StorageAddressStep,
+        to newName: String,
         in destination: Directory,
         transaction: any TransactionAccess
     ) async throws -> Directory {
@@ -275,37 +260,38 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         guard destination.domain === transactionDomain else {
             throw domainMismatch(operation: .write, subject: "Destination Directory")
         }
-        guard case .directory(let name) = child,
-              case .directory(let newName) = newChild
-        else {
-            throw StorageError.unsupportedOperation(
-                "Partitions cannot be moved; only Directories support operation 7",
+        let movedAddress = try childAddress(of: source, name, operation: .write)
+        let targetAddress = try childAddress(of: destination, newName, operation: .write)
+        let layerRoot = source.childLayerRoot
+        guard layerRoot == destination.childLayerRoot else {
+            throw StorageError.partitionBoundaryViolation(
+                "A node cannot move into or out of a Partition",
                 operation: .write,
                 backend: backend
             )
         }
-        let movedAddress = try childAddress(of: source, child, operation: .write)
-        let targetAddress = try childAddress(of: destination, newChild, operation: .write)
-        guard let number = try await readNode(
-            parentPrefix: source.root.prefix,
-            kind: .directory,
+        guard let edge = try await readEdge(
+            layerRoot: layerRoot,
+            parentPrefix: source.keyspacePrefix,
             name: name,
             transaction: transaction
         ) else {
-            throw notFound("Directory '\(name)' does not exist in the source Directory", operation: .write)
+            throw notFound(
+                "Node '\(name)' does not exist in the source Directory",
+                operation: .write
+            )
         }
-        let movedPrefix = Layout.rootPrefix(number)
         if movedAddress.isAncestorOrSelf(of: destination.address)
-            || destination.root.prefix == movedPrefix {
+            || destination.keyspacePrefix == edge.prefix {
             throw StorageError.invalidDirectoryAddress(
                 .targetInsideMovedSubtree,
                 operation: .write,
                 backend: backend
             )
         }
-        if try await readNode(
-            parentPrefix: destination.root.prefix,
-            kind: .directory,
+        if try await readEdge(
+            layerRoot: layerRoot,
+            parentPrefix: destination.keyspacePrefix,
             name: newName,
             transaction: transaction
         ) != nil {
@@ -313,7 +299,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
                 code: .invalidOperation,
                 operation: .write,
                 backend: backend,
-                message: "Directory '\(newName)' already exists in the destination Directory"
+                message: "Node '\(newName)' already exists in the destination Directory"
             )
         }
         try admitMutation(operation: .write)
@@ -324,73 +310,42 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             backend: backend
         )
         try transaction.clear(
-            key: Layout.nodeKey(parentPrefix: source.root.prefix, kind: .directory, name: name)
+            key: Layout.edgeKey(
+                layerRoot: layerRoot,
+                parentPrefix: source.keyspacePrefix,
+                name: name
+            )
         )
         try transaction.setValue(
-            Tuple(number).pack(),
-            for: Layout.nodeKey(parentPrefix: destination.root.prefix, kind: .directory, name: newName)
+            Layout.edgeValue(prefix: edge.prefix, layer: edge.layer),
+            for: Layout.edgeKey(
+                layerRoot: layerRoot,
+                parentPrefix: destination.keyspacePrefix,
+                name: newName
+            )
         )
-        return directory(at: targetAddress, number: number)
+        return directory(at: targetAddress, edge: edge, layerRoot: layerRoot)
     }
 
-    // MARK: - Operation 8
+    // MARK: - Operation 5
 
-    public func removeChild(
-        _ child: StorageAddressStep,
+    public func remove(
+        _ name: String,
         in parent: Directory,
         transaction: any TransactionAccess
     ) async throws {
         try requireDomain(of: transaction, parent: parent, operation: .delete)
-        let address = try childAddress(of: parent, child, operation: .delete)
-        let kind: Layout.Kind
-        let name: any TupleElement
-        let label: String
-        switch child {
-        case .directory(let directoryName):
-            kind = .directory
-            name = directoryName
-            label = "Directory '\(directoryName)'"
-        case .partition(let id):
-            kind = .partition
-            name = id.bytes
-            label = "Partition of \(id.bytes.count) identifier bytes"
-        }
-        guard let number = try await readNode(
-            parentPrefix: parent.root.prefix,
-            kind: kind,
+        let address = try childAddress(of: parent, name, operation: .delete)
+        let layerRoot = parent.childLayerRoot
+        guard let edge = try await readEdge(
+            layerRoot: layerRoot,
+            parentPrefix: parent.keyspacePrefix,
             name: name,
             transaction: transaction
         ) else {
-            throw notFound("\(label) does not exist in the parent Directory", operation: .delete)
-        }
-        let childPrefix = Layout.rootPrefix(number)
-        let subtreePrefix = Layout.subtreePrefix(rootPrefix: childPrefix)
-        let childNodes = try await transaction.collectRange(
-            begin: subtreePrefix,
-            end: try increment(subtreePrefix),
-            limit: 1
-        )
-        guard childNodes.isEmpty else {
-            throw StorageError.directoryNotEmpty(
-                "\(label) still contains child Directories or Partitions",
-                backend: backend
-            )
-        }
-        let dataRange: (begin: ByteString, end: ByteString)
-        do {
-            dataRange = try Subspace(prefix: childPrefix).prefixRange()
-        } catch {
-            throw contractViolation("Directory root prefix cannot be bounded: \(error)")
-        }
-        let data = try await transaction.collectRange(
-            begin: dataRange.begin,
-            end: dataRange.end,
-            limit: 1
-        )
-        guard data.isEmpty else {
-            throw StorageError.directoryNotEmpty(
-                "\(label) still contains data keys",
-                backend: backend
+            throw notFound(
+                "Node '\(name)' does not exist in the parent Directory",
+                operation: .delete
             )
         }
         try admitMutation(operation: .delete)
@@ -400,63 +355,129 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             operation: .delete,
             backend: backend
         )
+        try await clearSubtree(of: edge, layerRoot: layerRoot, transaction: transaction)
         try transaction.clear(
-            key: Layout.nodeKey(parentPrefix: parent.root.prefix, kind: kind, name: name)
+            key: Layout.edgeKey(
+                layerRoot: layerRoot,
+                parentPrefix: parent.keyspacePrefix,
+                name: name
+            )
         )
+    }
+
+    /// Clears a node's descendants and its own data, but not its parent edge.
+    ///
+    /// A Partition owns one contiguous range that also holds its nested layer,
+    /// so one range clear removes its whole subtree. A plain Directory's
+    /// children are allocated from the layer that contains it, so its subtree
+    /// is walked edge by edge inside the caller's transaction.
+    private func clearSubtree(
+        of edge: Edge,
+        layerRoot: ByteString,
+        transaction: any TransactionAccess
+    ) async throws {
+        if edge.layer.isPartition {
+            try clearRange(prefix: edge.prefix, transaction: transaction)
+            return
+        }
+        var pending: [ByteString] = [edge.prefix]
+        var visited: Set<ByteString> = []
+        while let nodePrefix = pending.popLast() {
+            guard visited.insert(nodePrefix).inserted else {
+                throw dataCorruption("Directory catalog contains a node prefix cycle")
+            }
+            let listPrefix = Layout.edgeListPrefix(
+                layerRoot: layerRoot,
+                parentPrefix: nodePrefix
+            )
+            let listEnd = try increment(listPrefix)
+            // Read-your-writes hides the edges cleared in this transaction, so
+            // repeatedly draining the first page terminates.
+            while true {
+                let rows = try await transaction.collectRange(
+                    begin: listPrefix,
+                    end: listEnd,
+                    limit: DirectoryLimits.maximumListLimit
+                )
+                if rows.isEmpty {
+                    break
+                }
+                for row in rows {
+                    let child = try decodeEdge(row.1)
+                    if child.layer.isPartition {
+                        try clearRange(prefix: child.prefix, transaction: transaction)
+                    } else {
+                        pending.append(child.prefix)
+                    }
+                    try transaction.clear(key: row.0)
+                }
+            }
+            try clearRange(prefix: nodePrefix, transaction: transaction)
+        }
     }
 
     // MARK: - Node access
 
-    private func readNode(
+    private func readEdge(
+        layerRoot: ByteString,
         parentPrefix: ByteString,
-        kind: Layout.Kind,
-        name: any TupleElement,
+        name: String,
         transaction: any TransactionReadAccess
-    ) async throws -> Int64? {
-        let key = Layout.nodeKey(parentPrefix: parentPrefix, kind: kind, name: name)
+    ) async throws -> Edge? {
+        let key = Layout.edgeKey(
+            layerRoot: layerRoot,
+            parentPrefix: parentPrefix,
+            name: name
+        )
         guard let value = try await transaction.getValue(for: key) else {
             return nil
         }
-        return try decodeRootNumber(value, context: "Directory node")
+        return try decodeEdge(value)
     }
 
-    /// Read-modify-write on the allocator key inside the caller's transaction,
-    /// so concurrent creators conflict through the backend's own detection.
-    private func allocateRootNumber(
+    /// Read-modify-write on the layer allocator key inside the caller's
+    /// transaction, so concurrent creators conflict through the backend's own
+    /// detection.
+    private func allocateNumber(
+        layerRoot: ByteString,
         transaction: any TransactionAccess
     ) async throws -> Int64 {
-        guard let raw = try await transaction.getValue(for: Layout.allocatorKey) else {
-            throw dataCorruption("Directory allocator key is missing from an initialized catalog")
+        let key = Layout.allocatorKey(layerRoot: layerRoot)
+        guard let raw = try await transaction.getValue(for: key) else {
+            throw dataCorruption(
+                "Directory layer allocator key is missing from an initialized catalog"
+            )
         }
-        let next = try decodeRootNumber(raw, context: "Directory allocator")
-        guard next >= Layout.firstAllocatedRootNumber, next < Int64.max else {
-            throw dataCorruption("Directory allocator holds an invalid next root number \(next)")
+        let next = try decodeNumber(raw, context: "Directory allocator")
+        guard next >= Layout.firstNumber, next < Int64.max else {
+            throw dataCorruption("Directory allocator holds an invalid next number \(next)")
         }
-        try transaction.setValue(Tuple(next + 1).pack(), for: Layout.allocatorKey)
+        try transaction.setValue(Tuple(next + 1).pack(), for: key)
         return next
     }
 
-    private func listNodes(
-        parentPrefix: ByteString,
-        kind: Layout.Kind,
-        listPrefix: ByteString,
-        after: (any TupleElement)?,
-        limit: Int,
-        transaction: any TransactionReadAccess
-    ) async throws -> [(ByteString, ByteString)] {
-        let begin: KeySelector
-        if let after {
-            begin = .firstGreaterThan(
-                Layout.nodeKey(parentPrefix: parentPrefix, kind: kind, name: after)
-            )
-        } else {
-            begin = .firstGreaterOrEqual(listPrefix)
+    private func decodeEdge(_ value: ByteString) throws -> Edge {
+        let elements: [any TupleElement]
+        do {
+            elements = try Tuple.unpack(from: value)
+        } catch {
+            throw dataCorruption("Directory edge value is not a Tuple: \(error)")
         }
-        let end = KeySelector.firstGreaterOrEqual(try increment(listPrefix))
-        return try await transaction.collectRange(from: begin, to: end, limit: limit)
+        guard elements.count == 2,
+              let prefix = elements[0] as? ByteString,
+              let tag = elements[1] as? ByteString,
+              !prefix.isEmpty
+        else {
+            throw dataCorruption("Directory edge value is not a prefix and a layer tag")
+        }
+        do {
+            return Edge(prefix: prefix, layer: try LayerTag(tag))
+        } catch {
+            throw dataCorruption("Directory node layer tag is invalid: \(error)")
+        }
     }
 
-    private func decodeRootNumber(
+    private func decodeNumber(
         _ value: ByteString,
         context: String
     ) throws -> Int64 {
@@ -470,18 +491,17 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
               let number = elements[0] as? Int64,
               number >= 0
         else {
-            throw dataCorruption("\(context) value is not a single nonnegative root number")
+            throw dataCorruption("\(context) value is not a single nonnegative number")
         }
         return number
     }
 
-    private func decodeName<Name>(
+    private func decodeName(
         from key: ByteString,
-        listPrefix: ByteString,
-        as _: Name.Type
-    ) throws -> Name {
+        listPrefix: ByteString
+    ) throws -> String {
         guard key.count > listPrefix.count, key.starts(with: listPrefix) else {
-            throw dataCorruption("Directory node key lies outside its listing prefix")
+            throw dataCorruption("Directory edge key lies outside its listing prefix")
         }
         let suffix = key[listPrefix.count..<key.count]
         let elements: [any TupleElement]
@@ -490,17 +510,23 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         } catch {
             throw dataCorruption("Directory node name is not a Tuple: \(error)")
         }
-        guard elements.count == 1, let name = elements[0] as? Name else {
+        guard elements.count == 1, let name = elements[0] as? String else {
             throw dataCorruption("Directory node name has an unexpected Tuple shape")
         }
         return name
     }
 
-    private func directory(at address: StorageAddress, number: Int64) -> Directory {
+    private func directory(
+        at address: StorageAddress,
+        edge: Edge,
+        layerRoot: ByteString
+    ) -> Directory {
         Directory(
             domain: transactionDomain,
             address: address,
-            root: Subspace(prefix: Layout.rootPrefix(number))
+            layer: edge.layer,
+            keyspacePrefix: edge.prefix,
+            layerRoot: layerRoot
         )
     }
 
@@ -526,6 +552,22 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         }
     }
 
+    private func requireLayer(
+        _ stored: LayerTag,
+        expected: LayerTag?,
+        name: String,
+        operation: StorageOperation
+    ) throws {
+        guard let expected, stored != expected else {
+            return
+        }
+        throw StorageError.directoryLayerMismatch(
+            "Node '\(name)' carries a different layer tag than the caller expected",
+            operation: operation,
+            backend: backend
+        )
+    }
+
     private func admitMutation(operation: StorageOperation) throws {
         guard let mutationAdmission else { return }
         try mutationAdmission(operation)
@@ -543,11 +585,11 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     }
 
     private func validate(
-        _ step: StorageAddressStep,
+        component: String,
         operation: StorageOperation
     ) throws {
         do {
-            try step.validate()
+            try DirectoryPath.validateComponent(component)
         } catch {
             throw StorageError.invalidDirectoryAddress(error, operation: operation, backend: backend)
         }
@@ -555,14 +597,21 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
 
     private func childAddress(
         of parent: Directory,
-        _ step: StorageAddressStep,
+        _ name: String,
         operation: StorageOperation
     ) throws -> StorageAddress {
         do {
-            return try parent.address.appending(step)
+            return try parent.address.appending(name)
         } catch {
             throw StorageError.invalidDirectoryAddress(error, operation: operation, backend: backend)
         }
+    }
+
+    private func clearRange(
+        prefix: ByteString,
+        transaction: any TransactionAccess
+    ) throws {
+        try transaction.clearRange(beginKey: prefix, endKey: try increment(prefix))
     }
 
     private func increment(_ prefix: ByteString) throws -> ByteString {

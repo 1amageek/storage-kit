@@ -112,8 +112,9 @@ extension StorageEngine {
     ///
     /// The lease is reserved before validation so a concurrent move or removal
     /// cannot slip between the catalog check and the registration. Validation
-    /// walks the Partition's address through the catalog; a missing node or a
-    /// different root prefix means the Partition value is stale.
+    /// walks the Partition's address through the catalog; a missing node, a
+    /// node that is no longer a Partition, or a different keyspace prefix means
+    /// the Partition value is stale.
     public func leasePartition(
         _ partition: Partition,
         transaction: any TransactionReadAccess
@@ -133,14 +134,7 @@ extension StorageEngine {
                 backend: backend
             )
         }
-        guard partition.hasConsistentAddress else {
-            throw StorageError.invalidDirectoryAddress(
-                .partitionStepRequired,
-                operation: .open,
-                backend: backend
-            )
-        }
-        let bounds = try PartitionKeyBounds(partition: partition, backend: backend)
+        let bounds = PartitionKeyBounds(partition: partition, backend: backend)
         let registration = try transactionDomain.leases.reserve(
             partition.root.address,
             backend: backend
@@ -155,10 +149,13 @@ extension StorageEngine {
             registration.release()
             throw error
         }
-        guard let current, current.root.prefix == partition.root.root.prefix else {
+        guard let current,
+              current.layer.isPartition,
+              current.keyspacePrefix == partition.keyspacePrefix
+        else {
             registration.release()
             throw StorageError.staleLease(
-                "Partition no longer exists at its address with the same root",
+                "Partition no longer exists at its address with the same keyspace",
                 operation: .open,
                 backend: backend
             )

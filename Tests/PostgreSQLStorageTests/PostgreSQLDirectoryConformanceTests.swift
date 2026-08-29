@@ -47,6 +47,10 @@ struct PostgreSQLDirectoryConformanceTests {
         try await conformance.verifyListing()
     }
 
+    @Test(.timeLimit(.minutes(1))) func partitionContiguity() async throws {
+        try await conformance.verifyPartitionContiguity()
+    }
+
     @Test(.timeLimit(.minutes(1))) func move() async throws {
         try await conformance.verifyMove()
     }
