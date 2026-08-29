@@ -344,7 +344,7 @@ try await engine.withTransaction { transaction in
     let root = try await catalog.openOrInitializeRoot(transaction: transaction)
     let app = try await catalog.openOrCreateDirectory("app", in: root, transaction: transaction)
     let tenant = try await catalog.openOrCreatePartition(
-        try PartitionID([0x01]),
+        "tenant-1",
         in: app,
         transaction: transaction
     )
@@ -359,12 +359,21 @@ try await engine.withTransaction { transaction in
 }
 ```
 
-- Read operations (`openRoot`, `openDirectory`, `openPartition`,
-  `listDirectories`, `listPartitions`) accept `TransactionReadAccess` and never create; absence
-  is reported as `nil`, never as an empty Directory.
-- Write operations (`openOrInitializeRoot`, `openOrCreateDirectory`,
-  `openOrCreatePartition`, `moveChild`, `removeChild`) require
-  `TransactionAccess` and are atomic with the transaction that carries them.
+- A node is named by one path component and carries a `LayerTag`. The empty tag
+  is a plain Directory and the tag `partition` is a Partition, matching the
+  FoundationDB Directory Layer, so `open` and `openOrCreate` take the tag rather
+  than a separate operation per kind. `openDirectory`, `openPartition`,
+  `openOrCreateDirectory`, and `openOrCreatePartition` are the tag-restricted
+  spellings of those two operations.
+- Read operations (`openRoot`, `open`, `listChildren`) accept
+  `TransactionReadAccess` and never create; absence is reported as `nil`, never
+  as an empty Directory. `listChildren` returns `DirectoryEntry` values that
+  carry each child's name and layer, so one page describes Directories and
+  Partitions together.
+- Write operations (`openOrInitializeRoot`, `openOrCreate`, `move`, `remove`)
+  require `TransactionAccess` and are atomic with the transaction that carries
+  them. `move` relocates a whole node, Partitions included, within one Directory
+  Layer, and `remove` deletes a child with its entire subtree.
 - `engine.leasePartition(_:transaction:)` validates the Partition against the
   catalog inside the transaction, binds key bounds to the Partition root, and
   blocks moves and removals of any ancestor while the lease is active.
@@ -372,7 +381,7 @@ try await engine.withTransaction { transaction in
   objects; a key outside the Partition fails with a typed error before any
   backend call.
 - A Partition under a pending move or removal cannot be leased (`staleLease`);
-  a subtree covered by an active lease refuses `moveChild` and `removeChild`
+  a subtree covered by an active lease refuses `move` and `remove`
   with `directoryLeased`.
 - Tuple encoding is frozen as Tuple V1 by `TupleV1GoldenVectorTests`; Directory
   root prefixes are Tuple-encoded integers allocated by the catalog.

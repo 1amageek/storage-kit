@@ -57,7 +57,7 @@ Layering inside the module:
 
 | Layer | Types | Depends on |
 |---|---|---|
-| Values | `ByteString` (database-types), `Tuple`, `Subspace`, `DirectoryPath`, `PartitionID`, `StorageAddress`, `Directory`, `Partition` | database-types |
+| Values | `ByteString` (database-types), `Tuple`, `Subspace`, `DirectoryPath`, `LayerTag`, `DirectoryEntry`, `StorageAddress`, `Directory`, `Partition` | database-types |
 | Access contracts | `TransactionReadAccess`, `TransactionAccess`, `Transaction`, `KeySelector`, `KeyValueCursor`, `StreamingMode` | Values |
 | Placement | `DirectoryAccess`, `KeyValueDirectoryCatalog`, `StorageLayoutMarker`, `DirectoryLimits` | Access contracts |
 | Leases | `PartitionLeaseRegistry`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Placement |

@@ -20,7 +20,7 @@ Parent: [storage-kit/DESIGN.md](../../DESIGN.md). Children: none.
 
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
-| [StorageKit/Directory](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess` operations 1–8, `StorageEngine.leasePartition`, `PartitionLease` | Verifies the operation table, state machine, lease invariants L-1…L-8, and domain checks | A change to any typed failure in the operation table must update the matching step here |
+| [StorageKit/Directory](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess` operations 1–5, `StorageEngine.leasePartition`, `PartitionLease` | Verifies the operation table, state machine, lease invariants L-1…L-8, and domain checks | A change to any typed failure in the operation table must update the matching step here |
 | [StorageKit](../StorageKit/DESIGN.md) | depends on | `StorageEngine`, `withTransaction`, `requestShutdown` | Every step creates fresh engines through the adapter factory | Steps assume `makeEngine` returns an empty keyspace |
 
 ## Architecture
@@ -29,7 +29,8 @@ Parent: [storage-kit/DESIGN.md](../../DESIGN.md). Children: none.
 adapter test target (one @Test per step)
     -> DirectoryConformanceCase<Engine>(makeEngine:)
         -> verifyRootInitialization / verifyLayoutRejection
-        -> verifyCreateAndOpen / verifyListing / verifyMove / verifyRemove
+        -> verifyCreateAndOpen / verifyListing / verifyPartitionContiguity
+        -> verifyMove / verifyRemove
         -> verifyDomainMismatch / verifyLeaseLifecycle / verifyTransactionalAtomicity
             -> engine.directoryAccess, engine.leasePartition, engine.withTransaction
 ```
@@ -43,9 +44,12 @@ adapter test target (one @Test per step)
 - The case asserts only observable `DirectoryAccess` behavior. Key-layout
   facts (marker bytes, allocator encoding, node keys) are owned by
   `KeyValueDirectoryCatalog` tests in `StorageKitTests`.
-- `verifyLayoutRejection` applies to engines whose catalog uses the
-  StorageKit layout marker; adapters with a native Directory Layer decide
-  in their own test target whether to run it.
+- `verifyLayoutRejection` applies to every engine: the layout marker is the
+  StorageKit-owned layout authority on all backends, including FoundationDB,
+  where the native Directory Layer owns node existence but not the layout
+  version. Its scope is the engine's keyspace on key-value backends and the
+  whole cluster on FoundationDB, so that adapter's test target brings the
+  cluster into the state each step expects.
 
 ## Verification and Change Impact
 

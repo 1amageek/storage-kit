@@ -3,24 +3,25 @@
 ## Purpose and Scope
 
 The Directory component owns storage placement: hierarchical Directories,
-isolated Partitions, the transactional catalog that is the sole existence
-authority in key-value backends, the layout-version marker and its bootstrap
-state machine, and the noncopyable lease and bound-access types that confine
-active work to one Partition.
+Partitions that root a nested Directory Layer over one contiguous keyspace, the
+transactional catalog that is the sole existence authority in key-value
+backends, the layout-version marker and its bootstrap state machine, and the
+noncopyable lease and bound-access types that confine active work to one
+Partition.
 
 | Field | Value |
 |---|---|
 | Design level | component |
 | Parent | [StorageKit module](../DESIGN.md) |
 | Children | none |
-| Product authority | SPEC §8, §9, §10.3, §12.3 |
+| Product authority | SPEC §8, §9, §10.3, §12.3, §24.1, §24.2 |
 
 ## Responsibilities and Boundaries
 
 | Owns | Does not own |
 |---|---|
-| `DirectoryPath`, `PartitionID`, `StorageAddress`, `Directory`, `Partition` values and their bounds | Reserved names (`system`, `database-framework`, `data`) and Framework Subspace layout |
-| `DirectoryAccess` contract and the eight semantic operations | Authorization of any operation |
+| `DirectoryPath`, `LayerTag`, `StorageAddress`, `Directory`, `DirectoryEntry`, `Partition` values and their bounds | Reserved names (`system`, `database-framework`, `data`) and Framework Subspace layout |
+| `DirectoryAccess` contract and the five semantic operations | Authorization of any operation |
 | `KeyValueDirectoryCatalog`: the catalog realization for InMemory, SQLite, PostgreSQL, Cloudflare DO | The FDB realization (owned by `FDBStorage`, which must satisfy the same contract) |
 | `StorageLayoutMarker` and the InspectRoot → OpenV1 / InitializeV1 / Reject state machine | Deleting or rewriting roots (never in production) |
 | `PartitionLeaseRegistry`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Deciding which Partition a request may lease |
@@ -30,9 +31,9 @@ active work to one Partition.
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
 | [StorageKit module](../DESIGN.md) | parent | `TransactionReadAccess`, `TransactionAccess`, `StorageEngine.transactionDomain`, `StorageError`, `Subspace`, `Tuple` | Supplies the transaction and encoding contracts the catalog is built on. | Catalog keys use Tuple V1; a Tuple change is a layout change. |
-| [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess`, `PartitionLeaseRegistry.registerIntent` | Realizes the same contract over the native FoundationDB Directory Layer (layout FD-1…FD-9). | Partitions are custom-typed directories because native partitions cannot nest; layer type is verified on open; listing below a missing parent fails with `keyNotFound` there. |
-| [SQLiteStorage module](../../SQLiteStorage/DESIGN.md), [PostgreSQLStorage module](../../PostgreSQLStorage/DESIGN.md), [CloudflareDurableObjectStorage module](../../CloudflareDurableObjectStorage/DESIGN.md) | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL rejects `readCommitted` isolation for catalog mutation (owned by PostgreSQLStorage). |
-| database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | Framework proves its own Subspaces empty before requesting Partition removal. |
+| [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess`, `PartitionLeaseRegistry.registerIntent` | Realizes the same node model over the native FoundationDB Directory Layer. | A Partition is a native node whose layer bytes are `partition`; native partitions nest, so no custom layer type is used. |
+| [SQLiteStorage module](../../SQLiteStorage/DESIGN.md), [PostgreSQLStorage module](../../PostgreSQLStorage/DESIGN.md), [CloudflareDurableObjectStorage module](../../CloudflareDurableObjectStorage/DESIGN.md) | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL rejects `readCommitted` isolation for catalog mutation through `MutationAdmission` (owned by PostgreSQLStorage). |
+| database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | A Partition removal is recursive; the Framework no longer proves its Subspaces empty first. |
 
 ## Architecture
 
@@ -40,14 +41,14 @@ active work to one Partition.
  DirectoryAccess (protocol)
    |
    +-- KeyValueDirectoryCatalog (StorageKit)      +-- FDBDirectoryAccess (FDBStorage)
-   |     reserved prefix 0xFE                      |     native DirectoryLayer
-   |     marker / allocator / node keys            |     custom-typed partition dirs
+   |     per-layer node subspace 0xFE              |     native DirectoryLayer
+   |     marker / allocator / child edges          |     native `partition` layer bytes
    v                                               v
  TransactionReadAccess / TransactionAccess (caller's transaction)
 
  StorageEngine.leasePartition
    -> PartitionLeaseRegistry.reserve            (domain, shutdown, intent check)
-   -> DirectoryAccess.resolve(address)          (generation check in caller txn)
+   -> DirectoryAccess.openDirectory(at:)        (generation check in caller txn)
    -> PartitionLease (~Copyable)
         -> withReadAccess  -> BoundReadAccess  (~Copyable, borrowed)
         -> withWriteAccess -> BoundWriteAccess (~Copyable, borrowed)
@@ -55,16 +56,56 @@ active work to one Partition.
 
 ## Contracts and Invariants
 
+### The node model
+
+A node is a content prefix plus layer-tag bytes. A node whose tag is
+`LayerTag.partition` roots a nested Directory Layer whose content base is the
+node's own prefix, so every descendant node, Subspace, and key of that
+Partition lies inside the Partition prefix range.
+
+```text
+layer with content base L
+  node subspace   N = L ‖ FE
+  allocator         = N ‖ 61                    Tuple(Int64(next))
+  child edge        = N ‖ Tuple(parentPrefix, 0, name)
+                        -> Tuple(childPrefix: bytes, layerTag: bytes)
+  child content     = L ‖ Tuple(Int64(n)), n >= 1
+
+domain root layer   L = empty, root Directory prefix = Tuple(Int64(0)) = 14
+Partition P         nested layer with L = P
+```
+
+Prefixes are allocated per layer and are independent of the path, so a move is
+a metadata-only edge rewrite. A plain Directory's children are allocated from
+the layer that contains it, so a plain Directory subtree is not contiguous; a
+Partition subtree is.
+
 ### Values
 
 | Type | Definition | Bounds (`DirectoryLimits`) |
 |---|---|---|
 | `DirectoryPath` | ordered nonempty `[String]` of exact UTF-8 components; no normalization, no separator parsing | component 1…255 UTF-8 bytes; depth ≤ 64 |
-| `PartitionID` | nonempty opaque `ByteString`; `Comparable` by bytes | 1…1024 bytes |
-| `StorageAddressStep` | `.directory(String)` or `.partition(PartitionID)` | component bounds above |
-| `StorageAddress` | ordered steps from the root; empty = root | depth ≤ 64 |
-| `Directory` | `domain` (identity), `address`, `root: Subspace`; generation = `root.prefix` | — |
-| `Partition` | `id`, `root: Directory` whose last address step is `.partition(id)` | — |
+| `LayerTag` | opaque tag bytes of a node; `.default` is empty, `.partition` is UTF-8 `partition` | 0…255 bytes |
+| `StorageAddress` | ordered exact name components from the root; empty = root | depth ≤ 64 |
+| `Directory` | `domain` (identity), `address`, `layer`, `keyspacePrefix`, package `layerRoot`, `root: Subspace`; generation = `keyspacePrefix` | — |
+| `DirectoryEntry` | one listing row: `name`, `layer` | — |
+| `Partition` | a `Directory` whose `layer.isPartition`; constructed only from such a node | — |
+
+`Directory.root` is the Subspace a caller derives keys from:
+
+| Node | `keyspacePrefix` | `root.prefix` |
+|---|---|---|
+| plain Directory | `C` | `C` |
+| Partition | `P` | `P ‖ FD` |
+
+A Partition's nested layer allocates children at `P ‖ Tuple(n)` and holds
+metadata at `P ‖ FE`, so data written at the Partition root itself must not
+share those bytes. `FD` is below the reserved `FE` and above every Tuple type
+code (the largest is `0x33`), so the Partition data root is disjoint from every
+allocated child prefix and from the nested node subspace, while staying inside
+the Partition keyspace. FoundationDB avoids the same collision by forbidding
+`pack()` on a partition subspace; SPEC §12.1 requires the final node to carry
+the entity's own Subspaces, so StorageKit reserves the byte instead.
 
 Value validation fails with `DirectoryAddressError`; `DirectoryAccess`
 operations convert it to `StorageError.invalidDirectoryAddress`.
@@ -73,80 +114,106 @@ operations convert it to `StorageError.invalidDirectoryAddress`.
 
 | # | Operation | Class | Input access | Absence | Notes |
 |---|---|---|---|---|---|
-| 1 | `openDirectory(_:in:transaction:)` | Read | `TransactionReadAccess` | returns `nil` | never creates |
-| 2 | `openOrCreateDirectory(_:in:transaction:)` | Write | `TransactionAccess` | creates | atomic with the caller's transaction |
-| 3 | `openPartition(_:in:transaction:)` | Read | `TransactionReadAccess` | returns `nil` | never creates |
-| 4 | `openOrCreatePartition(_:in:transaction:)` | Write | `TransactionAccess` | creates | atomic with the caller's transaction |
-| 5 | `listDirectories(in:after:limit:transaction:)` | Read | `TransactionReadAccess` | empty page | `limit` 1…1000, ordered by encoded key, `after` exclusive |
-| 6 | `listPartitions(in:after:limit:transaction:)` | Read | `TransactionReadAccess` | empty page | same bounds |
-| 7 | `moveChild(_:in:to:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | Directory: atomic rename; Partition: `unsupportedOperation`; into own subtree: `invalidDirectoryAddress`; target exists: `invalidOperation`; leased subtree: `directoryLeased` |
-| 8 | `removeChild(_:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | child Directories/Partitions present or data keys present: `directoryNotEmpty`; leased subtree: `directoryLeased` |
+| 1 | `open(_:expecting:in:transaction:)` | Read | `TransactionReadAccess` | returns `nil` | never creates; a non-`nil` expectation is verified against the stored tag → `directoryLayerMismatch` |
+| 2 | `openOrCreate(_:layer:in:transaction:)` | Write | `TransactionAccess` | creates with `layer` | an existing node with a different tag fails `directoryLayerMismatch`; creation is atomic with the caller's transaction |
+| 3 | `listChildren(in:after:limit:transaction:)` | Read | `TransactionReadAccess` | empty page | returns `DirectoryEntry` (name + tag); `limit` 1…1000, ordered by encoded key, `after` exclusive |
+| 4 | `move(_:in:to:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | whole-node rename, Partitions included; different containing layer: `partitionBoundaryViolation`; into own subtree: `invalidDirectoryAddress`; target exists: `invalidOperation`; leased subtree: `directoryLeased` |
+| 5 | `remove(_:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | atomic recursive removal of the node, its descendants, and their data; leased subtree: `directoryLeased`. There is no empty-only precondition |
 
-The root is a Directory. `openRoot(transaction:)` is operation 1 applied to
-the root path (absence = uninitialized empty store, returned as `nil`), and
-`openOrInitializeRoot(transaction:)` is operation 2 applied to the root path.
-Both run the layout state machine below. `openDirectory(at:in:transaction:)`
-walks a `DirectoryPath` with operation 1 and is a convenience, not a ninth
-operation.
+`expecting: nil` performs no tag verification and matches the FoundationDB
+empty-layer open. The stored tag is always read and returned on the resolved
+`Directory`, so a caller that states an expectation gets it enforced and a
+caller that does not still learns the tag. This is the documented reading of
+SPEC §8.2.
+
+One name namespace exists per parent: a name identifies exactly one node, and
+its tag is a property of that node, not part of its identity.
+
+The root is a Directory with the empty address and tag `.default`.
+`openRoot(transaction:)` is operation 1 applied to the root (absence =
+uninitialized empty store, returned as `nil`), and
+`openOrInitializeRoot(transaction:)` is operation 2 applied to the root. Both
+run the layout state machine below. `openPartition`, `openOrCreatePartition`,
+`openDirectory(at path:)`, and `openDirectory(at address:)` are protocol
+extensions over operations 1–2 and add no semantics.
 
 Every operation checks `transaction.transactionDomain === parent.domain ===
 catalog.domain`; a mismatch fails `storageDomainMismatch` before any I/O.
 
-### Directory guarantees (D-1…D-8)
+### Directory and Partition guarantees (D-1…D-12)
 
 | ID | Guarantee | Enforcement |
 |---|---|---|
-| D-1 | Hierarchical naming with exact UTF-8 components | `DirectoryPath` / step validation |
-| D-2 | Stable resolution: the same address resolves to the same `root.prefix` until moved or removed | catalog node stores the root number |
-| D-3 | Opaque root: callers cannot derive a prefix from a name | prefixes are allocator numbers, never name-derived |
-| D-4 | Disjoint siblings: distinct children never share a prefix | Tuple-encoded `Int64` root numbers are prefix-free |
+| D-1 | Hierarchical naming with exact UTF-8 components | `DirectoryPath` / component validation |
+| D-2 | Stable resolution: the same address resolves to the same `keyspacePrefix` until moved or removed | the child edge stores the content prefix |
+| D-3 | Opaque root: callers cannot derive a prefix from a name | prefixes are per-layer allocator numbers, never name-derived |
+| D-4 | Disjoint siblings: distinct children never share a prefix | Tuple-encoded `Int64` allocations are prefix-free |
 | D-5 | Create, move, remove are atomic with the caller's transaction | all catalog writes go through the caller's `TransactionAccess` |
 | D-6 | Read-only open never creates | read operations take `TransactionReadAccess` only |
 | D-7 | Domain identity: values from one engine are rejected by another | `storageDomainMismatch` |
 | D-8 | Bounded enumeration | `limit` 1…1000, else `invalidOperation` |
+| D-9 | A stated layer expectation is verified on open | `directoryLayerMismatch` |
+| D-10 | A Partition keyspace is contiguous: every descendant node, Subspace, and key lies in `[P, strinc(P))` | the nested layer allocates only inside `P` |
+| D-11 | Partitions nest, and no node moves into or out of a Partition | the containing layer base of source and destination must be equal |
+| D-12 | Removal is recursive and atomic; a Partition subtree clears as one range | `remove` clears descendants and data in the caller's transaction |
 
 A resolver that reports every path as present is non-conforming; the fixture
 proves absence for unknown children.
 
 ### `KeyValueDirectoryCatalog` layout (V1)
 
-Reserved prefix `0xFE`. All catalog keys are below it; all Directory roots are
-Tuple-encoded `Int64` root numbers, which never start with `0xFE` or `0xFF`.
+Reserved byte `0xFE` starts every layer's node subspace; `0xFD` starts a
+Partition's data root. All content prefixes are Tuple-encoded `Int64` values,
+whose type codes never reach `0xFD`.
 
 | Key | Value | Meaning |
 |---|---|---|
-| `FE 6C` | `53 4B 4C 01` | layout marker: `"SKL"` + version 1 |
-| `FE 61` | `Tuple(Int64(next)).pack()` | next root number (read-modify-write in the caller's transaction) |
-| `FE 6E ‖ Tuple(parentRootPrefix: bytes, kind: Int64, name).pack()` | `Tuple(Int64(rootNumber)).pack()` | child node; `kind` 0 = Directory (`name: String`), 1 = Partition (`name: bytes`) |
+| `FE 6C` | `53 4B 4C 01` | layout marker: `"SKL"` + version 1 (domain root layer only) |
+| `L ‖ FE 61` | `Tuple(Int64(next)).pack()` | next content number of the layer with base `L` (read-modify-write in the caller's transaction) |
+| `L ‖ FE ‖ Tuple(parentPrefix: bytes, 0, name: String).pack()` | `Tuple(childPrefix: bytes, layerTag: bytes).pack()` | child edge of a node in the layer with base `L` |
 
-- Root Directory = root number 0, prefix `Tuple(Int64(0)).pack()` = `14`.
+- The domain root layer has `L` empty, so its node subspace is `FE`, its
+  allocator key is `FE 61`, and its marker key is `FE 6C`. A child edge begins
+  with a Tuple type code, which is never `0x61` or `0x6C`, so edges never
+  collide with the allocator or the marker.
+- Root Directory = content number 0, prefix `Tuple(Int64(0)).pack()` = `14`.
   The root does not use the empty prefix, so root-level data can never collide
   with child roots or the catalog.
+- Creating a Partition also initializes its nested allocator
+  (`P ‖ FE 61` = `Tuple(Int64(1))`) in the same transaction, so a missing
+  allocator always means corruption.
 - Child listing is a bounded range read under
-  `FE 6E ‖ Tuple(parentRootPrefix, kind).pack()`; names are decoded from keys.
-- Move renames the node (delete old node key, write new node key with the same
-  root number); child nodes are keyed by the moved Directory's own prefix and
-  are unaffected.
-- Remove requires: node exists; no node under
-  `FE 6E ‖ Tuple(childRootPrefix).pack()`; no key in
-  `childRoot.prefixRange()`; no lease on the subtree.
+  `L ‖ FE ‖ Tuple(parentPrefix, 0).pack()`; names come from the key and tags
+  from the value, so one range read answers operation 3.
+- Move rewrites one edge: the old edge is cleared and the same content prefix
+  and tag are written under the new parent and name. Descendant edges are keyed
+  by the moved node's own prefix and are unaffected.
+- Remove walks the node's edges within its layer. A Partition child clears as
+  one range `[P, strinc(P))`; a plain child is walked, since its own children
+  live in the containing layer. Every visited node also clears its data range
+  and its edge.
 - "Root is empty" (InspectRoot) is a limit-1 range read over `[] ..< [0xFF]`.
   Keys starting with `0xFF` are the FoundationDB system keyspace convention and
   never the first byte of a Tuple-encoded key; StorageKit treats them as
   outside the user keyspace on every backend.
 
-Concurrent creation of the same child races on the allocator key; the
+Version 1 is the layout defined by the current SPEC. The interim catalog that
+allocated every prefix from the domain root allocator was never released, so
+the marker bytes stay `SKL` + 1.
+
+Concurrent creation of the same child races on the layer allocator key; the
 backend's conflict detection (FDB, InMemory, PostgreSQL repeatable-read or
 serializable, SQLite serialization) makes one transaction fail typed. This is
-why the allocator is a read-modify-write and not an atomic add.
+why the allocator is a read-modify-write and not an atomic add, and why every
+catalog write first passes the backend's `MutationAdmission`.
 
 ### Layout marker state machine (§10.3)
 
 ```text
 InspectRoot
-  marker == V1 bytes                 -> OpenV1        (root number 0)
+  marker == V1 bytes                 -> OpenV1        (content number 0)
   marker absent, keyspace empty      -> read:  nil
-                                        write: InitializeV1 (marker + allocator = 1, same transaction)
+                                        write: InitializeV1 (marker + root allocator = 1, same transaction)
   marker absent, keyspace nonempty   -> Reject  incompatibleStorageLayout
   marker present, other bytes        -> Reject  incompatibleStorageLayout
 ```
@@ -160,20 +227,34 @@ rejected.
 | ID | Invariant | Enforcement |
 |---|---|---|
 | L-1 | Lease, transaction, and Partition domains match | `storageDomainMismatch` at issuance and at every bind |
-| L-2 | A lease blocks removal or move of its subtree | registry check in operations 7 and 8 → `directoryLeased` |
-| L-3 | A stale generation fails; work is never redirected | issuance re-resolves the address in the caller's transaction and compares `root.prefix` → `staleLease` |
+| L-2 | A lease blocks removal or move of its subtree | registry check in operations 4 and 5 → `directoryLeased` |
+| L-3 | A stale generation fails; work is never redirected | issuance re-resolves the address in the caller's transaction and compares `keyspacePrefix` → `staleLease` |
 | L-4 | Read binding cannot mutate | `BoundReadAccess` has no mutation members |
 | L-5 | Write binding cannot commit or cancel | `BoundWriteAccess` has no lifecycle members |
 | L-6 | Bound access and cursors cannot escape the closure | noncopyable, borrowed; cursors validate the binding scope before every advance → `staleLease` |
 | L-7 | Releasing the last lease is not success | release returns nothing; the caller's transaction outcome is the result |
-| L-8 | Keys are confined to the Partition | every key must carry `partition.root.root.prefix`; range end may equal `strinc(prefix)` only through `firstGreaterOrEqual`; `getKey` returns `nil` when the resolved key lies outside |
+| L-8 | Keys are confined to the Partition's content region | every key must lie in `[P, P ‖ FE)`; a range end may equal `P ‖ FE` only through `firstGreaterOrEqual`; `getKey` returns `nil` when the resolved key lies outside |
+
+L-8 admits the Partition's content region `[P, P ‖ FE)`, not only the
+Partition data root `P ‖ FD`, because Directories and Partitions inside a
+Partition are not separately leasable and their Subspaces must be reachable
+through the containing Partition's lease. Every content prefix below `P` starts
+with a Tuple type code or `FD`, so one contiguous region covers all of them:
+this is the operational meaning of contiguity in D-10.
+
+The region stops below `P ‖ FE`, the Partition's own nested node subspace. That
+metadata is owned by the catalog, not by the leaseholder; admitting it would
+let a leaseholder that cleared its whole region delete the allocator of the
+node its own lease is bound to and report `dataCorruption` on the next create.
+Removing a Partition is still one range clear `[P, strinc(P))`, because the
+catalog clears through the transaction, not through bound access.
 
 Registry (per `StorageTransactionDomain`, in-process):
 
 - `reserve(address)` runs before validation so a concurrent removal sees the
   lease; it is rejected after `requestShutdown()` (`resourceUnavailable`) and
   while a removal or move intent covers the address (`staleLease`).
-- Operations 7 and 8 register a subtree intent keyed by the caller's
+- Operations 4 and 5 register a subtree intent keyed by the caller's
   transaction object. The intent lives until `TransactionLifecycleOwner`
   completes the transaction or, for transactions committed directly, until the
   transaction object is deallocated. The registry holds the transaction only
@@ -190,9 +271,9 @@ Lease issuance:
 
 ```text
 leasePartition(partition, transaction)
-  1. domain check (engine, partition.root.domain, transaction)   -> storageDomainMismatch
+  1. domain check (engine, partition.domain, transaction)        -> storageDomainMismatch
   2. registry.reserve(partition.root.address)                    -> resourceUnavailable | staleLease
-  3. walk address from openRoot through open* in `transaction`   -> nil or prefix mismatch: release, staleLease
+  3. walk address from openRoot through open in `transaction`    -> nil, non-Partition, or prefix mismatch: release, staleLease
   4. return PartitionLease(partition, registration)
 ```
 
@@ -206,38 +287,56 @@ lease.withReadAccess(transaction) { access in ... }
   - scope closed on return; escaped cursors fail on next advance
 ```
 
+Recursive removal:
+
+```text
+remove(name, in: parent)
+  edge = read(parent layer, parent.prefix, name)          absent -> keyNotFound
+  admitMutation; registerIntent(address)                  leased -> directoryLeased
+  pending = [edge.childPrefix, tag]
+  while node = pending.pop
+      for each child edge page under (node layer, node.prefix)
+          partition child -> clear [childPrefix, strinc(childPrefix)); clear edge
+          plain child     -> push; clear edge
+      clear [node.prefix, strinc(node.prefix))
+  clear edge
+```
+
+A Partition child needs no walk: one range covers its whole subtree.
+
 ## State, Ownership, and Lifecycle
 
 | State | Owner | Lifetime |
 |---|---|---|
-| Catalog nodes, allocator, marker | backend keyspace, mutated only through the caller's transaction | durable |
+| Catalog edges, per-layer allocators, marker | backend keyspace, mutated only through the caller's transaction | durable |
 | Lease registrations and intents | `PartitionLeaseRegistry` (`Mutex`) | registration: until `release()` or `PartitionLease` deinit; intent: until owner completion or transaction deallocation |
 | Binding scope | `PartitionLease.withReadAccess` / `withWriteAccess` | one closure |
 
 ## Failure, Concurrency, and Constraints
 
-New `StorageError.Code` cases: `incompatibleStorageLayout`,
-`directoryNotEmpty`, `directoryLeased`, `storageDomainMismatch`, `staleLease`,
-`invalidDirectoryAddress`. All have retry disposition `never`.
+`StorageError.Code` cases owned here: `incompatibleStorageLayout`,
+`directoryLayerMismatch`, `partitionBoundaryViolation`, `directoryLeased`,
+`storageDomainMismatch`, `staleLease`, `invalidDirectoryAddress`. All have
+retry disposition `never`.
 
 `DirectoryLimits` (owned operational contract):
 
 | Limit | Value | Rationale |
 |---|---|---|
-| `maximumComponentByteCount` | 255 | matches common filesystem name bounds; keeps node keys far below backend key limits |
-| `maximumDepth` | 64 | bounds address walks and lease validation cost |
-| `maximumPartitionIDByteCount` | 1024 | canonical field-number + FieldValue frames fit; node key stays below FDB's 10 KB key bound |
+| `maximumComponentByteCount` | 255 | matches common filesystem name bounds; keeps edge keys far below backend key limits |
+| `maximumDepth` | 64 | bounds address walks, lease validation, and removal recursion |
+| `maximumLayerTagByteCount` | 255 | tag stays in the edge value and below every backend value bound |
 | `maximumListLimit` | 1000 | one bounded page per range read |
 
 Changing a limit requires re-running the shared fixture on every adapter and
-confirming node keys stay within each backend's key bound.
+confirming edge keys stay within each backend's key bound.
 
 ## Verification and Change Impact
 
 | Contract | Evidence |
 |---|---|
 | Values and bounds | `Tests/StorageKitTests/DirectoryValueTests.swift` |
-| D-1…D-8, state machine, operations 1–8, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests` (the layout-marker step is KV-only; FDB proves layer-type rejection in its own suite) |
+| D-1…D-12, state machine, operations 1–5, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests` (every step, the marker state machine included; on FoundationDB the marker is one cluster-global key) |
 | L-4, L-5 (compile-level), L-6 escape | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 
 Changing the catalog layout, the marker bytes, or any operation semantics

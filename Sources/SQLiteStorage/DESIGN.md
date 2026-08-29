@@ -21,7 +21,7 @@ required by SPEC §7.3.
 | Owns | Does not own |
 |---|---|
 | `SQLiteConnectionHandle`: one connection per engine, `kv_store` schema bootstrap, `PRAGMA journal_mode=WAL`, `auto_vacuum=INCREMENTAL`, `busy_timeout`, native error conversion | The SQLite library and its file locking model |
-| `SQLiteTransactionCoordinator` (actor): FIFO connection lease, `BEGIN IMMEDIATE`, the savepoint stack for nested transactions, terminal cleanup | Directory contract semantics D-1…D-8 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
+| `SQLiteTransactionCoordinator` (actor): FIFO connection lease, `BEGIN IMMEDIATE`, the savepoint stack for nested transactions, terminal cleanup | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
 | `SQLiteStorageTransaction`: buffered synchronous mutations, lazy coordinator entry on the first asynchronous operation, commit-at-most-once, cancel, `StorageCompactionTransaction` | The catalog algorithm and layout marker (`KeyValueDirectoryCatalog`, StorageKit) |
 | `SQLiteRangeResult`, `SQLiteRangeIteratorState`, `SQLiteRangeCursorLifetime`: statement-backed lazy cursors with explicit terminal finish | `PartitionLeaseRegistry` and `PartitionLease` (StorageKit) |
 | Catalog placement: the engine instantiates `KeyValueDirectoryCatalog(transactionDomain:backend: .sqlite)` bound to its domain | Framework binding of `#Directory` declarations |
@@ -104,7 +104,7 @@ createTransaction()   admission check -> identifier -> (context child? SQ-3)
   -> cancel           ROLLBACK / ROLLBACK TO SAVEPOINT, same lease handoff
 ```
 
-Directory operation (any of operations 1–8):
+Directory operation (any of operations 1–5):
 
 ```text
 KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog keys
@@ -135,7 +135,7 @@ KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog k
 
 | Contract | Evidence |
 |---|---|
-| D-1…D-8, operations 1–8, layout marker, L-1…L-3, L-7, L-8 | `Tests/SQLiteStorageTests/SQLiteDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps, including `layoutRejection`) |
+| D-1…D-12, operations 1–5, layout marker, L-1…L-3, L-7, L-8 | `Tests/SQLiteStorageTests/SQLiteDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps, including `layoutRejection`) |
 | SQ-2, SQ-3 | `SQLiteNestedTransactionTests`, `SQLiteStorageEngineTests` |
 | SQ-6 | `SQLiteBusyTimeoutTests` |
 | SQ-1, SQ-7 | `SQLiteConnectionOwnershipTests`, `SQLiteStorageEngineTests` |

@@ -28,7 +28,7 @@ them.
 | `CloudflareDurableObjectStorageConfiguration`: `partitionIdentity`, `client`, `limits`, `monotonicClock` | StorageKit Wire v1 values and codec (`CloudflareDurableObjectStorageWire`) |
 | `CloudflareDurableObjectStorageEngine`: readiness gate (`schemaVersion == 1`, `metadataInitialized`), transaction admission, shutdown | HTTP and WASI host transports (`…HTTP`, `…HostTransport`) and the TypeScript host |
 | `CloudflareDurableObjectStorageTransaction` and `CloudflareDurableObjectTransactionState`: buffered wire mutations, read and write conflict ranges, observed read version, deadline, phase state machine, single-commit request, unknown-outcome preservation | Durable Object routing and lifecycle (application-owned) |
-| `CloudflareDurableObjectStorageClient` protocol, `…WireClient`, `…StorageTransport`, transport failure types, timed calls | Directory contract semantics D-1…D-8 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
+| `CloudflareDurableObjectStorageClient` protocol, `…WireClient`, `…StorageTransport`, transport failure types, timed calls | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
 | `CloudflareDurableObjectLimits` and `…LimitsError`: bounded keys, boundaries, values, mutations, conflict ranges, page size, split points, selector steps | The catalog algorithm and layout marker (`KeyValueDirectoryCatalog`, StorageKit) |
 | Range scanning (`…RangeScan`, `…RangeScanning`, `…RangeResult`, `…ByteOrdering`) | `PartitionLeaseRegistry` and `PartitionLease` (StorageKit) |
 | Catalog placement: the engine instantiates `KeyValueDirectoryCatalog(transactionDomain:backend: .cloudflareDurableObject)` | Framework binding of `#Directory` declarations |
@@ -121,7 +121,7 @@ commit():
   -> transport failure after dispatch -> commitUnknown(commitUnknownResult)
 ```
 
-Directory operation (any of operations 1–8):
+Directory operation (any of operations 1–5):
 
 ```text
 KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog keys
@@ -152,7 +152,7 @@ KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog k
 
 | Contract | Evidence |
 |---|---|
-| D-1…D-8, operations 1–8, layout marker, L-1…L-3, L-7, L-8 | `Tests/CloudflareDurableObjectStorageTests/CloudflareDurableObjectDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps over `InMemoryCloudflareDurableObjectStorageTransport`) |
+| D-1…D-12, operations 1–5, layout marker, L-1…L-3, L-7, L-8 | `Tests/CloudflareDurableObjectStorageTests/CloudflareDurableObjectDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps over `InMemoryCloudflareDurableObjectStorageTransport`) |
 | DO-2, DO-3, DO-4 | `CloudflareDurableObjectStorageTransactionTests`, `CloudflareDurableObjectStorageSemanticsTests`, `CloudflareDurableObjectStorageValueSemanticsTests` |
 | DO-5, DO-6 | `CloudflareDurableObjectStorageWireClientTests` with the `ConfiguredFailure…`, `MismatchedOperation…`, `TruncatedResponse…`, `Suspending…`, and `BorrowedResponse…` transport fixtures |
 | Deadlines | `CloudflareDurableObjectStorageTimeoutTests` |
