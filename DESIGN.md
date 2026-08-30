@@ -12,7 +12,7 @@ Durable Objects.
 |---|---|
 | Design level | package (also the storage-kit repository root) |
 | Parent | [workspace DESIGN.md](../DESIGN.md) |
-| Product architecture authority | [SPEC.md](../SPEC.md) §7–§10.3, §12.3, §24.1, §24.2 |
+| Product architecture authority | [SPEC.md](../SPEC.md) §7–§9, §12.3, §24.1, §24.2 |
 | Children | [StorageKit module](Sources/StorageKit/DESIGN.md); [FDBStorage module](Sources/FDBStorage/DESIGN.md); [SQLiteStorage module](Sources/SQLiteStorage/DESIGN.md); [PostgreSQLStorage module](Sources/PostgreSQLStorage/DESIGN.md); [CloudflareDurableObjectStorage module](Sources/CloudflareDurableObjectStorage/DESIGN.md) |
 | Operation and test rules | [AGENTS.md](AGENTS.md) |
 
@@ -40,7 +40,7 @@ allowed to use it.
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
 | [workspace DESIGN.md](../DESIGN.md) | parent | system context, global invariants | Indexes this package as the foundational storage dependency. | Package boundary changes must be reflected in the workspace index and `Ecosystem.json`. |
-| [SPEC.md](../SPEC.md) | product architecture authority | §7 capability list, §8 values and operations, §9 leases, §10.3 bootstrap, §24 verification | Defines what this package must guarantee. | Any deviation is recorded in the owning module design, not silently absorbed. |
+| [SPEC.md](../SPEC.md) | product architecture authority | §7 capability list, §8 values, operations, and root bootstrap, §9 leases, §24 verification | Defines what this package must guarantee. | Any deviation is recorded in the owning module design, not silently absorbed. |
 | [StorageKit module](Sources/StorageKit/DESIGN.md) | child | `StorageEngine`, `Transaction`, `TransactionReadAccess`, `TransactionAccess`, `DirectoryAccess`, lease types, Tuple, Subspace | Platform-neutral contracts and the InMemory reference engine. | Adapters depend on these contracts only; they never reach into InMemory internals. |
 | `database-types` | depends on | `ByteString`, `UUID`, bounded byte owners | Foundation-free primitives used by keys, values, and Tuple elements. | `ByteString` ownership rules apply to every byte path; no `Data` or `[UInt8]` re-materialization on repeated paths. |
 | `fdb-swift-bindings` | depends on (FDBStorage only) | `Database`, `Transaction`, `DirectoryLayer`, `DirectoryType` | Safe FoundationDB C client ownership. | A StorageKit Partition on FDB is a native `partition` node, so partitions nest and the adapter defines no custom layer type of its own (owned by the FDBStorage module design). |
@@ -104,7 +104,7 @@ Package-wide invariants (each is owned in detail by the module design):
 |---|---|
 | Any public StorageKit contract | this design, the module design, all adapter modules, database-framework binding |
 | Adapter-internal change | that adapter's module design and its test target plus the shared conformance fixture |
-| Tuple encoding | golden vectors; any change is a layout version change and is rejected for V1 |
+| Tuple encoding | golden vectors; any byte-layout change is a layout change |
 | Directory catalog layout | Directory component design, `incompatibleStorageLayout` state machine, every KV-catalog adapter |
 
 Test procedure, expected counts, and service lifecycle are owned by

@@ -1,6 +1,6 @@
 import DatabaseTypes
 
-/// Transactional Directory catalog for key-value backends (layout V1).
+/// Transactional Directory catalog for key-value backends.
 ///
 /// One instance is bound to one engine domain and is that engine's sole
 /// existence authority. All catalog reads and writes go through the caller's
@@ -11,7 +11,7 @@ import DatabaseTypes
 /// Partition. A layer keeps its allocator and its child edges under
 /// `base + 0xFE`, and allocates child content prefixes as `base + Tuple(n)`, so
 /// every descendant of a Partition lies inside that Partition's prefix range.
-/// The layout is fixed by `DESIGN.md`; changing it is a layout-version change.
+/// The layout is fixed by `DESIGN.md`; changing it is a layout change.
 public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     /// Backend-owned admission check run before the catalog writes anything.
     ///
@@ -34,7 +34,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         self.mutationAdmission = mutationAdmission
     }
 
-    // MARK: - Layout V1
+    // MARK: - Layout
 
     package enum Layout {
         /// First byte of every layer's node subspace; the same reserved byte
@@ -613,7 +613,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         operation: StorageOperation
     ) throws {
         do {
-            try DirectoryPath.validateComponent(component)
+            try StorageAddress.validateComponent(component)
         } catch {
             throw StorageError.invalidDirectoryAddress(error, operation: operation, backend: backend)
         }

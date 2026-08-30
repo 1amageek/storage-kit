@@ -1,4 +1,7 @@
 /// Ordered exact name components from the root Directory; empty is the root.
+///
+/// This is StorageKit's logical path value. No normalization and no separator
+/// parsing is applied: a component is the exact string the caller supplied.
 public struct StorageAddress: Sendable, Hashable {
     public let components: [String]
 
@@ -13,13 +16,9 @@ public struct StorageAddress: Sendable, Hashable {
             throw .depthExceeded(depth: components.count)
         }
         for component in components {
-            try DirectoryPath.validateComponent(component)
+            try Self.validateComponent(component)
         }
         self.components = components
-    }
-
-    public init(_ path: DirectoryPath) {
-        self.components = path.components
     }
 
     private init(unchecked components: [String]) {
@@ -30,19 +29,10 @@ public struct StorageAddress: Sendable, Hashable {
 
     public var depth: Int { components.count }
 
-    public var lastComponent: String? { components.last }
-
-    public var parent: StorageAddress? {
-        guard !components.isEmpty else {
-            return nil
-        }
-        return StorageAddress(unchecked: Array(components.dropLast()))
-    }
-
     public func appending(
         _ component: String
     ) throws(DirectoryAddressError) -> StorageAddress {
-        try DirectoryPath.validateComponent(component)
+        try Self.validateComponent(component)
         guard components.count < DirectoryLimits.maximumDepth else {
             throw .depthExceeded(depth: components.count + 1)
         }
@@ -64,5 +54,18 @@ public struct StorageAddress: Sendable, Hashable {
     /// other", and it is symmetric: neither address is the subject.
     public func subtreeIntersects(_ other: StorageAddress) -> Bool {
         isAncestorOrSelf(of: other) || other.isAncestorOrSelf(of: self)
+    }
+
+    /// Validates one name component against `DirectoryLimits`.
+    package static func validateComponent(
+        _ component: String
+    ) throws(DirectoryAddressError) {
+        let byteCount = component.utf8.count
+        guard byteCount > 0 else {
+            throw .emptyComponent
+        }
+        guard byteCount <= DirectoryLimits.maximumComponentByteCount else {
+            throw .componentTooLong(byteCount: byteCount)
+        }
     }
 }

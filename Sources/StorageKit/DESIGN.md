@@ -32,7 +32,7 @@ transaction lifecycle owner, and the InMemory reference engine.
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to every adapter and to database-framework. |
 | [Directory component](Directory/DESIGN.md) | child | `DirectoryAccess`, `Directory`, `Partition`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess`, `KeyValueDirectoryCatalog` | Placement, catalog authority, root bootstrap, leases. | Read operations accept only `TransactionReadAccess`; catalog reads never create. |
 | [Storage component](Storage/DESIGN.md) | child | `StorageEngine`, `Transaction`, cursors, `StorageError`, `StorageEngineLifecycle`, `StorageTransactionDomain` | Transaction and bound contracts; the cursor state owns advance ordering, post-advance validation, and terminal cleanup. | `StorageTransactionDomain` now also owns the lease registry. Cursor scope validation belongs to the cursor state, not to a caller wrapper. |
-| [Tuple component](Tuple/DESIGN.md) | child | `Tuple`, `Subspace`, `TupleElement`, `strinc`, admission-aware `pack(admitting:)` | Tuple V1 encoding frozen by golden vectors; admission measures the exact packed byte count before the single result allocation. | Any byte-layout change is a layout version change. The admission callback is a caller resource boundary, never a backend limit. |
+| [Tuple component](Tuple/DESIGN.md) | child | `Tuple`, `Subspace`, `TupleElement`, `strinc`, admission-aware `pack(admitting:)` | Tuple encoding frozen by golden vectors; admission measures the exact packed byte count before the single result allocation. | Any byte-layout change is a layout change. The admission callback is a caller resource boundary, never a backend limit. |
 | `InMemory/` sources | child (no component design yet) | `InMemoryEngine`, `InMemoryTransaction` | Reference engine with conflict detection and versionstamps. | Reference only; must pass every shared fixture. |
 | database-framework | used by | all public contracts | Composes containers and kernels. | Holds leases, never raw Partition addresses, as authority. |
 
@@ -57,7 +57,7 @@ Layering inside the module:
 
 | Layer | Types | Depends on |
 |---|---|---|
-| Values | `ByteString` (database-types), `Tuple`, `Subspace`, `DirectoryPath`, `LayerTag`, `DirectoryEntry`, `StorageAddress`, `Directory`, `Partition` | database-types |
+| Values | `ByteString` (database-types), `Tuple`, `Subspace`, `LayerTag`, `DirectoryEntry`, `StorageAddress`, `Directory`, `Partition` | database-types |
 | Access contracts | `TransactionReadAccess`, `TransactionAccess`, `Transaction`, `KeySelector`, `KeyValueCursor`, `StreamingMode` | Values |
 | Placement | `DirectoryAccess`, `KeyValueDirectoryCatalog`, `DirectoryLimits` | Access contracts |
 | Leases | `PartitionLeaseRegistry`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Placement |
@@ -80,9 +80,9 @@ Layering inside the module:
 Removed in this revision: `namespaceResolver`, `namespaceCatalog`,
 `resolveOrCreateNamespace`, `resolveExistingNamespace`, `listNamespaces`,
 `removeNamespace`, `namespaceExists`, `NamespaceResolver`, `NamespaceCatalog`,
-`DeterministicNamespaceResolver`, and the FDB `NamespaceRegistry`. Deterministic
-path-derived prefixes are a rejected V0 layout (see the Directory component
-design, root bootstrap state machine).
+`DeterministicNamespaceResolver`, and the FDB `NamespaceRegistry`. A root
+holding deterministic path-derived prefixes is foreign data and is rejected
+(see the Directory component design, root bootstrap state machine).
 
 ### Transaction invariants (M-1…M-7)
 

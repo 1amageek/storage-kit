@@ -4,17 +4,17 @@ import Testing
 
 @Suite("Directory values")
 struct DirectoryValueTests {
-    @Test func directoryPathValidation() throws {
-        #expect(throws: DirectoryAddressError.emptyPath) { try DirectoryPath([]) }
-        #expect(throws: DirectoryAddressError.emptyComponent) { try DirectoryPath("a", "") }
+    @Test func storageAddressValidation() throws {
+        try #expect(StorageAddress([]).isRoot)
+        #expect(throws: DirectoryAddressError.emptyComponent) { try StorageAddress(["a", ""]) }
         let long = String(repeating: "x", count: DirectoryLimits.maximumComponentByteCount + 1)
         #expect(throws: DirectoryAddressError.componentTooLong(byteCount: DirectoryLimits.maximumComponentByteCount + 1)) {
-            try DirectoryPath(long)
+            try StorageAddress([long])
         }
         #expect(throws: DirectoryAddressError.depthExceeded(depth: DirectoryLimits.maximumDepth + 1)) {
-            try DirectoryPath(Array(repeating: "d", count: DirectoryLimits.maximumDepth + 1))
+            try StorageAddress(Array(repeating: "d", count: DirectoryLimits.maximumDepth + 1))
         }
-        let deepest = try DirectoryPath(Array(repeating: "d", count: DirectoryLimits.maximumDepth))
+        let deepest = try StorageAddress(Array(repeating: "d", count: DirectoryLimits.maximumDepth))
         #expect(deepest.depth == DirectoryLimits.maximumDepth)
     }
 
@@ -37,9 +37,6 @@ struct DirectoryValueTests {
         let a = try StorageAddress(["a"])
         let ap = try a.appending("p")
         #expect(StorageAddress.root.isRoot)
-        #expect(StorageAddress.root.parent == nil)
-        #expect(ap.parent == a)
-        #expect(ap.lastComponent == "p")
         #expect(ap.depth == 2)
         #expect(a.isAncestorOrSelf(of: ap))
         #expect(a.isAncestorOrSelf(of: a))
@@ -71,7 +68,6 @@ struct DirectoryValueTests {
         let (plain, node) = nodes
         #expect(Partition(plain) == nil)
         let partition = try #require(Partition(node))
-        #expect(partition.name == "p")
         #expect(partition.address == node.address)
         #expect(partition.keyspacePrefix == node.keyspacePrefix)
         #expect(partition.domain === engine.transactionDomain)

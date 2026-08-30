@@ -75,7 +75,7 @@ this root's bootstrap state (FD-1). Two engines with distinct root paths
 therefore never observe each other's root, and neither is initialized, opened,
 or rejected because of the other's data.
 
-### Layout V1
+### Layout
 
 The mapping is one to one and adds no encoding of its own.
 
@@ -102,7 +102,7 @@ The mapping is one to one and adds no encoding of its own.
 
 | ID | Invariant |
 |---|---|
-| FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` exists: `openRoot` reports its absence as an uninitialized root and never writes, and `openOrInitializeRoot` creates it in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. No layout version is recorded, and a node found at `rootPath` is opened rather than adjudicated: the native layer never allocates a prefix already in use, so no StorageKit write can land on bytes written outside it, and which node `rootPath` names is an operator decision. `requireRoot` still refuses a node whose layer is not the default, so a native partition at the root path fails with `directoryLayerMismatch`. |
+| FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` exists: `openRoot` reports its absence as an uninitialized root and never writes, and `openOrInitializeRoot` creates it in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. A node found at `rootPath` is opened rather than adjudicated: the native layer never allocates a prefix already in use, so no StorageKit write can land on bytes written outside it, and which node `rootPath` names is an operator decision. `requireRoot` still refuses a node whose layer is not the default, so a native partition at the root path fails with `directoryLayerMismatch`. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
 | FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized root is observed without touching the layer version key. |
 | FD-4 | A move never resurrects a stale destination: a missing destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. Both are checked before any lease intent is registered. |
@@ -213,7 +213,7 @@ resolve tx -> require parent domain -> child address
 | Contract | Evidence |
 |---|---|
 | D-1…D-12, operations 1–5, the root bootstrap state machine, L-1…L-3, L-7, L-8, FD-1, FD-3…FD-9 | `Tests/FDBStorageTests/FDBDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps) |
-| Layout V1 names and layer values, nested Partition creation and containment | `FDBDirectoryConformanceTests.nativeNodesCarryStorageKitNamesAndLayers` |
+| Layout names and layer values, nested Partition creation and containment | `FDBDirectoryConformanceTests.nativeNodesCarryStorageKitNamesAndLayers` |
 | FD-2 on foreign native nodes: typed root, child, and Partition mismatch, and the tag returned by a listing | `FDBDirectoryConformanceTests.foreignLayerValueIsRejected` |
 | A layer tag that is not valid UTF-8 stays application-opaque | `FDBDirectoryConformanceTests.layerTagThatIsNotUTF8RoundTrips` |
 | Root path isolation and configuration validation | `FDBDirectoryConformanceTests.distinctRootPathsIsolateCatalogs`, `rootPathConfigurationIsValidated` |

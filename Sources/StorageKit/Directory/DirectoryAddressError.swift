@@ -3,7 +3,6 @@
 /// `DirectoryAccess` operations convert this error to
 /// `StorageError.Code.invalidDirectoryAddress`.
 public enum DirectoryAddressError: Error, Sendable, Hashable, CustomStringConvertible {
-    case emptyPath
     case emptyComponent
     case componentTooLong(byteCount: Int)
     case layerTagTooLong(byteCount: Int)
@@ -12,8 +11,6 @@ public enum DirectoryAddressError: Error, Sendable, Hashable, CustomStringConver
 
     public var description: String {
         switch self {
-        case .emptyPath:
-            return "Directory path must contain at least one component"
         case .emptyComponent:
             return "Directory name component must not be empty"
         case .componentTooLong(let byteCount):

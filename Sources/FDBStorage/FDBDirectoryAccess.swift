@@ -38,7 +38,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
     /// The native node at `rootPath`: the sole witness that this root is
     /// initialized (SPEC §10.3, FD-1).
     ///
-    /// This adapter owns no key of its own and records no layout version. The
+    /// This adapter owns no key of its own. The
     /// native Directory Layer never allocates a prefix that is already in use,
     /// so no StorageKit write can land on bytes written outside it, and a node
     /// found at `rootPath` is opened rather than adjudicated: what that path
@@ -481,7 +481,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
 
     private func validate(component: String, operation: StorageOperation) throws {
         do {
-            try DirectoryPath.validateComponent(component)
+            try StorageAddress.validateComponent(component)
         } catch {
             throw StorageError.invalidDirectoryAddress(error, operation: operation, backend: backend)
         }

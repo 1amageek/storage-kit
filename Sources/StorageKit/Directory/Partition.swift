@@ -19,9 +19,6 @@ public struct Partition: Sendable, Hashable {
 
     public var address: StorageAddress { root.address }
 
-    /// Exact name of this Partition in its parent Directory Layer.
-    public var name: String? { root.address.lastComponent }
-
     /// Start of the whole Partition keyspace, including its nested layer.
     public var keyspacePrefix: ByteString { root.keyspacePrefix }
 }

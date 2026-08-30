@@ -21,7 +21,7 @@ public protocol DirectoryAccess: AnyObject, Sendable {
         transaction: any TransactionReadAccess
     ) async throws -> Directory?
 
-    /// Operation 2 applied to the root: initializes layout V1 when absent.
+    /// Operation 2 applied to the root: initializes the root layout when absent.
     func openOrInitializeRoot(
         transaction: any TransactionAccess
     ) async throws -> Directory
@@ -126,47 +126,6 @@ extension DirectoryAccess {
             transaction: transaction
         )
         return try requirePartition(node, operation: .write)
-    }
-
-    /// Walks `path` below `parent` with operation 1; `nil` when any step is
-    /// absent. Intermediate steps may be Directories or Partitions.
-    public func openDirectory(
-        at path: DirectoryPath,
-        in parent: Directory,
-        transaction: any TransactionReadAccess
-    ) async throws -> Directory? {
-        var current = parent
-        for component in path.components {
-            guard let next = try await open(
-                component,
-                expecting: nil,
-                in: current,
-                transaction: transaction
-            ) else {
-                return nil
-            }
-            current = next
-        }
-        return current
-    }
-
-    /// Walks `path` below `parent` with operation 2, creating plain
-    /// Directories for every absent component.
-    public func openOrCreateDirectory(
-        at path: DirectoryPath,
-        in parent: Directory,
-        transaction: any TransactionAccess
-    ) async throws -> Directory {
-        var current = parent
-        for component in path.components {
-            current = try await openOrCreate(
-                component,
-                layer: .default,
-                in: current,
-                transaction: transaction
-            )
-        }
-        return current
     }
 
     /// Resolves an absolute address from the root with read operations only.

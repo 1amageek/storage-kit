@@ -14,13 +14,13 @@ active work to one Partition.
 | Design level | component |
 | Parent | [StorageKit module](../DESIGN.md) |
 | Children | none |
-| Product authority | SPEC §8, §9, §10.3, §12.3, §24.1, §24.2 |
+| Product authority | SPEC §8, §9, §12.3, §24.1, §24.2 |
 
 ## Responsibilities and Boundaries
 
 | Owns | Does not own |
 |---|---|
-| `DirectoryPath`, `LayerTag`, `StorageAddress`, `Directory`, `DirectoryEntry`, `Partition` values and their bounds | Reserved names (`system`, `database-framework`, `data`) and Framework Subspace layout |
+| `LayerTag`, `StorageAddress`, `Directory`, `DirectoryEntry`, `Partition` values and their bounds | Reserved names (`system`, `database-framework`, `data`) and Framework Subspace layout |
 | `DirectoryAccess` contract and the five semantic operations | Authorization of any operation |
 | `KeyValueDirectoryCatalog`: the catalog realization for InMemory, SQLite, PostgreSQL, Cloudflare DO | The FDB realization (owned by `FDBStorage`, which must satisfy the same contract) |
 | The InspectRoot → Open / Initialize / Reject bootstrap decision, read from the root's own allocation authority | Deleting or rewriting roots (never in production) |
@@ -30,7 +30,7 @@ active work to one Partition.
 
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
-| [StorageKit module](../DESIGN.md) | parent | `TransactionReadAccess`, `TransactionAccess`, `StorageEngine.transactionDomain`, `StorageError`, `Subspace`, `Tuple` | Supplies the transaction and encoding contracts the catalog is built on. | Catalog keys use Tuple V1; a Tuple change is a layout change. |
+| [StorageKit module](../DESIGN.md) | parent | `TransactionReadAccess`, `TransactionAccess`, `StorageEngine.transactionDomain`, `StorageError`, `Subspace`, `Tuple` | Supplies the transaction and encoding contracts the catalog is built on. | Catalog keys use the Tuple encoding; a Tuple change is a layout change. |
 | [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess`, `PartitionLeaseRegistry.registerIntent` | Realizes the same node model over the native FoundationDB Directory Layer. | A Partition is a native node whose layer bytes are `partition`; native partitions nest, so no custom layer type is used. |
 | [SQLiteStorage module](../../SQLiteStorage/DESIGN.md), [PostgreSQLStorage module](../../PostgreSQLStorage/DESIGN.md), [CloudflareDurableObjectStorage module](../../CloudflareDurableObjectStorage/DESIGN.md) | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL rejects `readCommitted` isolation for catalog mutation through `MutationAdmission` (owned by PostgreSQLStorage). |
 | database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | A Partition removal is recursive; the Framework no longer proves its Subspaces empty first. |
@@ -48,7 +48,7 @@ active work to one Partition.
 
  StorageEngine.leasePartition
    -> PartitionLeaseRegistry.reserve            (domain, shutdown, intent check)
-   -> DirectoryAccess.openDirectory(at:)        (generation check in caller txn)
+   -> DirectoryAccess.openDirectory(at:)        (prefix re-check in caller txn)
    -> PartitionLease (~Copyable)
         -> withReadAccess  -> BoundReadAccess  (~Copyable, borrowed)
         -> withWriteAccess -> BoundWriteAccess (~Copyable, borrowed)
@@ -84,10 +84,9 @@ Partition subtree is.
 
 | Type | Definition | Bounds (`DirectoryLimits`) |
 |---|---|---|
-| `DirectoryPath` | ordered nonempty `[String]` of exact UTF-8 components; no normalization, no separator parsing | component 1…255 UTF-8 bytes; depth ≤ 64 |
 | `LayerTag` | opaque tag bytes of a node; `.default` is empty, `.partition` is UTF-8 `partition` | 0…255 bytes |
-| `StorageAddress` | ordered exact name components from the root; empty = root | depth ≤ 64 |
-| `Directory` | `domain` (identity), `address`, `layer`, `keyspacePrefix`, package `layerRoot`, `root: Subspace`; generation = `keyspacePrefix` | — |
+| `StorageAddress` | the logical path value: ordered exact UTF-8 name components from the root, empty = root; no normalization, no separator parsing | component 1…255 UTF-8 bytes; depth ≤ 64 |
+| `Directory` | `domain` (identity), `address`, `layer`, `keyspacePrefix`, package `layerRoot`, `root: Subspace` | — |
 | `DirectoryEntry` | one listing row: `name`, `layer` | — |
 | `Partition` | a `Directory` whose `layer.isPartition`; constructed only from such a node | — |
 
@@ -144,7 +143,7 @@ catalog.domain`; a mismatch fails `storageDomainMismatch` before any I/O.
 
 | ID | Guarantee | Enforcement |
 |---|---|---|
-| D-1 | Hierarchical naming with exact UTF-8 components | `DirectoryPath` / component validation |
+| D-1 | Hierarchical naming with exact UTF-8 components | `StorageAddress.validateComponent` |
 | D-2 | Stable resolution: the same address resolves to the same `keyspacePrefix` until moved or removed | the child edge stores the content prefix |
 | D-3 | Opaque root: callers cannot derive a prefix from a name | prefixes are per-layer allocator numbers, never name-derived |
 | D-4 | Disjoint siblings: distinct children never share a prefix | Tuple-encoded `Int64` allocations are prefix-free |
@@ -203,7 +202,7 @@ serializable, SQLite serialization) makes one transaction fail typed. This is
 why the allocator is a read-modify-write and not an atomic add, and why every
 catalog write first passes the backend's `MutationAdmission`.
 
-### Root bootstrap state machine (§10.3)
+### Root bootstrap state machine (§8.7)
 
 A storage root is initialized exactly when the authority that allocates
 prefixes inside it holds state for that root. Nothing else records that fact:
@@ -224,8 +223,8 @@ FDBDirectoryAccess                          -- witness: the native node at the r
 ```
 
 No dual read/write of two layouts; production never deletes or rewrites a
-root. A V0 deterministic-prefix key-value store is "allocator absent,
-nonempty" and is rejected.
+root. A key-value store holding deterministic path-derived prefixes is
+"allocator absent, nonempty" and is rejected.
 
 The two backends reject different things because they own different
 allocation authorities, and the contract states each one rather than averaging

@@ -3,9 +3,9 @@ import DatabaseTypes
 /// A resolved Directory node: its engine domain, address, layer tag, and the
 /// opaque prefixes that place it in the keyspace.
 ///
-/// `keyspacePrefix` is the node's whole keyspace start and is its generation:
-/// a node removed and recreated at the same address receives a different one.
-/// `root` is the Subspace a caller derives keys from. For a plain Directory the
+/// `keyspacePrefix` is the node's whole keyspace start and identifies this
+/// resolution: a node removed and recreated at the same address receives a
+/// different one. `root` is the Subspace a caller derives keys from. For a plain Directory the
 /// two prefixes are identical. For a Partition the node prefix also carries the
 /// nested Directory Layer, so the data root is offset by one reserved byte that
 /// no allocated child prefix and no nested metadata key can start with.
@@ -45,9 +45,6 @@ public struct Directory: Sendable, Hashable {
                 : keyspacePrefix
         )
     }
-
-    /// Opaque generation identity of this resolution.
-    public var generation: ByteString { keyspacePrefix }
 
     public var isPartition: Bool { layer.isPartition }
 

@@ -123,8 +123,7 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
             try require(b.address == (try StorageAddress(["a", "b"])), step, "nested address must extend the parent address")
             try require(a.layer == .default && !a.isPartition, step, "a created Directory must carry the default layer tag")
             try require(partition.root.layer == .partition && partition.root.isPartition, step, "a created Partition must carry the partition layer tag")
-            try require(partition.name == "tenant-1", step, "a Partition must be identified by its exact name")
-            try require(partition.address == b.address.appending("tenant-1"), step, "Partition must be addressed under its parent")
+            try require(partition.address == b.address.appending("tenant-1"), step, "a Partition must be addressed under its parent by its exact name")
 
             // Siblings of one Directory Layer never nest inside one another.
             let prefixes = [root.keyspacePrefix, a.keyspacePrefix, b.keyspacePrefix, partition.keyspacePrefix]
@@ -137,7 +136,7 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
             let reopened = try await engine.withTransaction { transaction -> (Directory?, Directory?, Partition?, Directory?, Directory?, Partition?, Directory, Partition) in
                 let root = try await requireRoot(catalog, transaction, step)
                 let openedA = try await catalog.openDirectory("a", in: root, transaction: transaction)
-                let openedB = try await catalog.openDirectory(at: DirectoryPath("a", "b"), in: root, transaction: transaction)
+                let openedB = try await catalog.openDirectory(at: b.address, transaction: transaction)
                 let openedPartition = try await catalog.openPartition("tenant-1", in: b, transaction: transaction)
                 let walked = try await catalog.openDirectory(at: partition.address, transaction: transaction)
                 let missingDirectory = try await catalog.openDirectory("zzz", in: root, transaction: transaction)
@@ -147,7 +146,7 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
                 return (openedA, openedB, openedPartition, walked, missingDirectory, missingPartition, againA, againPartition)
             }
             try require(reopened.0 == a, step, "openDirectory must return the created Directory")
-            try require(reopened.1 == b, step, "openDirectory(at:) must walk the path to the same Directory")
+            try require(reopened.1 == b, step, "openDirectory(at:) must resolve a nested Directory address to its node")
             try require(reopened.2 == partition, step, "openPartition must return the created Partition")
             try require(reopened.3 == partition.root, step, "openDirectory(at:) must resolve a Partition address to its node")
             try require(reopened.4 == nil, step, "opening a missing Directory must return nil")
