@@ -112,12 +112,12 @@ The mapping is one to one and adds no encoding of its own.
 | FD-1a | Storage roots do not nest. Bootstrap reads each proper ancestor of `rootPath` in the caller's transaction and fails `incompatibleStorageLayout` when one carries the root marker; the reverse order is already refused by FD-1, because the outer path's node then exists without a marker. The default root path has no proper ancestor. Without FD-1a an outer root would list an inner root among its own children and remove it recursively. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
 | FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized root is observed without touching the layer version key. |
-| FD-4 | A move never resurrects a stale destination: a missing destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. Both are checked before the native mutation. |
-| FD-5 | Listings sort native names by UTF-8 bytes, apply `after` exclusively, and honor `limit` in `1...DirectoryLimits.maximumListLimit`; each row resolves the child to read its stored tag, so a `DirectoryEntry` carries the node's real layer. A child that disappears between `list` and its resolution is skipped, and a listing below a stale parent is an empty page. |
+| FD-4 | A move never resurrects a stale destination: both endpoints are re-resolved from the root in the caller's transaction before the native mutation, so a missing source or destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. |
+| FD-5 | Listings sort native names by UTF-8 bytes, apply `after` exclusively, and honor `limit` in `1...DirectoryLimits.maximumListLimit`; each row resolves the child to read its stored tag, so a `DirectoryEntry` carries the node's real layer. A child that disappears between `list` and its resolution is skipped. Operation 3 positions by path and does not re-resolve (D-13), so a listing below an address whose node was removed is an empty page, and one below an address recreated since the handle was taken lists the live node's children. |
 | FD-6 | Removal is recursive and has no emptiness precondition: the native layer clears every descendant node and the whole content range of the removed node, which for a Partition is one range. A missing node fails with `keyNotFound` before any mutation. |
-| FD-8 | A node moves only within the Directory Layer that contains it, Partitions included: source and destination must share the same containing content base, otherwise `partitionBoundaryViolation`; a target inside the moved subtree fails with `invalidDirectoryAddress(.targetInsideMovedSubtree)`. |
+| FD-8 | A node moves only within the Directory Layer that contains it, Partitions included: the containing content bases compared are those of the re-resolved endpoints, and must be equal, otherwise `partitionBoundaryViolation`; a target inside the moved subtree fails with `invalidDirectoryAddress(.targetInsideMovedSubtree)`. Comparing a base copied from the caller's handle would reject a move wholly inside a Partition recreated at the source's address. |
 | FD-9 | Every Directory operation of a transaction runs inside `withDirectoryOperation`, which rejects a transaction of another engine (`storageDomainMismatch`), enforces exclusivity with the transaction's own access, and marks `openOrInitializeRoot`, `openOrCreate`, `move`, and `remove` as mutations. |
-| FD-10 | A create never fabricates the parent chain. `openOrCreate` resolves the child first and, when it is absent, requires the parent node to exist before creating it, so a create below a removed parent fails with `keyNotFound` instead of having its ancestors recreated as untyped nodes. Nothing other than the named child is ever created. |
+| FD-10 | A create never fabricates the parent chain and never reports a stale physical context. `openOrCreate` re-resolves the parent address from the root in the caller's transaction (D-13) before it touches the child, so a create below a removed parent fails with `keyNotFound` instead of having its ancestors recreated as untyped nodes, and the returned `Directory` carries the containing layer base of the parent that resolution found. Nothing other than the named child is ever created. |
 
 ### Native error mapping
 
@@ -141,10 +141,18 @@ The mapping is one to one and adds no encoding of its own.
 | Foreign nodes | cannot exist; the catalog owns every edge | a native node created outside StorageKit is listed and resolvable, and carries its own layer tag |
 
 Writing below a removed parent is no longer a difference. FD-10 and FD-4 state
-for the native layer what D-13 states for the contract, and the key-value
-catalog reaches the same outcome by re-resolving the address in the caller's
-transaction, so both backends fail `keyNotFound` before any write. The shared
-fixture asserts it on both through `verifyStaleParentRejection`.
+for the native layer what D-13 states for the contract, and both backends now
+reach the outcome the same way: operations 2 and 4 re-resolve their endpoints
+with the shared address walk in the caller's transaction, fail `keyNotFound`
+before any write, and build the value they return from the live node. The
+shared fixture asserts it on both through `verifyStaleParentRejection`.
+
+Reading through a handle to an address that was recreated remains a
+difference, and D-13 leaves it to the backend. The native layer positions by
+path, so operations 1, 3, and 5 reach the live successor here, while the
+key-value catalog reads from the prefix the caller holds and finds nothing.
+The shared fixture therefore asserts recreation only through operations 2 and
+4, which both backends answer identically.
 
 ## Runtime Flows
 
@@ -153,33 +161,49 @@ Operation 2 (`openOrCreate`, and `openOrCreateDirectory` / `openOrCreatePartitio
 ```text
 resolve tx (domain) -> require parent domain -> parent.address.appending(name)
   -> LayerTag -> DirectoryType?          non-UTF-8 tag -> invalidDirectoryAddress
+  -> openDirectory(at: parent.address)   absent  -> keyNotFound (FD-10, D-13)
   -> withDirectoryOperation(writes: true)
        -> layer.open(path)               present -> requireLayer -> Directory
                                          absent  -> continue below
-       -> layer.exists(parent path)      absent  -> keyNotFound (FD-10)
        -> layer.createOrOpen(path, type) stored tag differs -> layerMismatch
-       -> Directory(address, HCA prefix, stored tag, parent.childLayerRoot)
+       -> Directory(address, HCA prefix, stored tag, living.childLayerRoot)
        -> requireLayer(stored, expected: tag)  -> directoryLayerMismatch (FD-2)
 ```
 
-One native call opens or creates the node. Resolving the path first to inspect
-an existing node would descend it twice on every create, and the tag is
-verified either way: the native layer rejects a stored tag that differs from a
-stated type, and states no type for the default tag, which the explicit check
-then covers.
+The parent walk runs before `withDirectoryOperation` and not inside it: every
+step of the walk enters that same exclusion, which is not reentrant. Each step
+is a native open, so the walk costs at most `DirectoryLimits.maximumDepth` of
+them, and every node it reads joins the transaction's read set, which is how a
+concurrent removal of an ancestor conflicts with this operation.
+
+The walk also replaces the separate `layer.exists(parent path)` probe this
+operation used to make: it proves the same existence, one level further up as
+well, and yields the live layer base the returned value needs. One native call
+then opens or creates the node. Resolving the path first to inspect an
+existing node would descend it twice on every create, and the tag is verified
+either way: the native layer rejects a stored tag that differs from a stated
+type, and states no type for the default tag, which the explicit check then
+covers.
 
 Operation 4 (`move`):
 
 ```text
 resolve tx -> require source and destination domains -> both child addresses
-  -> compare containing layer bases      differ -> partitionBoundaryViolation (FD-8)
+  -> openDirectory(at: source.address)        absent -> keyNotFound (FD-4, D-13)
+  -> openDirectory(at: destination.address)   absent -> keyNotFound (FD-4, D-13)
+  -> compare live containing layer bases  differ -> partitionBoundaryViolation (FD-8)
   -> withDirectoryOperation(writes: true)
        -> open source node               missing -> keyNotFound
        -> target inside moved subtree    -> invalidDirectoryAddress (FD-8)
-       -> destination exists             absent  -> keyNotFound (FD-4)
        -> new path free                  taken   -> invalidOperation (FD-4)
        -> layer.move(oldPath, newPath)   prefix and subtree preserved
 ```
+
+Both walks run before `withDirectoryOperation`, for the reason operation 2
+gives. Re-resolving the destination is what the native `exists` probe inside
+the mutation used to do, so that probe is gone; re-resolving the source is
+what makes the boundary comparison and the returned value read the same live
+layer base.
 
 Operation 5 (`remove`):
 

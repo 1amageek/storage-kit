@@ -130,18 +130,28 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         let storage = try resolve(transaction, operation: operation)
         try requireDomain(of: parent, operation: operation)
         let address = try childAddress(of: parent, name, operation: operation)
-        let layerRoot = parent.childLayerRoot
         let type = try FDBDirectoryLayout.nativeType(
             for: tag,
             operation: operation,
             backend: backend
         )
+        // The native create recreates every missing ancestor as an untyped
+        // node, so a removed parent would otherwise be rebuilt into a tree that
+        // no operation created and no invariant describes. Re-resolving refuses
+        // that first, and it is what D-13 requires of operation 2 in any case:
+        // the child is created under, and reported inside, the node the address
+        // names now.
+        let living = try await requireLiving(
+            parent,
+            "Parent Directory of '\(name)' does not exist",
+            operation: operation,
+            transaction: transaction
+        )
+        let layerRoot = living.childLayerRoot
         let path = nativePath(of: address)
-        let parentPath = nativePath(of: parent.address)
         return try await withLayer(storage, writes: true, operation: operation) { layer, native in
-            // Resolving the child first keeps an existing node at one descent
-            // and confines the parent check below to an actual creation. The
-            // tag is verified here rather than by the native layer, matching
+            // Resolving the child first keeps an existing node at one descent.
+            // The tag is verified here rather than by the native layer, matching
             // `open`: a stored tag that differs is never adopted.
             if let existing = try await openIfExists(layer, path: path, transaction: native) {
                 let child = try directory(
@@ -152,16 +162,6 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 )
                 try requireLayer(child.layer, expected: tag, name: name, operation: operation)
                 return child
-            }
-            // The native create recreates every missing ancestor as an untyped
-            // node, so a removed parent would otherwise be rebuilt into a tree
-            // that no operation created and no invariant describes. Operation 2
-            // creates the named child only.
-            guard try await layer.exists(path: parentPath, transaction: native) else {
-                throw notFound(
-                    "Parent Directory of '\(name)' does not exist",
-                    operation: operation
-                )
             }
             let node = try await layer.createOrOpen(
                 path: path,
@@ -264,12 +264,29 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
         let movedAddress = try childAddress(of: source, name, operation: operation)
         let targetAddress = try childAddress(of: destination, newName, operation: operation)
-        let layerRoot = source.childLayerRoot
+        // D-13: one operation reads both endpoints through the same authority,
+        // so the source is re-resolved as well as the destination. The native
+        // move creates a missing destination parent, which this refuses before
+        // any write, and the comparison below then holds two live layer bases
+        // rather than one the caller has been carrying.
+        let livingSource = try await requireLiving(
+            source,
+            "Source Directory does not exist",
+            operation: operation,
+            transaction: transaction
+        )
+        let livingDestination = try await requireLiving(
+            destination,
+            "Destination Directory does not exist",
+            operation: operation,
+            transaction: transaction
+        )
+        let layerRoot = livingSource.childLayerRoot
         // The two nodes share a Directory Layer exactly when their contents are
         // allocated from the same content base, so this is the whole Partition
         // boundary rule: a Partition node itself moves within its own layer,
         // and nothing moves into or out of a Partition.
-        guard layerRoot == destination.childLayerRoot else {
+        guard layerRoot == livingDestination.childLayerRoot else {
             throw StorageError.partitionBoundaryViolation(
                 "A node cannot move into or out of a Partition",
                 operation: operation,
@@ -278,7 +295,6 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
         let oldPath = nativePath(of: movedAddress)
         let newPath = nativePath(of: targetAddress)
-        let destinationPath = nativePath(of: destination.address)
         return try await withLayer(storage, writes: true, operation: operation) { layer, native in
             guard let node = try await openIfExists(layer, path: oldPath, transaction: native) else {
                 throw notFound(
@@ -286,20 +302,12 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                     operation: operation
                 )
             }
-            if movedAddress.isAncestorOrSelf(of: destination.address)
-                || destination.keyspacePrefix == ByteString(node.prefix) {
+            if movedAddress.isAncestorOrSelf(of: livingDestination.address)
+                || livingDestination.keyspacePrefix == ByteString(node.prefix) {
                 throw StorageError.invalidDirectoryAddress(
                     .targetInsideMovedSubtree,
                     operation: operation,
                     backend: backend
-                )
-            }
-            // The native move creates a missing destination parent, so a stale
-            // destination would otherwise resurrect a removed path.
-            guard try await layer.exists(path: destinationPath, transaction: native) else {
-                throw notFound(
-                    "Destination Directory does not exist",
-                    operation: operation
                 )
             }
             // Rejected here rather than by the native move so no lease intent is
@@ -348,6 +356,40 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
             // range of the removed node, which for a Partition is one range.
             try await layer.remove(path: path, transaction: native)
         }
+    }
+
+    // MARK: - Resolution
+
+    /// Resolves what a caller-held `Directory` names now, inside the caller's
+    /// own transaction, and fails when nothing does (D-13).
+    ///
+    /// The native layer positions by path, so a write already lands in whatever
+    /// the address resolves to. What the caller holds beyond the address is the
+    /// physical context of an earlier resolution: a content prefix and the
+    /// content base of the Directory Layer that contained the node then. A
+    /// value built from those would pair a live node with a superseded
+    /// Partition boundary, and the next move wholly inside the live Partition
+    /// would read that base and reject itself. The walk resolves from the root,
+    /// so every value it produces carries the live prefix and the live base.
+    ///
+    /// It runs outside `withDirectoryOperation`: each of its steps takes that
+    /// same exclusion, which is not reentrant. It costs at most
+    /// `DirectoryLimits.maximumDepth` native opens, and every node it reads
+    /// joins the transaction's read set, so a concurrent removal of any
+    /// ancestor conflicts with the operation that called it.
+    private func requireLiving(
+        _ directory: Directory,
+        _ message: @autoclosure () -> String,
+        operation: StorageOperation,
+        transaction: any TransactionReadAccess
+    ) async throws -> Directory {
+        guard let living = try await openDirectory(
+            at: directory.address,
+            transaction: transaction
+        ) else {
+            throw notFound(message(), operation: operation)
+        }
+        return living
     }
 
     // MARK: - Native layer

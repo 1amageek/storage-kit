@@ -720,6 +720,93 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
         }
     }
 
+    /// D-13: a write through a handle to an address that was recreated lands in
+    /// the live node and reports that node's physical context.
+    ///
+    /// D-13 makes absence observable, not identity. A Partition removed and
+    /// recreated at the same address is a different generation, and refusing a
+    /// write through the older handle is the rule a `PartitionLease` owns, not
+    /// this one. What operations 2 and 4 owe here is that the value they return
+    /// names the live generation completely. A child reported with a live
+    /// prefix and the containing base of the removed Partition names a node in
+    /// one Partition while carrying the boundary of another, and the next move
+    /// wholly inside the live Partition compares those two bases and rejects
+    /// itself.
+    public func verifyRecreatedParentPositioning() async throws {
+        let step = "recreated parent positioning"
+        try await withEngine { engine in
+            let catalog = engine.directoryAccess
+            let superseded = try await engine.withTransaction { transaction -> Directory in
+                let root = try await catalog.openOrInitializeRoot(transaction: transaction)
+                let tenant = try await catalog.openOrCreatePartition("tenant", in: root, transaction: transaction)
+                return tenant.root
+            }
+            let live = try await engine.withTransaction { transaction -> Directory in
+                let root = try await requireRoot(catalog, transaction, step)
+                try await catalog.remove("tenant", in: root, transaction: transaction)
+                let recreated = try await catalog.openOrCreatePartition("tenant", in: root, transaction: transaction)
+                return recreated.root
+            }
+            try require(
+                live.keyspacePrefix != superseded.keyspacePrefix,
+                step,
+                "a Partition recreated at the same address must be a different generation"
+            )
+
+            // Operation 2 through the superseded handle: the child is created in
+            // the live Partition, so it must be reported inside it.
+            let created = try await engine.withTransaction { transaction -> Directory in
+                try await catalog.openOrCreateDirectory("holder", in: superseded, transaction: transaction)
+            }
+            try require(
+                created.layerRoot == live.keyspacePrefix,
+                step,
+                "a child created through a superseded parent must carry the live containing base"
+            )
+
+            // Operation 4 wholly inside the live Partition, with the value
+            // operation 2 returned standing as its destination.
+            let moved = try await engine.withTransaction { transaction -> Directory in
+                let root = try await requireRoot(catalog, transaction, step)
+                guard let tenant = try await catalog.openPartition("tenant", in: root, transaction: transaction) else {
+                    throw DirectoryConformanceFailure(step: step, message: "the recreated Partition must resolve")
+                }
+                _ = try await catalog.openOrCreateDirectory("movable", in: tenant.root, transaction: transaction)
+                return try await catalog.move(
+                    "movable",
+                    in: tenant.root,
+                    to: "movable",
+                    in: created,
+                    transaction: transaction
+                )
+            }
+            try require(
+                moved.layerRoot == live.keyspacePrefix,
+                step,
+                "a move inside one Partition must stay inside it"
+            )
+
+            let names = try await engine.withTransaction { transaction -> [String] in
+                let root = try await requireRoot(catalog, transaction, step)
+                guard let tenant = try await catalog.openPartition("tenant", in: root, transaction: transaction) else {
+                    throw DirectoryConformanceFailure(step: step, message: "the recreated Partition must resolve")
+                }
+                let entries = try await catalog.listChildren(
+                    in: tenant.root,
+                    after: nil,
+                    limit: 10,
+                    transaction: transaction
+                )
+                return entries.map(\.name)
+            }
+            try require(
+                names == ["holder"],
+                step,
+                "the live Partition must hold exactly what the two writes placed in it"
+            )
+        }
+    }
+
     /// Every operation rejects participants from another engine before I/O.
     public func verifyDomainMismatch() async throws {
         let step = "domain mismatch"

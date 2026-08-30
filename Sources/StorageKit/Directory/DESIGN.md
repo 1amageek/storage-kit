@@ -158,7 +158,7 @@ catalog.domain`; a mismatch fails `storageDomainMismatch` before any I/O.
 | D-10 | A Partition keyspace is contiguous: every descendant node, Subspace, and key lies in `[P, strinc(P))` | the nested layer allocates only inside `P` |
 | D-11 | Partitions nest, and no node moves into or out of a Partition | the containing layer base of source and destination must be equal |
 | D-12 | Removal is recursive and atomic; a Partition subtree clears as one range | `remove` clears descendants and data in the caller's transaction |
-| D-13 | A write positions a node by what the named address resolves to now, never by a prefix the caller already holds | operation 2 re-resolves the parent and operation 4 both of its endpoints, in the caller's transaction, before any write → `keyNotFound` |
+| D-13 | A write positions a node by what the named address resolves to now, never by a prefix the caller already holds, and reports it in the physical context that resolution produced | operation 2 re-resolves the parent and operation 4 both of its endpoints, in the caller's transaction, before any write → `keyNotFound`; the returned `Directory` carries the live node's `keyspacePrefix` and containing layer base |
 
 A resolver that reports every path as present is non-conforming; the fixture
 proves absence for unknown children.
@@ -170,13 +170,22 @@ a node under a parent that no longer exists, reachable by no path and covered
 by no removal.
 
 Only operations 2 and 4 re-resolve, because only they place a key under a
-parent. The others already produce absence from the edges alone, which were
-cleared with the parent: operation 1 returns `nil`, operation 3 returns an
-empty page, and operation 5 finds no edge to clear and fails `keyNotFound`.
-Operation 4 re-resolves its source as well as its destination so that one
-operation reads both endpoints through the same authority; its source would
-otherwise be positioned by a prefix while its destination is positioned by an
-address.
+parent. When the parent was removed and not recreated, the others report the
+same absence from what remains: operation 1 finds no child, operation 3
+returns an empty page, and operation 5 finds nothing to clear and fails
+`keyNotFound`. Operation 4 re-resolves its source as well as its destination
+so that one operation reads both endpoints through the same authority; its
+source would otherwise be positioned by a prefix while its destination is
+positioned by an address.
+
+Re-resolution decides the returned value as well as the write position. A
+`Directory` returned by operation 2 or 4 carries the `keyspacePrefix` and the
+containing layer base of the node the address resolved to in that transaction,
+never the ones copied from the caller's handle. A value that paired a live
+prefix with a superseded layer base would name a node in one Partition while
+reporting the boundary of another, and the next operation 4 wholly inside the
+live Partition would read that base and reject itself as a boundary
+violation.
 
 A parent that was removed and recreated at the same address resolves to the
 live node, so a write through a handle from before the recreation lands in the
@@ -186,6 +195,14 @@ resolution fail is the stale-generation rule of SPEC §9.3, which the lease
 layer owns: a `PartitionLease` re-resolves its own Partition in every
 transaction it is bound to (L-2), so a superseded Partition fails there
 instead of being written through here.
+
+Operations 1, 3, and 5 do not re-resolve, so after a recreation at the same
+address they report the backend's own positioning: FoundationDB reads the live
+successor, and the key-value catalogs read from the prefix the caller holds
+and find nothing. Both satisfy D-13, which constrains where a write lands and
+what a write reports, not what a superseded handle observes on a read. A
+caller that needs one answer resolves the address again, or holds a
+`PartitionLease` and receives the SPEC §9.3 rejection.
 
 ### `KeyValueDirectoryCatalog` layout (V1)
 

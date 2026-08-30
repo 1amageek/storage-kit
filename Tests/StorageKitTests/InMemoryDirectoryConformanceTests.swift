@@ -51,6 +51,11 @@ struct InMemoryDirectoryConformanceTests {
         try await conformance.verifyStaleParentRejection()
     }
 
+    @Test("Recreated parent positioning", .timeLimit(.minutes(1)))
+    func recreatedParentPositioning() async throws {
+        try await conformance.verifyRecreatedParentPositioning()
+    }
+
     @Test("Domain mismatch", .timeLimit(.minutes(1)))
     func domainMismatch() async throws {
         try await conformance.verifyDomainMismatch()
