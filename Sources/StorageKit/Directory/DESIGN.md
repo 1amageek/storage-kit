@@ -114,9 +114,9 @@ operations convert it to `StorageError.invalidDirectoryAddress`.
 | # | Operation | Class | Input access | Absence | Notes |
 |---|---|---|---|---|---|
 | 1 | `open(_:expecting:in:transaction:)` | Read | `TransactionReadAccess` | returns `nil` | never creates; a non-`nil` expectation is verified against the stored tag → `directoryLayerMismatch` |
-| 2 | `openOrCreate(_:layer:in:transaction:)` | Write | `TransactionAccess` | creates with `layer` | an existing node with a different tag fails `directoryLayerMismatch`; creation is atomic with the caller's transaction |
+| 2 | `openOrCreate(_:layer:in:transaction:)` | Write | `TransactionAccess` | creates with `layer` | an existing node with a different tag fails `directoryLayerMismatch`; creation is atomic with the caller's transaction; a parent that is absent when the write runs fails `keyNotFound` (D-13) |
 | 3 | `listChildren(in:after:limit:transaction:)` | Read | `TransactionReadAccess` | empty page | returns `DirectoryEntry` (name + tag); `limit` 1…1000, ordered by encoded key, `after` exclusive |
-| 4 | `move(_:in:to:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | whole-node rename, Partitions included; different containing layer: `partitionBoundaryViolation`; into own subtree: `invalidDirectoryAddress`; target exists: `invalidOperation`; leased subtree: `directoryLeased` |
+| 4 | `move(_:in:to:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | whole-node rename, Partitions included; a destination parent that is absent when the write runs fails `keyNotFound` (D-13); different containing layer: `partitionBoundaryViolation`; into own subtree: `invalidDirectoryAddress`; target exists: `invalidOperation`; leased subtree: `directoryLeased` |
 | 5 | `remove(_:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | atomic recursive removal of the node, its descendants, and their data; leased subtree: `directoryLeased`. There is no empty-only precondition |
 
 `expecting: nil` performs no tag verification and matches the FoundationDB
@@ -155,9 +155,32 @@ catalog.domain`; a mismatch fails `storageDomainMismatch` before any I/O.
 | D-10 | A Partition keyspace is contiguous: every descendant node, Subspace, and key lies in `[P, strinc(P))` | the nested layer allocates only inside `P` |
 | D-11 | Partitions nest, and no node moves into or out of a Partition | the containing layer base of source and destination must be equal |
 | D-12 | Removal is recursive and atomic; a Partition subtree clears as one range | `remove` clears descendants and data in the caller's transaction |
+| D-13 | A write positions a node by what the named address resolves to now, never by a prefix the caller already holds | operation 2 re-resolves the parent and operation 4 both of its endpoints, in the caller's transaction, before any write → `keyNotFound` |
 
 A resolver that reports every path as present is non-conforming; the fixture
 proves absence for unknown children.
+
+D-13 is what makes D-2 safe to hold a value across statements. A `Directory`
+carries the `keyspacePrefix` of the resolution that produced it, so a handle
+outlives the node it names; using that prefix as a write position would place
+a node under a parent that no longer exists, reachable by no path and covered
+by no removal.
+
+Only operations 2 and 4 re-resolve, because only they place a key under a
+parent. The others already produce absence from the edges alone, which were
+cleared with the parent: operation 1 returns `nil`, operation 3 returns an
+empty page, and operation 5 finds no edge to clear and fails `keyNotFound`.
+Operation 4 re-resolves its source as well as its destination so that one
+operation reads both endpoints through the same authority; its source would
+otherwise be positioned by a prefix while its destination is positioned by an
+address.
+
+A parent that was removed and recreated at the same address resolves to the
+live node, so a write through a handle from before the recreation lands in the
+new node rather than failing. That is the consequence of positioning by
+address: D-13 makes absence observable, not identity. Making a superseded
+resolution fail is the stale-generation rule of SPEC §9.3, which the lease
+layer owns and which is not settled here.
 
 ### `KeyValueDirectoryCatalog` layout (V1)
 
@@ -195,6 +218,15 @@ whose type codes never reach `0xFD`.
   empty and adopt a foreign layout, so the probe is deliberately unbounded.
   This probe, not any recorded version, is what keeps a Directory off data the
   catalog did not write.
+
+Operations 2 and 4 resolve the named parent by walking child edges from the
+root inside the caller's transaction, at most `DirectoryLimits.maximumDepth`
+point reads, and take the write position from that resolution. The walk is not
+only a precondition: its edge reads enter the caller's read set, so a removal
+that commits concurrently conflicts through the same backend detection that
+protects the allocator, and the check cannot be observed as passing against a
+parent that is already gone. FoundationDB obtains the identical property by
+resolving the native path, which is why the guarantee is backend-neutral.
 
 Concurrent creation of the same child races on the layer allocator key; the
 backend's conflict detection (FDB, InMemory, PostgreSQL repeatable-read or
@@ -371,6 +403,7 @@ confirming edge keys stay within each backend's key bound.
 | Values and bounds | `Tests/StorageKitTests/DirectoryValueTests.swift` |
 | D-1…D-12, state machine, operations 1–5, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests`. `verifyForeignRootRejection` is key-value only: FoundationDB has no such state, and `FDBDirectoryConformanceTests.siblingRootsAreIndependent` carries the per-root isolation it used to prove |
 | L-2 subtree intersection in both directions, intent release at commit and cancel | `DirectoryConformanceCase.verifyLeaseSubtreeExclusion` run by every adapter suite |
+| D-13 on both write operations, under a plain and a Partition parent | `DirectoryConformanceCase.verifyStaleParentRejection` run by every adapter suite; FoundationDB passes it before the key-value catalog does, which is the evidence that the native layer already held the guarantee |
 | L-4, L-5 (compile-level), L-6 escape, registry intersection relation | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 
 Changing the catalog layout, the bootstrap witness of any backend, or any

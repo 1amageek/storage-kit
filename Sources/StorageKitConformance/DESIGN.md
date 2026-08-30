@@ -30,7 +30,7 @@ adapter test target (one @Test per step)
     -> DirectoryConformanceCase<Engine>(makeEngine:foreignRootProbe:)
         -> verifyRootInitialization / verifyForeignRootRejection
         -> verifyCreateAndOpen / verifyListing / verifyPartitionContiguity
-        -> verifyMove / verifyRemove
+        -> verifyMove / verifyRemove / verifyStaleParentRejection
         -> verifyDomainMismatch / verifyLeaseLifecycle / verifyTransactionalAtomicity
             -> engine.directoryAccess, engine.leasePartition, engine.withTransaction
 ```
@@ -52,14 +52,18 @@ adapter test target (one @Test per step)
   byte for byte through creation, a verified open, a mismatched open, and
   enumeration. SPEC F-03 forbids a backend from weakening that, so the
   assertion belongs to every adapter rather than to one backend's suite.
-- `verifyRemove` asserts that operation 2 creates the named child only: after a
-  parent is removed, a create through the stale child handle must not rebuild
-  the parent chain. The observable outcome differs by backend and both are
-  accepted -- a backend that resolves by path fails with `keyNotFound`, and a
-  backend that keys the edge by the parent's prefix writes where no path
-  reaches -- but neither may fabricate an ancestor, because a rebuilt ancestor
-  carries no layer tag and yields a tree that no operation created and no
-  invariant describes.
+- `verifyStaleParentRejection` owns D-13, the guarantee that a write positions
+  a node by the named parent's current existence rather than by a prefix the
+  caller already holds. It removes a parent, then drives both write operations
+  through the handle that survives the removal: a create below a removed plain
+  Directory, a create below a removed Partition, and a move into a removed
+  destination. Each must fail `keyNotFound`, and the live tree must be
+  unchanged afterward. One outcome is required of every backend, because the
+  alternative is a node that no path reaches and no removal covers, and because
+  a caller that must ask which backend it holds cannot write correct recovery.
+  The step also proves that the failure is absence rather than fabrication: no
+  ancestor is rebuilt, and a rebuilt ancestor would carry no layer tag and yield
+  a tree that no operation created and no invariant describes.
 - `verifyLeaseSubtreeExclusion` proves the direction of SPEC §8.3 that
   `verifyLeaseLifecycle` does not reach: a lease covers the whole subtree under
   its Partition, so a node below it cannot be moved or removed, and a removal

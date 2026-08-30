@@ -59,6 +59,10 @@ struct PostgreSQLDirectoryConformanceTests {
         try await conformance.verifyRemove()
     }
 
+    @Test(.timeLimit(.minutes(1))) func staleParentRejection() async throws {
+        try await conformance.verifyStaleParentRejection()
+    }
+
     @Test(.timeLimit(.minutes(1))) func domainMismatch() async throws {
         try await conformance.verifyDomainMismatch()
     }

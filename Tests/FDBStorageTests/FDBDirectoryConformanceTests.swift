@@ -93,6 +93,11 @@ struct FDBDirectoryConformanceTests {
         try await Self.withConformance { try await $0.verifyRemove() }
     }
 
+    @Test("Stale parent rejection", .timeLimit(.minutes(1)))
+    func staleParentRejection() async throws {
+        try await Self.withConformance { try await $0.verifyStaleParentRejection() }
+    }
+
     @Test("Domain mismatch", .timeLimit(.minutes(1)))
     func domainMismatch() async throws {
         try await Self.withConformance { try await $0.verifyDomainMismatch() }

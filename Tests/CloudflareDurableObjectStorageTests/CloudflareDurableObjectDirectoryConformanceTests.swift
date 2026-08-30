@@ -52,6 +52,11 @@ struct CloudflareDurableObjectDirectoryConformanceTests {
         try await conformance.verifyRemove()
     }
 
+    @Test("Stale parent rejection", .timeLimit(.minutes(1)))
+    func staleParentRejection() async throws {
+        try await conformance.verifyStaleParentRejection()
+    }
+
     @Test("Domain mismatch", .timeLimit(.minutes(1)))
     func domainMismatch() async throws {
         try await conformance.verifyDomainMismatch()

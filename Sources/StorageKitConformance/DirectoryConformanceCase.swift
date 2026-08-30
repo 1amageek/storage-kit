@@ -513,32 +513,6 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
             let released = [a.keyspacePrefix, child.keyspacePrefix, inner.keyspacePrefix, tenant.keyspacePrefix, nested.keyspacePrefix]
             try require(!released.contains(after.3.keyspacePrefix), step, "a released keyspace must not be reused")
 
-            // Operation 2 creates the named child only. A create below a handle
-            // whose parent was removed must never rebuild the parent chain: a
-            // backend that resolves by path rejects it, and a backend that keys
-            // the edge by the parent's prefix writes where nothing reaches.
-            let staleParent = child
-            do {
-                try await engine.withTransaction { transaction in
-                    _ = try await catalog.openOrCreateDirectory(
-                        "resurrected",
-                        in: staleParent,
-                        transaction: transaction
-                    )
-                }
-            } catch let error as StorageError where error.code == .keyNotFound {
-                // Expected on a backend that resolves the parent by path.
-            }
-            let resurrection = try await engine.withTransaction { transaction -> (Directory?, [DirectoryEntry]) in
-                let liveRoot = try await requireRoot(catalog, transaction, step)
-                let liveA = try await catalog.openOrCreateDirectory("a", in: liveRoot, transaction: transaction)
-                let rebuilt = try await catalog.openDirectory("child", in: liveA, transaction: transaction)
-                let entries = try await catalog.listChildren(in: liveA, after: nil, limit: 10, transaction: transaction)
-                return (rebuilt, entries)
-            }
-            try require(resurrection.0 == nil, step, "a create below a removed parent must not rebuild the parent")
-            try require(resurrection.1.isEmpty, step, "a create below a removed parent must not add a child to the live tree")
-
             // A Partition's whole subtree is reachable through one range and
             // leaves through one range clear.
             let partitioned = try await engine.withTransaction { transaction -> (Directory, Partition, [ByteString], ByteString) in
@@ -590,6 +564,81 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
             try require(emptied.0.isEmpty, step, "removing a Partition must leave its whole range empty")
             try require(emptied.1 == nil, step, "a removed Partition must not resolve")
             try require(emptied.2 == [0x02], step, "removing a Partition must not touch keys outside it")
+        }
+    }
+
+    /// D-13: a write positions a node by what the named parent's address
+    /// resolves to now, never by the prefix a caller-held value carries.
+    ///
+    /// A `Directory` outlives the node it names. Writing through a value whose
+    /// node was removed would place a child that no path reaches, no listing
+    /// returns, and no removal clears, so both write operations must report
+    /// absence instead. The step drives the two of them under both parent
+    /// kinds, because a Partition parent also takes its nested allocator with
+    /// it and a catalog that trusted the value would allocate against metadata
+    /// that is gone.
+    public func verifyStaleParentRejection() async throws {
+        let step = "stale parent rejection"
+        try await withEngine { engine in
+            let catalog = engine.directoryAccess
+            let resolved = try await engine.withTransaction { transaction -> (Directory, Directory, Directory) in
+                let root = try await catalog.openOrInitializeRoot(transaction: transaction)
+                let plain = try await catalog.openOrCreateDirectory("plain", in: root, transaction: transaction)
+                let tenant = try await catalog.openOrCreatePartition("tenant", in: root, transaction: transaction)
+                let target = try await catalog.openOrCreateDirectory("target", in: root, transaction: transaction)
+                _ = try await catalog.openOrCreateDirectory("movable", in: root, transaction: transaction)
+                return (plain, tenant.root, target)
+            }
+            let (plainParent, partitionParent, destination) = resolved
+
+            try await engine.withTransaction { transaction in
+                let root = try await requireRoot(catalog, transaction, step)
+                try await catalog.remove("plain", in: root, transaction: transaction)
+                try await catalog.remove("tenant", in: root, transaction: transaction)
+                try await catalog.remove("target", in: root, transaction: transaction)
+            }
+
+            try await requireFailure(.keyNotFound, step, "creating below a removed Directory") {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openOrCreateDirectory(
+                        "child",
+                        in: plainParent,
+                        transaction: transaction
+                    )
+                }
+            }
+            try await requireFailure(.keyNotFound, step, "creating below a removed Partition") {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openOrCreateDirectory(
+                        "child",
+                        in: partitionParent,
+                        transaction: transaction
+                    )
+                }
+            }
+            try await requireFailure(.keyNotFound, step, "moving into a removed destination") {
+                try await engine.withTransaction { transaction in
+                    let root = try await requireRoot(catalog, transaction, step)
+                    _ = try await catalog.move(
+                        "movable",
+                        in: root,
+                        to: "moved",
+                        in: destination,
+                        transaction: transaction
+                    )
+                }
+            }
+
+            // The rejection is absence, not fabrication: no ancestor returns,
+            // the live tree gains nothing, and the move left its source alone.
+            let after = try await engine.withTransaction { transaction -> ([String], Directory?) in
+                let root = try await requireRoot(catalog, transaction, step)
+                let entries = try await catalog.listChildren(in: root, after: nil, limit: 10, transaction: transaction)
+                let moved = try await catalog.openDirectory("movable", in: root, transaction: transaction)
+                return (entries.map(\.name), moved)
+            }
+            try require(after.0 == ["movable"], step, "a rejected write must leave the live tree unchanged")
+            try require(after.1 != nil, step, "a rejected move must leave its source in place")
         }
     }
 

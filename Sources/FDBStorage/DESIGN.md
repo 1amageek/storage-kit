@@ -132,12 +132,13 @@ The mapping is one to one and adds no encoding of its own.
 |---|---|---|
 | Bootstrap witness | the root layer's allocator key, plus an unbounded emptiness probe that rejects foreign data | the native node at `rootPath`; foreign data cannot collide, because the native layer never allocates a prefix in use, so there is nothing to reject |
 | Root prefix | `Tuple(0)` under the domain root layer | HCA-allocated native prefix below `rootPath` |
-| Creating a child under a removed parent | writes an edge under the removed parent's prefix, which no path reaches | fails with `keyNotFound` before any write (FD-10) |
 | Foreign nodes | cannot exist; the catalog owns every edge | a native node created outside StorageKit is listed and resolvable, and carries its own layer tag |
 
-Neither backend fabricates a node other than the named child, which is what the
-Directory contract requires of operation 2; the shared fixture asserts that on
-both by removing a parent and then creating below the stale handle.
+Writing below a removed parent is no longer a difference. FD-10 and FD-4 state
+for the native layer what D-13 states for the contract, and the key-value
+catalog reaches the same outcome by re-resolving the address in the caller's
+transaction, so both backends fail `keyNotFound` before any write. The shared
+fixture asserts it on both through `verifyStaleParentRejection`.
 
 ## Runtime Flows
 

@@ -196,10 +196,16 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     ) async throws -> Directory {
         try requireDomain(of: transaction, parent: parent, operation: .write)
         let address = try childAddress(of: parent, name, operation: .write)
-        let layerRoot = parent.childLayerRoot
+        let livingParent = try await requireLiving(
+            parent,
+            "Parent Directory of '\(name)' does not exist",
+            operation: .write,
+            transaction: transaction
+        )
+        let layerRoot = livingParent.childLayerRoot
         if let edge = try await readEdge(
             layerRoot: layerRoot,
-            parentPrefix: parent.keyspacePrefix,
+            parentPrefix: livingParent.keyspacePrefix,
             name: name,
             transaction: transaction
         ) {
@@ -213,7 +219,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             Layout.edgeValue(prefix: prefix, layer: layer),
             for: Layout.edgeKey(
                 layerRoot: layerRoot,
-                parentPrefix: parent.keyspacePrefix,
+                parentPrefix: livingParent.keyspacePrefix,
                 name: name
             )
         )
@@ -286,8 +292,20 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         }
         let movedAddress = try childAddress(of: source, name, operation: .write)
         let targetAddress = try childAddress(of: destination, newName, operation: .write)
-        let layerRoot = source.childLayerRoot
-        guard layerRoot == destination.childLayerRoot else {
+        let livingSource = try await requireLiving(
+            source,
+            "Source Directory does not exist",
+            operation: .write,
+            transaction: transaction
+        )
+        let livingDestination = try await requireLiving(
+            destination,
+            "Destination Directory does not exist",
+            operation: .write,
+            transaction: transaction
+        )
+        let layerRoot = livingSource.childLayerRoot
+        guard layerRoot == livingDestination.childLayerRoot else {
             throw StorageError.partitionBoundaryViolation(
                 "A node cannot move into or out of a Partition",
                 operation: .write,
@@ -296,7 +314,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         }
         guard let edge = try await readEdge(
             layerRoot: layerRoot,
-            parentPrefix: source.keyspacePrefix,
+            parentPrefix: livingSource.keyspacePrefix,
             name: name,
             transaction: transaction
         ) else {
@@ -305,8 +323,8 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
                 operation: .write
             )
         }
-        if movedAddress.isAncestorOrSelf(of: destination.address)
-            || destination.keyspacePrefix == edge.prefix {
+        if movedAddress.isAncestorOrSelf(of: livingDestination.address)
+            || livingDestination.keyspacePrefix == edge.prefix {
             throw StorageError.invalidDirectoryAddress(
                 .targetInsideMovedSubtree,
                 operation: .write,
@@ -315,7 +333,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         }
         if try await readEdge(
             layerRoot: layerRoot,
-            parentPrefix: destination.keyspacePrefix,
+            parentPrefix: livingDestination.keyspacePrefix,
             name: newName,
             transaction: transaction
         ) != nil {
@@ -336,7 +354,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         try transaction.clear(
             key: Layout.edgeKey(
                 layerRoot: layerRoot,
-                parentPrefix: source.keyspacePrefix,
+                parentPrefix: livingSource.keyspacePrefix,
                 name: name
             )
         )
@@ -344,7 +362,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             Layout.edgeValue(prefix: edge.prefix, layer: edge.layer),
             for: Layout.edgeKey(
                 layerRoot: layerRoot,
-                parentPrefix: destination.keyspacePrefix,
+                parentPrefix: livingDestination.keyspacePrefix,
                 name: newName
             )
         )
@@ -441,6 +459,37 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     }
 
     // MARK: - Node access
+
+    /// Resolves what a caller-held `Directory` names now, inside the caller's
+    /// own transaction, and fails when nothing does (D-13).
+    ///
+    /// A `Directory` carries the `keyspacePrefix` of the resolution that
+    /// produced it, so the value outlives the node it names. A write that took
+    /// its position from that prefix would place a node under a parent that no
+    /// longer exists: reachable by no path, returned by no listing, and cleared
+    /// by no removal. Operations 2 and 4 therefore position by the address,
+    /// exactly as `FDBDirectoryAccess` positions by the native path.
+    ///
+    /// The walk is the concurrency mechanism as well as the precondition. Each
+    /// edge it reads enters the caller's read set, so a removal committing
+    /// between this resolution and the caller's commit conflicts through the
+    /// same backend detection that serializes the allocator, and the check
+    /// cannot be observed as passing against a parent that is already gone. It
+    /// costs at most `DirectoryLimits.maximumDepth` point reads.
+    private func requireLiving(
+        _ directory: Directory,
+        _ message: @autoclosure () -> String,
+        operation: StorageOperation,
+        transaction: any TransactionReadAccess
+    ) async throws -> Directory {
+        guard let living = try await openDirectory(
+            at: directory.address,
+            transaction: transaction
+        ) else {
+            throw notFound(message(), operation: operation)
+        }
+        return living
+    }
 
     private func readEdge(
         layerRoot: ByteString,
