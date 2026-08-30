@@ -36,7 +36,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
     // MARK: - Root
 
     /// The native node at `rootPath`: the sole witness that this root is
-    /// initialized (SPEC §10.3, FD-1).
+    /// initialized (SPEC §8.7, FD-1).
     ///
     /// This adapter owns no key of its own. The
     /// native Directory Layer never allocates a prefix that is already in use,

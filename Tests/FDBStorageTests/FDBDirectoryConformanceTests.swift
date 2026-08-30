@@ -116,7 +116,7 @@ struct FDBDirectoryConformanceTests {
     // MARK: - Root scoping
 
     /// The storage root of an engine is the node at its configured root path,
-    /// so the bootstrap decision of SPEC §10.3 asks whether that node exists
+    /// so the bootstrap decision of SPEC §8.7 asks whether that node exists
     /// and never whether the cluster is empty.
     ///
     /// A cluster always holds data belonging to no single root: other roots and

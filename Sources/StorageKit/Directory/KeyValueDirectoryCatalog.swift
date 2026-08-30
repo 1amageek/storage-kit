@@ -106,7 +106,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     // MARK: - Root
 
     /// The root layer's allocator: the sole witness that this root is
-    /// initialized (SPEC §10.3).
+    /// initialized (SPEC §8.7).
     ///
     /// Every content prefix of the root layer is handed out by this key, so a
     /// catalog that owns the root owns it, and nothing else writes it. Nothing
