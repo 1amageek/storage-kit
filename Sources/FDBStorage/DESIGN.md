@@ -41,7 +41,7 @@ existence of a node.
 | [StorageKit module](../StorageKit/DESIGN.md) | depends on | `StorageEngine`, `TransactionReadAccess`, `TransactionAccess`, `StorageError`, `Subspace`, `StorageTransactionDomain` | Supplies the contracts this adapter realizes. | `Subspace` here is `StorageKit.Subspace`; the bindings own a different `Subspace` type. |
 | [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `Directory`, `DirectoryEntry`, `LayerTag`, `Partition`, `StorageAddress`, `DirectoryLimits`, `StorageLayoutMarker`, `PartitionLeaseRegistry.registerIntent` | Defines the operations, failure codes, bounds, marker state machine, and intent rules this module must satisfy. | Intent registration happens after validation, before the native mutation (FD-7). |
 | [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `FDBDirectoryConformanceTests`. | Every step runs here, `verifyLayoutRejection` included; the fixture drives the layout probe of this adapter, which scopes every marker read and write to the engine's own root path. |
-| `fdb-swift-bindings` | depends on | `FDBClient`, `DatabaseProtocol`, `TransactionProtocol`, `DirectoryLayer`, `DirectorySubspace`, `DirectoryType`, `DirectoryError` | Native client, transactions, and Directory Layer. | `createOrOpen` creates missing ancestors as untyped nodes and writes the layer version key when absent; `list` returns names in Swift `String` order and paginates nothing; `move` keeps the prefix; `remove` is recursive; a `partition` node roots a nested layer and partitions may nest. |
+| `fdb-swift-bindings` | depends on | `FDBClient`, `DatabaseProtocol`, `TransactionProtocol`, `DirectoryLayer`, `DirectorySubspace`, `DirectoryType`, `DirectoryError` | Native client, transactions, and Directory Layer. | `createOrOpen` creates missing ancestors as untyped nodes, so this adapter checks the parent itself (FD-10), and writes the layer version key when absent; `list` returns names in Swift `String` order and paginates nothing; `move` keeps the prefix; `remove` is recursive; a `partition` node roots a nested layer and partitions may nest. |
 
 ## Architecture
 
@@ -112,6 +112,7 @@ The mapping is one to one and adds no encoding of its own.
 | FD-7 | A move or removal registers its lease intent after every validation succeeded and immediately before the native mutation, so a rejected operation leaves no pending intent in the transaction. |
 | FD-8 | A node moves only within the Directory Layer that contains it, Partitions included: source and destination must share the same containing content base, otherwise `partitionBoundaryViolation`; a target inside the moved subtree fails with `invalidDirectoryAddress(.targetInsideMovedSubtree)`. |
 | FD-9 | Every Directory operation of a transaction runs inside `withDirectoryOperation`, which rejects a transaction of another engine (`storageDomainMismatch`), enforces exclusivity with the transaction's own access, and marks `openOrInitializeRoot`, `openOrCreate`, `move`, and `remove` as mutations. |
+| FD-10 | A create never fabricates the parent chain. `openOrCreate` resolves the child first and, when it is absent, requires the parent node to exist before creating it, so a create below a removed parent fails with `keyNotFound` instead of having its ancestors recreated as untyped nodes. Nothing other than the named child is ever created. |
 
 ### Native error mapping
 
@@ -132,10 +133,12 @@ The mapping is one to one and adds no encoding of its own.
 |---|---|---|
 | Layout rejection source | marker key state machine over the engine's own keyspace | the same state machine over the engine's own root-scoped marker key and root node |
 | Root prefix | `Tuple(0)` under the domain root layer | HCA-allocated native prefix below `rootPath` |
-| Creating a child under a removed parent | writes an edge under the removed parent's prefix, which no path reaches | native `createOrOpen` recreates the missing ancestors as untyped nodes |
+| Creating a child under a removed parent | writes an edge under the removed parent's prefix, which no path reaches | fails with `keyNotFound` before any write (FD-10) |
 | Foreign nodes | cannot exist; the catalog owns every edge | a native node created outside StorageKit is listed and resolvable, and carries its own layer tag |
 
-Both stay within the Directory contract; the shared fixture passes on both.
+Neither backend fabricates a node other than the named child, which is what the
+Directory contract requires of operation 2; the shared fixture asserts that on
+both by removing a parent and then creating below the stale handle.
 
 ## Runtime Flows
 
@@ -145,6 +148,9 @@ Operation 2 (`openOrCreate`, and `openOrCreateDirectory` / `openOrCreatePartitio
 resolve tx (domain) -> require parent domain -> parent.address.appending(name)
   -> LayerTag -> DirectoryType?          non-UTF-8 tag -> invalidDirectoryAddress
   -> withDirectoryOperation(writes: true)
+       -> layer.open(path)               present -> requireLayer -> Directory
+                                         absent  -> continue below
+       -> layer.exists(parent path)      absent  -> keyNotFound (FD-10)
        -> layer.createOrOpen(path, type) stored tag differs -> layerMismatch
        -> Directory(address, HCA prefix, stored tag, parent.childLayerRoot)
        -> requireLayer(stored, expected: tag)  -> directoryLayerMismatch (FD-2)

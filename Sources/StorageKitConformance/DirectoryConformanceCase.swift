@@ -530,6 +530,32 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
             let released = [a.keyspacePrefix, child.keyspacePrefix, inner.keyspacePrefix, tenant.keyspacePrefix, nested.keyspacePrefix]
             try require(!released.contains(after.3.keyspacePrefix), step, "a released keyspace must not be reused")
 
+            // Operation 2 creates the named child only. A create below a handle
+            // whose parent was removed must never rebuild the parent chain: a
+            // backend that resolves by path rejects it, and a backend that keys
+            // the edge by the parent's prefix writes where nothing reaches.
+            let staleParent = child
+            do {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openOrCreateDirectory(
+                        "resurrected",
+                        in: staleParent,
+                        transaction: transaction
+                    )
+                }
+            } catch let error as StorageError where error.code == .keyNotFound {
+                // Expected on a backend that resolves the parent by path.
+            }
+            let resurrection = try await engine.withTransaction { transaction -> (Directory?, [DirectoryEntry]) in
+                let liveRoot = try await requireRoot(catalog, transaction, step)
+                let liveA = try await catalog.openOrCreateDirectory("a", in: liveRoot, transaction: transaction)
+                let rebuilt = try await catalog.openDirectory("child", in: liveA, transaction: transaction)
+                let entries = try await catalog.listChildren(in: liveA, after: nil, limit: 10, transaction: transaction)
+                return (rebuilt, entries)
+            }
+            try require(resurrection.0 == nil, step, "a create below a removed parent must not rebuild the parent")
+            try require(resurrection.1.isEmpty, step, "a create below a removed parent must not add a child to the live tree")
+
             // A Partition's whole subtree is reachable through one range and
             // leaves through one range clear.
             let partitioned = try await engine.withTransaction { transaction -> (Directory, Partition, [ByteString], ByteString) in

@@ -147,12 +147,32 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         let layerRoot = parent.childLayerRoot
         let type = FDBDirectoryLayout.nativeType(for: tag)
         let path = nativePath(of: address)
+        let parentPath = nativePath(of: parent.address)
         return try await withLayer(storage, writes: true, operation: operation) { layer, native in
-            // One native call opens or creates the node. Resolving the path
-            // first to inspect an existing node would descend it twice on
-            // every create, and the tag is verified below either way: the
-            // native layer rejects a stored tag that differs from a stated
-            // type, and states no type for the default tag.
+            // Resolving the child first keeps an existing node at one descent
+            // and confines the parent check below to an actual creation. The
+            // tag is verified here rather than by the native layer, matching
+            // `open`: a stored tag that differs is never adopted.
+            if let existing = try await openIfExists(layer, path: path, transaction: native) {
+                let child = try directory(
+                    at: address,
+                    node: existing,
+                    layerRoot: layerRoot,
+                    operation: operation
+                )
+                try requireLayer(child.layer, expected: tag, name: name, operation: operation)
+                return child
+            }
+            // The native create recreates every missing ancestor as an untyped
+            // node, so a removed parent would otherwise be rebuilt into a tree
+            // that no operation created and no invariant describes. Operation 2
+            // creates the named child only.
+            guard try await layer.exists(path: parentPath, transaction: native) else {
+                throw notFound(
+                    "Parent Directory of '\(name)' does not exist",
+                    operation: operation
+                )
+            }
             let node = try await layer.createOrOpen(
                 path: path,
                 type: type,

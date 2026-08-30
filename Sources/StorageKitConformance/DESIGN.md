@@ -53,6 +53,14 @@ adapter test target (one @Test per step)
   byte for byte through creation, a verified open, a mismatched open, and
   enumeration. SPEC F-03 forbids a backend from weakening that, so the
   assertion belongs to every adapter rather than to one backend's suite.
+- `verifyRemove` asserts that operation 2 creates the named child only: after a
+  parent is removed, a create through the stale child handle must not rebuild
+  the parent chain. The observable outcome differs by backend and both are
+  accepted -- a backend that resolves by path fails with `keyNotFound`, and a
+  backend that keys the edge by the parent's prefix writes where no path
+  reaches -- but neither may fabricate an ancestor, because a rebuilt ancestor
+  carries no layer tag and yields a tree that no operation created and no
+  invariant describes.
 - `verifyLeaseSubtreeExclusion` proves the direction of SPEC §8.3 that
   `verifyLeaseLifecycle` does not reach: a lease covers the whole subtree under
   its Partition, so a node below it cannot be moved or removed, and a removal
