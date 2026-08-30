@@ -51,6 +51,33 @@ struct DirectoryValueTests {
         }
     }
 
+    @Test func storageAddressIdentityIsUTF8ByteIdentity() throws {
+        // U+00E1 and "a" + U+0301 are canonically equivalent, so Swift holds
+        // them as one String value while every backend encodes them to two
+        // distinct keys. An address names the node the store holds.
+        let composed = try StorageAddress(["\u{00E1}"])
+        let decomposed = try StorageAddress(["a\u{0301}"])
+        #expect(composed.components == decomposed.components, "String equality merges them")
+        #expect(composed != decomposed)
+        #expect(Set([composed, decomposed]).count == 2)
+
+        // Ancestry follows the same identity, so neither spelling reaches the
+        // other's subtree.
+        let belowComposed = try composed.appending("child")
+        #expect(composed.isAncestorOrSelf(of: belowComposed))
+        #expect(!decomposed.isAncestorOrSelf(of: belowComposed))
+        #expect(!decomposed.subtreeIntersects(belowComposed))
+
+        // Equal bytes are one address, and the hash agrees with equality.
+        let sameBytes = try StorageAddress(["\u{00E1}"])
+        #expect(composed == sameBytes)
+        #expect(composed.hashValue == sameBytes.hashValue)
+        #expect(Set([composed, sameBytes]).count == 1)
+
+        // Component boundaries survive hashing: no concatenation collides.
+        #expect(try StorageAddress(["ab", "c"]) != StorageAddress(["a", "bc"]))
+    }
+
     @Test func partitionWrapsOnlyPartitionNodes() async throws {
         let engine = InMemoryEngine()
         let catalog = engine.directoryAccess

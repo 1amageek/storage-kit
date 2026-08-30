@@ -174,39 +174,46 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         if let after {
             try validate(component: after, operation: operation)
         }
-        let bound = after.map { ByteString(utf8: $0) }
         let layerRoot = parent.childLayerRoot
         let path = nativePath(of: parent.address)
         return try await withLayer(storage, writes: false, operation: operation) { layer, native in
+            // Both bounds go to the native subdirectory range read, so the page
+            // is produced by the store in the store's own key order. Tuple
+            // string encoding preserves UTF-8 byte order, which is the order
+            // D-8 states and the order `after` resumes from.
             let names: [String]
             do {
-                names = try await layer.list(path: path, transaction: native)
+                names = try await layer.list(
+                    path: path,
+                    after: after,
+                    limit: limit,
+                    transaction: native
+                )
             } catch DirectoryError.directoryNotFound {
                 // A stale parent has no children, matching the KeyValue catalog,
                 // which range-reads the parent's edges without resolving it.
                 return []
             }
-            // The native layer returns names in Swift `String` order, which is
-            // not UTF-8 byte order, and paginates nothing.
-            let ordered = names
-                .map { (name: $0, bytes: ByteString(utf8: $0)) }
-                .sorted { $0.bytes < $1.bytes }
             var entries: [DirectoryEntry] = []
-            entries.reserveCapacity(min(limit, ordered.count))
-            for child in ordered {
-                if let bound, child.bytes <= bound {
-                    continue
-                }
-                guard entries.count < limit else {
-                    break
-                }
-                let address = try childAddress(of: parent, child.name, operation: operation)
+            entries.reserveCapacity(names.count)
+            for name in names {
+                let address = try childAddress(of: parent, name, operation: operation)
+                // The subdirectory entry and the node it names are written
+                // together, and this read sees one snapshot of both. A listed
+                // child that does not resolve is corrupted metadata: dropping
+                // it would shorten the page, and a short page is how this
+                // contract reports the end of the enumeration.
                 guard let node = try await openIfExists(
                     layer,
                     path: nativePath(of: address),
                     transaction: native
                 ) else {
-                    continue
+                    throw StorageError(
+                        code: .dataCorruption,
+                        operation: operation,
+                        backend: backend,
+                        message: "Directory '\(name)' is listed by its parent but has no node"
+                    )
                 }
                 let resolved = try directory(
                     at: address,
@@ -214,7 +221,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                     layerRoot: layerRoot,
                     operation: operation
                 )
-                entries.append(DirectoryEntry(name: child.name, layer: resolved.layer))
+                entries.append(DirectoryEntry(name: name, layer: resolved.layer))
             }
             return entries
         }

@@ -279,11 +279,18 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
     /// byte order, paginated, and bounded by `maximumListLimit`.
     public func verifyListing() async throws {
         let step = "listing"
+        // U+00E1 and "a" + U+0301 are canonically equivalent: Swift compares
+        // and hashes them as one String while their UTF-8 bytes differ, so a
+        // catalog that keys on bytes holds two children here. They also pin the
+        // order to the bytes, because Swift String order puts both spellings
+        // together ahead of "b" while byte order separates them around it.
+        let composed = "\u{00E1}"
+        let decomposed = "a\u{0301}"
         try await withEngine { engine in
             let catalog = engine.directoryAccess
             try await engine.withTransaction { transaction in
                 let root = try await catalog.openOrInitializeRoot(transaction: transaction)
-                for name in ["c", "a", "b"] {
+                for name in ["c", "a", composed, "b", decomposed] {
                     _ = try await catalog.openOrCreateDirectory(name, in: root, transaction: transaction)
                 }
                 for name in ["p2", "p1"] {
@@ -301,10 +308,34 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
                 let childEntries = try await catalog.listChildren(in: child, after: nil, limit: 10, transaction: transaction)
                 return (all, page1, page2, childEntries)
             }
-            try require(listed.0.map(\.name) == ["a", "b", "c", "p1", "p2"], step, "children must list in byte order, got \(listed.0.map(\.name))")
-            try require(listed.0.map(\.isPartition) == [false, false, false, true, true], step, "each entry must carry its own layer tag")
-            try require(listed.1.map(\.name) == ["a", "b"], step, "first page must honor the limit, got \(listed.1.map(\.name))")
-            try require(listed.2.map(\.name) == ["c", "p1"], step, "second page must continue after the cursor, got \(listed.2.map(\.name))")
+            // Bytes, not Strings: String equality would accept a listing that
+            // collapsed the two spellings or ordered them by Swift collation.
+            func bytes(_ entries: [DirectoryEntry]) -> [[UInt8]] {
+                entries.map { Array($0.name.utf8) }
+            }
+            func bytes(_ names: [String]) -> [[UInt8]] {
+                names.map { Array($0.utf8) }
+            }
+            try require(
+                bytes(listed.0) == bytes(["a", decomposed, "b", "c", "p1", "p2", composed]),
+                step,
+                "children must list in byte order, got \(listed.0.map(\.name))"
+            )
+            try require(
+                listed.0.map(\.isPartition) == [false, false, false, false, true, true, false],
+                step,
+                "each entry must carry its own layer tag"
+            )
+            try require(
+                bytes(listed.1) == bytes(["a", decomposed]),
+                step,
+                "first page must honor the limit, got \(listed.1.map(\.name))"
+            )
+            try require(
+                bytes(listed.2) == bytes(["b", "c"]),
+                step,
+                "second page must continue after the cursor, got \(listed.2.map(\.name))"
+            )
             try require(listed.3.isEmpty, step, "a child listing must not include the parent's children")
 
             try await engine.withTransaction { transaction in
