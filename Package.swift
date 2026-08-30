@@ -34,7 +34,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/1amageek/fdb-swift-bindings.git",
-            revision: "7fd4813dd118d3fda64838de4f8375bc4fb59131"
+            revision: "5c276d03f3923e17046ada80586ea1de7ee941c2"
         ),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
     ],

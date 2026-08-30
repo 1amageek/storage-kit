@@ -40,7 +40,12 @@ struct TupleV1GoldenVectorTests {
             (
                 "Int64 minimum",
                 Tuple(Int64.min),
-                [0x0c, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+                [0x0c, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+            ),
+            (
+                "negative 2^56",
+                Tuple(Int64(-72_057_594_037_927_936)),
+                [0x0c, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
             ),
             ("negative 256", Tuple(Int64(-256)), [0x12, 0xfe, 0xff]),
             ("negative one", Tuple(Int64(-1)), [0x13, 0xfe]),
@@ -138,6 +143,87 @@ struct TupleV1GoldenVectorTests {
             #expect(throws: TupleError.self) {
                 _ = try Tuple(packed: encoded)
             }
+        }
+    }
+
+    /// `0x1D` and `0x0B` carry their payload width in the byte that follows the
+    /// type code. Reading either as a fixed-width payload returns a value that
+    /// is not the encoded one and leaves the offset inside the next element.
+    @Test("Extended integer forms are framed by their length byte")
+    func extendedIntegerFormsAreFramed() throws {
+        // 2^64 and -(2^64) as the reference implementation writes them.
+        let positive: ByteString = [
+            0x1d, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+        let negative: ByteString = [
+            0x0b, 0xf6, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ]
+
+        for encoded in [positive, negative] {
+            var offset = encoded.startIndex + 1
+            let frame = try decodeTupleIntegerFrame(from: encoded, at: &offset)
+            #expect(frame.payload.count == 9, "the length byte fixes the payload width")
+            #expect(offset == encoded.endIndex, "the element ends where the next one starts")
+
+            // No Swift integer element holds a 9-byte value.
+            #expect {
+                _ = try decodeTupleIntegerMagnitude(from: encoded, frame: frame)
+            } throws: { error in
+                guard case TupleError.integerOverflow = error else { return false }
+                return true
+            }
+            #expect(throws: TupleError.self) {
+                _ = try Tuple(packed: encoded)
+            }
+        }
+
+        // A width the fixed-width codes already express is not an extended form.
+        let nonCanonicalWidth: ByteString = [
+            0x1d, 0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+        var nonCanonicalOffset = nonCanonicalWidth.startIndex + 1
+        #expect(throws: TupleError.self) {
+            _ = try decodeTupleIntegerFrame(from: nonCanonicalWidth, at: &nonCanonicalOffset)
+        }
+
+        let truncated: [ByteString] = [[0x1d], [0x0b], [0x1d, 0x09, 0x01]]
+        for encoded in truncated {
+            var offset = encoded.startIndex + 1
+            #expect {
+                _ = try decodeTupleIntegerFrame(from: encoded, at: &offset)
+            } throws: { error in
+                guard case TupleError.unexpectedEndOfData = error else { return false }
+                return true
+            }
+        }
+    }
+
+    @Test("Every integer width round-trips and leaves the next element intact")
+    func integerWidthsRoundTrip() throws {
+        // 1 << 63 is Int64.min, whose negation traps, so the widest magnitudes
+        // are listed directly instead of being derived inside the loop.
+        var values: [Int64] = [Int64.min, Int64.min + 1, Int64.max, Int64.max - 1, 0]
+        for bits in 1...62 {
+            let magnitude = Int64(1) << bits
+            values.append(contentsOf: [magnitude, -magnitude, magnitude - 1, 1 - magnitude])
+        }
+
+        for value in values {
+            let packed = Tuple(value, "tail").pack()
+            let decoded = try Tuple(packed: packed)
+            #expect(decoded.count == 2, "\(value) must not disturb the following element")
+            #expect(try decoded.element(at: 0) as? Int64 == value, "\(value) must round-trip")
+            #expect(
+                try decoded.element(at: 1) as? String == "tail",
+                "\(value) must end where it says"
+            )
+        }
+
+        for value in [UInt64(Int64.max) + 1, UInt64.max] {
+            let packed = Tuple(value, "tail").pack()
+            let decoded = try Tuple(packed: packed)
+            #expect(try decoded.element(at: 0) as? UInt64 == value)
+            #expect(try decoded.element(at: 1) as? String == "tail")
         }
     }
 }

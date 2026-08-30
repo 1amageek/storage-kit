@@ -44,6 +44,42 @@ the measured byte count and final encoded bytes use the established format.
 
 ## Contracts and Invariants
 
+### Canonical Version 1 encoding
+
+The encoded bytes are the FoundationDB Tuple Layer bytes, not merely an
+order-preserving encoding of the same values. An encoding that sorts correctly
+but differs from the reference bytes is nonconforming: the same store is read
+by other Tuple Layer implementations, and SPEC 8.5 states that every backend
+consumes the encoded bytes unchanged.
+
+For integers this fixes the following forms, where `n` is the number of
+payload bytes:
+
+| Value range | Type code | Payload |
+|---|---|---|
+| `0` | `0x14` | none |
+| positive, `n` in 1…8 | `0x14 + n` | big-endian magnitude |
+| positive, `n` in 9…255 | `0x1D` | one length byte `n`, then the big-endian magnitude |
+| negative, `n` in 1…8 | `0x14 - n` | big-endian `(2^(8n) - 1) + value` |
+| negative, `n` in 9…255 | `0x0B` | one length byte `n ^ 0xFF`, then the big-endian `(2^(8n) - 1) + value` |
+
+`Int64.min` therefore encodes as `0C 7F FF FF FF FF FF FF FF`. The raw two's
+complement pattern `0C 80 00 …` sorts identically and is not this encoding.
+The 9-to-255-byte forms carry a length byte, so a decoder that treats `0x1D`
+or `0x0B` as a fixed nine-byte payload misreads the value and leaves the
+offset inside the following element.
+
+A decoder rejects with `TupleError.integerOverflow` any well-formed encoding
+whose value does not fit the requested Swift type. It never truncates a wider
+payload into the requested width.
+
+The golden-vector suite named by SPEC 8.5 holds these bytes as literals and is
+the version identity of the encoding. A vector is evidence only when it agrees
+with the FoundationDB reference implementation; a vector derived from the
+encoder under test proves nothing.
+
+### Admission-aware packing
+
 The public contract is:
 
 ```swift

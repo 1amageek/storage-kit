@@ -20,59 +20,22 @@ extension Int64: TupleElement {
         guard offset > bytes.startIndex else {
             throw TupleError.unexpectedEndOfData
         }
-        let typeCode = bytes[offset - 1]
-        let intZero = TupleTypeCode.intZero.rawValue
-
-        if typeCode == intZero {
+        if bytes[offset - 1] == TupleTypeCode.intZero.rawValue {
             return 0
         }
 
-        // Positive integer: type code 0x15-0x1D
-        if typeCode > intZero && typeCode <= 0x1D {
-            let n = Int(typeCode - intZero)
-            guard offset + n <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
-            var value: UInt64 = 0
-            for i in 0..<n {
-                value = (value << 8) | UInt64(bytes[offset + i])
-            }
-            offset += n
-            guard value <= UInt64(Int64.max) else { throw TupleError.integerOverflow }
-            return Int64(value)
-        }
-
-        // Negative integer: type code 0x0B-0x13
-        if typeCode >= 0x0B && typeCode < intZero {
-            let n = Int(intZero - typeCode)
-            guard offset + n <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
-
-            // n=9 (type code 0x0B): extended range negative integer, exceeds Int64
-            if n > 8 {
-                offset += n
+        let frame = try decodeTupleIntegerFrame(from: bytes, at: &offset)
+        let magnitude = try decodeTupleIntegerMagnitude(from: bytes, frame: frame)
+        if frame.isNegative {
+            guard magnitude <= UInt64(Int64.max) + 1 else {
                 throw TupleError.integerOverflow
             }
-
-            if n == 8 {
-                var bitPattern: UInt64 = 0
-                for i in 0..<8 {
-                    bitPattern = (bitPattern << 8) | UInt64(bytes[offset + i])
-                }
-                offset += 8
-                return Int64(bitPattern: bitPattern)
-            }
-
-            // n < 8: sizeLimits conversion
-            var raw: UInt64 = 0
-            for i in 0..<n {
-                raw = (raw << 8) | UInt64(bytes[offset + i])
-            }
-            offset += n
-            let limit = sizeLimits[n - 1]
-            let magnitude = limit - raw
-            guard magnitude <= UInt64(Int64.max) else { throw TupleError.integerOverflow }
-            return -Int64(magnitude)
+            return Int64(bitPattern: 0 &- magnitude)
         }
-
-        throw TupleError.invalidTypeCode(typeCode)
+        guard magnitude <= UInt64(Int64.max) else {
+            throw TupleError.integerOverflow
+        }
+        return Int64(magnitude)
     }
 
     private static func encodePositive(
@@ -96,23 +59,10 @@ extension Int64: TupleElement {
         let n = byteCount(for: magnitude)
         let typeCode = TupleTypeCode.intZero.rawValue - UInt8(n)
 
-        if n == 8 {
-            // n=8: raw two's complement bit pattern (FDB official spec)
-            // Python: struct.pack(">q", value)
-            // Swift: big-endian representation of UInt64(bitPattern: value)
-            let raw = UInt64(bitPattern: value)
-            sink.writeByte(typeCode)
-            for shift in stride(from: 56, through: 0, by: -8) {
-                sink.writeByte(
-                    UInt8(truncatingIfNeeded: raw >> UInt64(shift))
-                )
-            }
-            return
-        }
-
-        // n < 8: sizeLimits conversion
-        // Python: (size_limits[n] + value).to_bytes(n, 'big')
-        // sizeLimits[n-1] (StorageKit) == size_limits[n] (Python), so equivalent to limit - magnitude
+        // The payload is (2^(8*n) - 1) + value at every width, including n = 8
+        // where sizeLimits[7] is UInt64.max. Writing the two's complement bit
+        // pattern instead sorts the same but is one greater than the bytes the
+        // reference implementation produces.
         let limit = sizeLimits[n - 1]
         let encoded = limit - magnitude
         sink.writeByte(typeCode)
@@ -189,29 +139,16 @@ extension UInt64: TupleElement {
         guard offset > bytes.startIndex else {
             throw TupleError.unexpectedEndOfData
         }
-        let typeCode = bytes[offset - 1]
-        let intZero = TupleTypeCode.intZero.rawValue
-
-        if typeCode == intZero {
+        if bytes[offset - 1] == TupleTypeCode.intZero.rawValue {
             return 0
         }
 
-        guard typeCode > intZero && typeCode <= 0x1D else {
-            throw TupleError.invalidTypeCode(typeCode)
-        }
-
-        let n = Int(typeCode - intZero)
-        guard offset + n <= bytes.endIndex else { throw TupleError.unexpectedEndOfData }
-        guard n <= MemoryLayout<UInt64>.size else {
-            offset += n
+        let frame = try decodeTupleIntegerFrame(from: bytes, at: &offset)
+        let magnitude = try decodeTupleIntegerMagnitude(from: bytes, frame: frame)
+        guard !frame.isNegative else {
             throw TupleError.integerOverflow
         }
-        var value: UInt64 = 0
-        for i in 0..<n {
-            value = (value << 8) | UInt64(bytes[offset + i])
-        }
-        offset += n
-        return value
+        return magnitude
     }
 
     private func byteCount(for value: UInt64) -> Int {

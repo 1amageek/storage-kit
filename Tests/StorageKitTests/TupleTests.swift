@@ -626,12 +626,13 @@ struct TupleTests {
     // MARK: - FDB Byte Compatibility
 
     @Test func int64MinEncoding() throws {
-        // The FDB specification encodes n=8 as raw two's complement.
-        // Int64.min is encoded as [0x0C, 0x80, 0x00, ...].
+        // A negative is stored as sizeLimits[n] - magnitude, which at n=8 is
+        // UInt64.max - magnitude, not the raw two's complement pattern. For
+        // Int64.min that is 0xFFFF_FFFF_FFFF_FFFF - 0x8000_0000_0000_0000.
         let encoded = Int64.min.encodeTuple()
-        #expect(encoded[0] == 0x0C) // type code = 0x14 - 8
-        #expect(encoded[1] == 0x80) // MSB of two's complement
-        #expect(encoded.count == 9)
+        #expect(encoded == [0x0C, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
+        var offset = encoded.startIndex + 1
+        #expect(try Int64.decodeTuple(from: encoded, at: &offset) == Int64.min)
     }
 
     @Test func negativeOneEncoding() throws {

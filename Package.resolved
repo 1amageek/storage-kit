@@ -1,5 +1,5 @@
 {
-  "originHash" : "611c17594ed7a9b035cc577c5d2546b01830b3af41782d14e16052449b4565ef",
+  "originHash" : "2d7aa527db6a3a4b02d986b4f0865e2ee3da03782df1963eadb57592b754e254",
   "pins" : [
     {
       "identity" : "database-types",
@@ -15,7 +15,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/fdb-swift-bindings.git",
       "state" : {
-        "revision" : "7fd4813dd118d3fda64838de4f8375bc4fb59131"
+        "revision" : "5c276d03f3923e17046ada80586ea1de7ee941c2"
       }
     },
     {

@@ -25,7 +25,9 @@ public enum TupleTypeCode: UInt8, Sendable {
     case positiveInt6   = 0x1A
     case positiveInt7   = 0x1B
     case positiveInt8   = 0x1C
-    // 0x1D is positiveInt9 (for full UInt64 range)
+    // 0x1D and 0x0B are the extended forms: the byte after the type code is
+    // the payload width. They start above eight bytes, so the full UInt64
+    // range is already covered by positiveInt8.
     case float          = 0x20
     case double         = 0x21
     case boolFalse      = 0x26
