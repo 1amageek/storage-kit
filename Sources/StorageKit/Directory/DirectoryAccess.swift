@@ -76,24 +76,34 @@ public protocol DirectoryAccess: AnyObject, Sendable {
         transaction: any TransactionAccess
     ) async throws
 
-    /// Rejects, before any I/O, a mutation this backend's configured
-    /// transaction semantics cannot carry.
+    /// Refuses an operation this backend's configured transaction semantics
+    /// cannot carry.
     ///
-    /// Both the catalog writes (operations 2, 4, 5 and `openOrInitializeRoot`)
-    /// and a Partition write binding depend on the same detection: a row this
-    /// transaction only read must conflict with a concurrent transaction that
-    /// writes it. A backend whose configured isolation cannot produce that
-    /// conflict narrows the capability here with `unsupportedOperation` instead
-    /// of writing under semantics that admit a child below a removed parent or
-    /// data inside a removed Partition.
+    /// Two callers reach this gate and they ask for different guarantees, so
+    /// the operation is passed rather than assumed. A catalog write
+    /// (operations 2, 4, 5 and `openOrInitializeRoot`) and a Partition write
+    /// binding both need one detection: a row this transaction only read must
+    /// conflict with a concurrent transaction that writes it. A Partition read
+    /// binding needs only that its generation walk stays true for the span of
+    /// the closure, which a weaker level can still provide. A backend that
+    /// cannot give the guarantee an operation needs narrows the capability
+    /// here with `unsupportedOperation`, instead of proceeding under semantics
+    /// that admit a child below a removed parent, data inside a removed
+    /// Partition, or a removed Partition read back as an empty one.
     ///
-    /// Reads are never gated: opening, listing, and leasing stay available at
-    /// every isolation level. The default admits every operation.
-    func admitMutation(_ operation: StorageOperation) throws
+    /// A catalog write reaches this gate once its resolution reads are done
+    /// and before it writes anything, so a refusal leaves the store untouched.
+    /// A binding reaches it before any I/O.
+    ///
+    /// Catalog reads (operations 1, 3 and `openRoot`) and lease issuance never
+    /// reach it: each is a single resolution that promises nothing beyond
+    /// itself, so they stay available at every isolation level. The default
+    /// admits every operation.
+    func admit(_ operation: StorageOperation) throws
 }
 
 extension DirectoryAccess {
-    public func admitMutation(_ operation: StorageOperation) throws {}
+    public func admit(_ operation: StorageOperation) throws {}
 
     /// Operation 1 restricted to plain Directories.
     public func openDirectory(

@@ -32,7 +32,7 @@ active work to one Partition.
 |---|---|---|---|---|
 | [StorageKit module](../DESIGN.md) | parent | `TransactionReadAccess`, `TransactionAccess`, `StorageEngine.transactionDomain`, `StorageError`, `Subspace`, `Tuple` | Supplies the transaction and encoding contracts the catalog is built on. | Catalog keys use the Tuple encoding; a Tuple change is a layout change. |
 | [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess` | Realizes the same node model over the native FoundationDB Directory Layer. | A Partition is a native node whose layer bytes are `partition`; native partitions nest, so no custom layer type is used. |
-| [SQLiteStorage module](../../SQLiteStorage/DESIGN.md), [PostgreSQLStorage module](../../PostgreSQLStorage/DESIGN.md), [CloudflareDurableObjectStorage module](../../CloudflareDurableObjectStorage/DESIGN.md) | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL admits catalog mutation and Partition write binding only under `serializable`, through `admitMutation` backed by `MutationAdmission` (the rule is owned by PostgreSQLStorage). |
+| [SQLiteStorage module](../../SQLiteStorage/DESIGN.md), [PostgreSQLStorage module](../../PostgreSQLStorage/DESIGN.md), [CloudflareDurableObjectStorage module](../../CloudflareDurableObjectStorage/DESIGN.md) | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL admits catalog mutation and a Partition write binding only under `serializable`, and a Partition read binding only under an isolation level that holds a stable snapshot, through `admit` backed by `OperationAdmission` (the rule is owned by PostgreSQLStorage). |
 | database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | A Partition removal is recursive and unconditional here; the Framework decides admissibility, including whether one of its own leases is active (SPEC §12.3), before it calls. |
 
 ## Architecture
@@ -121,15 +121,25 @@ operations convert it to `StorageError.invalidDirectoryAddress`.
 | 4 | `move(_:in:to:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | whole-node rename, Partitions included; a destination parent that is absent when the write runs fails `keyNotFound` (D-13); different containing layer: `partitionBoundaryViolation`; into own subtree: `invalidDirectoryAddress`; target exists: `invalidOperation` |
 | 5 | `remove(_:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | atomic recursive removal of the node, its descendants, and their data. There is no empty-only precondition, and no lease precondition |
 
-`admitMutation(_:)` is not one of these operations. It is the synchronous
-gate a backend uses to reject, before any I/O, a mutation its configured
-transaction semantics cannot carry. It has two callers — every catalog write
-(operations 2, 4, 5 and `openOrInitializeRoot`) and every Partition write
-binding — and one default: admit. It is a protocol requirement rather than an
-extension so a backend's rule is reached through the witness table from both
-callers, including `PartitionLease`, which holds only `any DirectoryAccess`.
-Reads are never gated: a backend that cannot admit a mutation can still open,
-list, and lease.
+`admit(_:)` is not one of these operations. It is the synchronous gate a
+backend uses to refuse an operation its configured transaction semantics
+cannot carry. A catalog write reaches it once its resolution reads are done
+and before it writes anything, so a refused mutation leaves the store
+untouched; an access binding reaches it before any I/O at all, so a refused
+binding spends no round trip. It has two callers — every catalog write
+(operations 2, 4, 5 and `openOrInitializeRoot`) and every Partition access
+binding, read or write — and one default: admit. It is a protocol requirement
+rather than an extension so a backend's rule is reached through the witness
+table from both callers, including `PartitionLease`, which holds only
+`any DirectoryAccess`.
+
+The gate takes the operation because the two callers need different
+guarantees, and a backend may be able to give one and not the other. The
+catalog operations reaching it are all mutations; a binding reaches it with
+`.read` or `.write`. Catalog reads (operations 1, 3 and `openRoot`) and lease
+issuance never reach it: each is a single resolution that promises nothing
+beyond itself, so a backend that cannot admit a binding can still open, list,
+and lease.
 
 `expecting: nil` performs no tag verification and matches the FoundationDB
 empty-layer open. The stored tag is always read and returned on the resolved
@@ -264,15 +274,26 @@ Concurrent creation of the same child races on the layer allocator key; the
 backend's conflict detection (FDB, InMemory, PostgreSQL repeatable-read or
 serializable, SQLite serialization) makes one transaction fail typed. This is
 why the allocator is a read-modify-write and not an atomic add, and why every
-catalog write first passes the backend's `admitMutation`.
+catalog write first passes the backend's `admit`.
 
-A Partition write binding passes the same gate. The generation walk a binding
-performs is the same read-then-write shape: the binding reads the Partition's
+A Partition access binding passes the same gate, because a binding promises
+the leased generation for the whole span of its closure rather than for the
+instant of its generation walk.
+
+A write binding needs the same conflict a catalog write needs. The generation
+walk is the same read-then-write shape: the binding reads the Partition's
 node, the closure writes keys inside its prefix, and a concurrent removal of
 that Partition writes neither of those rows. A backend that does not turn that
 read-write dependency into a conflict admits a write into a Partition that no
-longer exists, so it must reject the write binding for the same reason it
-rejects a catalog write. `withReadAccess` stays open.
+longer exists.
+
+A read binding needs the weaker property that the walk's observation stays
+true for the closure. On a backend whose reads each take a fresh snapshot, the
+Partition can be removed after the walk and the closure's reads then return
+nothing — a removed Partition reported as an empty one, which is the synthetic
+success Layer 0 forbids. Such a backend rejects the read binding too, so the
+gate is reached on both paths and the operation tells the backend which
+guarantee is being asked for.
 
 ### Root bootstrap state machine (§8.7)
 
@@ -425,7 +446,8 @@ Bound read:
 
 ```text
 lease.withReadAccess(transaction) { access in ... }
-  - domain check, registration active check
+  - domain check, registration active check               -> local, no I/O
+  - admit(.read)                                          -> unsupportedOperation, before any I/O
   - step 3 of issuance repeated in `transaction`          -> staleLease
   - BindingScope opened; BoundReadAccess borrowed to the closure
   - every read validates key containment (L-8) and scope/lease (L-6)
@@ -440,17 +462,22 @@ Bound write:
 
 ```text
 lease.withWriteAccess(transaction) { access in ... }
-  - admitMutation(.write)                                 -> unsupportedOperation, before any I/O
-  - the read binding steps above
+  - the read binding steps above, with admit(.write)
   - BoundWriteAccess borrowed to the closure
 ```
+
+Both bindings validate in the same order: what this process already knows
+(domain, lease still held), then what the backend will admit, then the I/O
+that resolves the generation. A caller error is therefore reported as itself
+rather than as the backend's refusal, and no binding a backend would refuse
+spends a round trip.
 
 Recursive removal:
 
 ```text
 remove(name, in: parent)
   edge = read(parent layer, parent.prefix, name)          absent -> keyNotFound
-  admitMutation
+  admit(.delete)
   pending = [edge.childPrefix, tag]
   while node = pending.pop
       for each child edge page under (node layer, node.prefix)

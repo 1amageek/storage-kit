@@ -41,6 +41,13 @@ public struct PartitionLease: ~Copyable, Sendable {
 
     /// Binds read access to the Partition inside `transaction`.
     ///
+    /// A read binding promises the leased generation for the span of the
+    /// closure, not for the instant of its generation walk. A backend whose
+    /// reads each take a fresh snapshot cannot keep that promise: the
+    /// Partition can be removed after the walk, and the closure's reads then
+    /// return nothing, reporting a removed Partition as an empty one. Such a
+    /// backend refuses the binding here, before any I/O.
+    ///
     /// The binding closes on both paths, and closing completes the cleanup of
     /// every cursor it issued. A cleanup failure is reported as
     /// `PartitionBindingCleanupError`, which also carries the closure's failure
@@ -69,19 +76,18 @@ public struct PartitionLease: ~Copyable, Sendable {
 
     /// Binds read and write access to the Partition inside `transaction`.
     ///
-    /// The binding is admitted before any I/O. A write bound to this
-    /// Partition's generation must conflict with that Partition's concurrent
-    /// removal, which is the same read-then-write detection the catalog
-    /// depends on: the generation walk only reads the node the removal writes.
-    /// A backend whose configured transaction semantics cannot produce that
-    /// conflict rejects the write binding here, so a write is never admitted
-    /// into a Partition the store may already have removed. `withReadAccess`
-    /// is unaffected.
+    /// A write binding asks for more than a read binding: a write bound to
+    /// this Partition's generation must conflict with that Partition's
+    /// concurrent removal, which is the same read-then-write detection the
+    /// catalog depends on, because the generation walk only reads the node the
+    /// removal writes. A backend whose configured transaction semantics cannot
+    /// produce that conflict refuses the write binding here, before any I/O,
+    /// so a write is never admitted into a Partition the store may already
+    /// have removed.
     public nonisolated(nonsending) func withWriteAccess<R>(
         _ transaction: any TransactionAccess,
         _ body: (borrowing BoundWriteAccess) async throws -> R
     ) async throws -> R {
-        try directoryAccess.admitMutation(.write)
         try await requireBinding(of: transaction, operation: .write)
         let scope = PartitionBindingScope()
         let access = BoundWriteAccess(
@@ -133,8 +139,16 @@ public struct PartitionLease: ~Copyable, Sendable {
         }
     }
 
-    /// Validates the binding: same domain, lease still held, and the Partition
-    /// still the generation this lease was issued for.
+    /// Validates the binding: same domain, lease still held, the backend able
+    /// to carry `operation`, and the Partition still the generation this lease
+    /// was issued for.
+    ///
+    /// The three stages run in that order because each is a precondition of
+    /// the next being meaningful. What this process already knows costs
+    /// nothing and settles a caller error as itself rather than as the
+    /// backend's refusal; the backend's admission is synchronous and decides
+    /// whether the binding can exist at all; only then is a round trip worth
+    /// spending on the generation.
     ///
     /// The generation walk runs on every bind, including a bind to the
     /// transaction that issued the lease. Exempting that transaction would
@@ -149,6 +163,22 @@ public struct PartitionLease: ~Copyable, Sendable {
         of transaction: any TransactionReadAccess,
         operation: StorageOperation
     ) async throws {
+        try requireLocalAuthority(of: transaction, operation: operation)
+        try directoryAccess.admit(operation)
+        try await directoryAccess.requirePartitionGeneration(
+            partition,
+            operation: operation,
+            transaction: transaction
+        )
+    }
+
+    /// The part of a binding this process settles without the backend: the
+    /// transaction belongs to the Partition's engine, and the lease is still
+    /// held.
+    private func requireLocalAuthority(
+        of transaction: any TransactionReadAccess,
+        operation: StorageOperation
+    ) throws {
         guard transaction.transactionDomain === partition.domain else {
             throw StorageError.storageDomainMismatch(
                 "Transaction belongs to a different storage engine than the leased Partition",
@@ -157,11 +187,6 @@ public struct PartitionLease: ~Copyable, Sendable {
             )
         }
         try registration.requireActive(operation: operation, backend: bounds.backend)
-        try await directoryAccess.requirePartitionGeneration(
-            partition,
-            operation: operation,
-            transaction: transaction
-        )
     }
 
     deinit {

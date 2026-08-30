@@ -13,25 +13,29 @@ import DatabaseTypes
 /// every descendant of a Partition lies inside that Partition's prefix range.
 /// The layout is fixed by `DESIGN.md`; changing it is a layout change.
 public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
-    /// Backend-owned admission check run before the catalog writes anything.
+    /// Backend-owned admission check, run before the catalog writes anything
+    /// and before an access binding does any I/O.
     ///
-    /// A backend whose configured isolation cannot detect the read-then-write
-    /// conflicts the catalog relies on (PostgreSQL `readCommitted`) rejects the
-    /// mutation here with a typed failure instead of committing an unsafe write.
-    public typealias MutationAdmission = @Sendable (StorageOperation) throws -> Void
+    /// A backend whose configured transaction semantics cannot give an
+    /// operation the guarantee it depends on refuses it here with a typed
+    /// failure instead of proceeding. The operation is passed because the
+    /// guarantees differ: a write needs the read-then-write conflict the
+    /// catalog relies on, a read binding only needs its generation walk to
+    /// stay true for the span of the closure.
+    public typealias OperationAdmission = @Sendable (StorageOperation) throws -> Void
 
     public let transactionDomain: StorageTransactionDomain
     public let backend: StorageBackend
-    private let mutationAdmission: MutationAdmission?
+    private let operationAdmission: OperationAdmission?
 
     public init(
         transactionDomain: StorageTransactionDomain,
         backend: StorageBackend,
-        mutationAdmission: MutationAdmission? = nil
+        operationAdmission: OperationAdmission? = nil
     ) {
         self.transactionDomain = transactionDomain
         self.backend = backend
-        self.mutationAdmission = mutationAdmission
+        self.operationAdmission = operationAdmission
     }
 
     // MARK: - Layout
@@ -139,7 +143,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             return rootDirectory
         }
         try await requireRootHoldsNoForeignData(transaction: transaction, operation: .initialize)
-        try admitMutation(.initialize)
+        try admit(.initialize)
         try transaction.setValue(Tuple(Layout.firstNumber).pack(), for: rootAllocatorKey)
         return rootDirectory
     }
@@ -252,7 +256,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             try requireLayer(edge.layer, expected: layer, name: name, operation: .write)
             return directory(at: address, edge: edge, layerRoot: layerRoot)
         }
-        try admitMutation(.write)
+        try admit(.write)
         let number = try await allocateNumber(layerRoot: layerRoot, transaction: transaction)
         let prefix = Layout.contentPrefix(layerRoot: layerRoot, number: number)
         try transaction.setValue(
@@ -384,7 +388,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
                 message: "Node '\(newName)' already exists in the destination Directory"
             )
         }
-        try admitMutation(.write)
+        try admit(.write)
         try transaction.clear(
             key: Layout.edgeKey(
                 layerRoot: layerRoot,
@@ -424,7 +428,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
                 operation: .delete
             )
         }
-        try admitMutation(.delete)
+        try admit(.delete)
         try await clearSubtree(of: edge, layerRoot: layerRoot, transaction: transaction)
         try transaction.clear(
             key: Layout.edgeKey(
@@ -669,9 +673,9 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         )
     }
 
-    public func admitMutation(_ operation: StorageOperation) throws {
-        guard let mutationAdmission else { return }
-        try mutationAdmission(operation)
+    public func admit(_ operation: StorageOperation) throws {
+        guard let operationAdmission else { return }
+        try operationAdmission(operation)
     }
 
     private func requireListLimit(_ limit: Int) throws {

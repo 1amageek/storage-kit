@@ -75,20 +75,41 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     /// remover's rows are disjoint, so PostgreSQL's snapshot isolation lets
     /// both commit and leaves a child under a removed parent or data inside a
     /// removed Partition. Only SERIALIZABLE turns the read-write dependency
-    /// into a serialization failure the caller's runner retries, so every other
-    /// level is rejected before any I/O. Reads, lease issuance, and read
-    /// bindings remain available at every isolation level.
-    private static func directoryMutationAdmission(
+    /// into a serialization failure the caller's runner retries, so every
+    /// other level refuses a catalog write and a write binding.
+    ///
+    /// A Partition read binding asks for less. It promises the leased
+    /// generation for the span of its closure, which holds as long as the
+    /// closure's reads see what the generation walk saw. REPEATABLE READ gives
+    /// exactly that with its transaction-level snapshot. READ COMMITTED takes
+    /// a fresh snapshot per statement, so a Partition removed after the walk
+    /// reads back as an empty one — a removed Partition reported as success —
+    /// and the read binding is refused there too.
+    ///
+    /// Catalog reads, lease issuance, and data-row operations outside a
+    /// binding never reach this gate and stay available at every level.
+    private static func directoryOperationAdmission(
         isolationLevel: PostgreSQLIsolationLevel
-    ) -> KeyValueDirectoryCatalog.MutationAdmission? {
+    ) -> KeyValueDirectoryCatalog.OperationAdmission? {
         guard isolationLevel != .serializable else { return nil }
         let configuredLevel = isolationLevel.sqlName
+        let holdsSnapshotAcrossStatements = isolationLevel == .repeatableRead
         return { operation in
-            throw StorageError.unsupportedOperation(
-                "Directory catalog mutation and Partition write binding require SERIALIZABLE isolation; this engine is configured with \(configuredLevel)",
-                operation: operation,
-                backend: .postgreSQL
-            )
+            switch operation {
+            case .read, .rangeRead:
+                guard !holdsSnapshotAcrossStatements else { return }
+                throw StorageError.unsupportedOperation(
+                    "A Partition read binding requires REPEATABLE READ or SERIALIZABLE isolation; this engine is configured with \(configuredLevel)",
+                    operation: operation,
+                    backend: .postgreSQL
+                )
+            default:
+                throw StorageError.unsupportedOperation(
+                    "Directory catalog mutation and Partition write binding require SERIALIZABLE isolation; this engine is configured with \(configuredLevel)",
+                    operation: operation,
+                    backend: .postgreSQL
+                )
+            }
         }
     }
 
@@ -129,7 +150,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         self.directoryAccess = KeyValueDirectoryCatalog(
             transactionDomain: domain,
             backend: .postgreSQL,
-            mutationAdmission: Self.directoryMutationAdmission(
+            operationAdmission: Self.directoryOperationAdmission(
                 isolationLevel: configuration.isolationLevel
             )
         )

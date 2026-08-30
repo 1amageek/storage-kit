@@ -26,7 +26,7 @@ SPEC §7.3.
 | `PostgreSQLStorageTransaction`: buffered writes, read-your-writes replay for point reads, buffer flush before range reads, advisory-lock atomics, `BEGIN ISOLATION LEVEL …` through `COMMIT`/`ROLLBACK`, exactly-once connection release | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
 | `PostgreSQLBindingBytes`: one copy of each bound key or value into independently owned `ByteBuffer` storage | `PartitionLease` (StorageKit) |
 | `PostgreSQLResultBytesOwner` / `PostgreSQLResultBytesFactory` / `PostgreSQLResultBytesLifecycleObserver`: result byte ownership and lifecycle evidence | Framework binding of `#Directory` declarations |
-| Catalog placement and the SERIALIZABLE-only mutation admission rule (PG-3) | Retry policy (owned by the caller's transaction runner) |
+| Catalog placement and the isolation-level operation admission rule (PG-3) | Retry policy (owned by the caller's transaction runner) |
 
 Authority: catalog rows in the configured relation are the sole existence
 authority for Directories and Partitions of this backend (SPEC §12.3, package
@@ -38,7 +38,7 @@ invariant P-4).
 |---|---|---|---|---|
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to database-framework. |
 | [StorageKit module](../StorageKit/DESIGN.md) | depends on | `StorageEngine`, `TransactionReadAccess`, `TransactionAccess`, `Transaction`, `StorageEngineLifecycle`, `ActiveTransactionContext`, `StorageError` | Supplies the contracts this adapter realizes and the nested-transaction context. | A nested transaction merges its buffer into the parent on `commit()`; only the parent issues `COMMIT`. |
-| [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `KeyValueDirectoryCatalog`, `KeyValueDirectoryCatalog.MutationAdmission`, `StorageTransactionDomain` | The catalog realization, parameterized by the isolation-level admission rule. | The catalog decides existence by read-then-write across rows the other transaction writes; only SERIALIZABLE detects that conflict (PG-3). |
+| [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `KeyValueDirectoryCatalog`, `KeyValueDirectoryCatalog.OperationAdmission`, `StorageTransactionDomain` | The catalog realization, parameterized by the isolation-level admission rule. | The catalog decides existence by read-then-write across rows the other transaction writes and only SERIALIZABLE detects that conflict; a Partition read binding additionally needs a snapshot that outlives its generation walk (PG-3). |
 | [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `PostgreSQLDirectoryConformanceTests` against a real server. | Each test uses a unique relation name so parallel suites never share catalog state. |
 | `postgres-nio` | depends on | `PostgresClient`, `PostgresQuery`, `ByteBuffer` bindings | Connection pool and query execution. | `PostgresClient` exposes only scoped `withConnection`; lazily acquired connections are parked on a continuation (PG-5). Parameters may outlive the source borrow (PG-6). |
 
@@ -49,7 +49,7 @@ PostgreSQLStorageEngine
   ├─ client: PostgresClient + runTask                  pool run loop
   ├─ configuration: PostgreSQLConfiguration            isolation, tableName, schema policy
   ├─ transactionDomain: StorageTransactionDomain       identity + lease issuance gate
-  ├─ directoryAccess: KeyValueDirectoryCatalog         mutationAdmission = non-SERIALIZABLE rejection
+  ├─ directoryAccess: KeyValueDirectoryCatalog         operationAdmission = isolation-level rule
   ├─ resultBytesFactory: PostgreSQLResultBytesFactory  result byte owners (+ lifecycle observer in tests)
   └─ creates PostgreSQLStorageTransaction
            ├─ eager   (withTransaction): engine-owned connection and BEGIN/COMMIT/ROLLBACK
@@ -70,7 +70,7 @@ package depends on `PostgreSQLStorage`.
 | Field | Contract |
 |---|---|
 | `clientConfiguration` | `PostgresClient.Configuration` (host, port, unix socket, credentials, TLS, pool limits). |
-| `isolationLevel` | `.serializable` (default), `.repeatableRead`, or `.readCommitted`; emitted as `BEGIN ISOLATION LEVEL <name>`. Catalog mutation requires `.serializable` (PG-3). |
+| `isolationLevel` | `.serializable` (default), `.repeatableRead`, or `.readCommitted`; emitted as `BEGIN ISOLATION LEVEL <name>`. Catalog mutation and a Partition write binding require `.serializable`; a Partition read binding requires `.repeatableRead` or `.serializable` (PG-3). |
 | `tableName` | Bare SQL identifier validated by `validateTableName` before any SQL text is built; an invalid name fails `init` instead of corrupting a query. |
 | Schema policy | `createIfNeeded` issues `CREATE TABLE IF NOT EXISTS <tableName> (key BYTEA NOT NULL PRIMARY KEY, value BYTEA NOT NULL)` at `init`; `assumeExists` skips DDL for roles without DDL privileges. |
 | `PostgreSQLConnectionBudget` | `cloudRunMaxInstances * connectionsPerInstance + reservedConnections <= cloudSQLMaxConnections`, validated when building a production configuration. |
@@ -79,10 +79,10 @@ package depends on `PostgreSQLStorage`.
 
 | Element | Realization |
 |---|---|
-| Catalog | `KeyValueDirectoryCatalog(transactionDomain:backend: .postgreSQL, mutationAdmission:)` |
+| Catalog | `KeyValueDirectoryCatalog(transactionDomain:backend: .postgreSQL, operationAdmission:)` |
 | Catalog keys | allocator `[0xFE, 0x61]`, node keys `[0xFE, 0x6E] + Tuple(parentPrefix, kind, name)`; rows in the configured relation beside data rows |
 | Directory root prefix | catalog-allocated `Tuple(Int64).pack()`; root Directory uses number `0` |
-| Mutation admission | `nil` for `.serializable`; for `.repeatableRead` and `.readCommitted` a closure that throws `unsupportedOperation` for every catalog write while reads stay available |
+| Operation admission | `nil` for `.serializable`; otherwise a closure that throws `unsupportedOperation` for every catalog write and every Partition write binding, and — under `.readCommitted` only — for a Partition read binding. Catalog reads and lease issuance stay available at every level |
 
 ### Invariants
 
@@ -90,7 +90,7 @@ package depends on `PostgreSQLStorage`.
 |---|---|
 | PG-1 | Every transaction runs inside one `BEGIN ISOLATION LEVEL …` block on one connection; `COMMIT` succeeds at most once and `ROLLBACK` completes cleanup; concurrent commit or cancel callers observe the same single completion. |
 | PG-2 | Catalog rows and data rows of one transaction commit in the same PostgreSQL transaction. |
-| PG-3 | Catalog writes (operations 2, 4, 5 and `openOrInitializeRoot`) and Partition write bindings (`PartitionLease.withWriteAccess`) are admitted only under `.serializable`; under `.repeatableRead` and `.readCommitted` they fail with `unsupportedOperation` before any I/O, while the read operations (1, 3 and `openRoot`), lease issuance, and `withReadAccess` remain available. The invariant being enforced is that a parent a catalog walk observed conflicts with its concurrent removal, that a removal conflicts with a child created concurrently below it, and that a write bound to a Partition generation conflicts with that Partition's concurrent removal. `.repeatableRead` gives none of the three: the walk's parent read, the removal's child scan, and the binding's generation read are each disjoint from the rows the other transaction writes, so both commit and leave a child under a removed parent or data under a removed Partition. Only `.serializable` turns those read-write dependencies into a serialization failure, which the caller's runner retries. Data-row operations outside a write binding are unaffected by this rule. |
+| PG-3 | Admission is decided by the configured isolation level, and the two callers need different guarantees. Catalog writes (operations 2, 4, 5 and `openOrInitializeRoot`) and Partition write bindings (`PartitionLease.withWriteAccess`) are admitted only under `.serializable`. A Partition read binding (`PartitionLease.withReadAccess`) is admitted under `.serializable` and `.repeatableRead`, and refused under `.readCommitted`. The read operations (1, 3 and `openRoot`), lease issuance, and data-row operations outside a binding are unaffected at every level. A refused catalog write fails before it writes anything, leaving the store untouched; a refused binding fails before any I/O. A write needs a read-write conflict: a parent a catalog walk observed must conflict with its concurrent removal, a removal with a child created concurrently below it, and a write bound to a Partition generation with that Partition's concurrent removal. `.repeatableRead` gives none of the three, because the walk's parent read, the removal's child scan, and the binding's generation read are each disjoint from the rows the other transaction writes, so both commit and leave a child under a removed parent or data under a removed Partition; only `.serializable` turns those read-write dependencies into a serialization failure the caller's runner retries. A read binding needs only that its generation walk stays true for the span of the closure, which the transaction-level snapshot of `.repeatableRead` already gives. `.readCommitted` takes a fresh snapshot per statement, so a Partition removed after the walk reads back as an empty one — a removed Partition reported as success, which Layer 0 forbids. |
 | PG-4 | A nested transaction reuses the parent's connection; `commit()` merges its buffer into the parent and `cancel()` discards it; neither touches the native transaction. |
 | PG-5 | A lazily acquired connection is leased exactly once per transaction: concurrent first-touch callers share one acquisition task, and `commit()` or `cancel()` releases the parked connection exactly once. |
 | PG-6 | Each bound key or value is copied exactly once from the `ByteString` borrow into final independently owned `ByteBuffer` storage, because PostgresNIO may retain the parameter after the borrow returns. |
@@ -104,7 +104,7 @@ Directory create under `.serializable` (operation 2):
 
 ```text
 KeyValueDirectoryCatalog.openOrCreateDirectory
-  -> mutationAdmission == nil                      (PG-3 not triggered)
+  -> operationAdmission == nil                     (PG-3 not triggered)
   -> transaction.getValue(nodeKey)                 SELECT … (buffer replay first, PG-9)
   -> absent: allocate prefix, setValue(nodeKey)    buffered
   -> commit: flush buffer -> INSERT/UPDATE rows -> COMMIT (PG-1, PG-2)
@@ -138,7 +138,7 @@ createTransaction() -> no connection yet
   caller's retry policy.
 - Isolation is a StorageKit configuration contract, not a driver default; a level
   below SERIALIZABLE narrows the Directory capability (PG-3) instead of weakening
-  its semantics.
+  its semantics, and READ COMMITTED narrows it further than REPEATABLE READ.
 - Connection demand is bounded by `PostgreSQLConnectionBudget` at configuration time;
   the pool never grows past the driver configuration.
 - Key, value, mutation, and Directory bounds are the StorageKit bounds.
