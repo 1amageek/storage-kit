@@ -206,9 +206,38 @@ struct CloudflareDurableObjectStorageWireClientTests {
         }
     }
 
-    private func makeEngine() async throws -> CloudflareDurableObjectStorageEngine {
+    /// The transaction owner must report an unknown commit outcome as that
+    /// outcome. Cancelling after it would ask the same transaction to complete
+    /// again, which reports `commitUnknownResult` a second time and would
+    /// replace the caller's `requiresIdempotency` disposition with a
+    /// `StorageTransactionCleanupError`.
+    @Test func unknownCommitOutcomeSurvivesTheTransactionOwner() async throws {
+        let engine = try await makeEngine(
+            transport: CommitFailingCloudflareDurableObjectStorageTransport()
+        )
+
+        do {
+            try await engine.withTransaction { transaction in
+                try transaction.setValue([0x01], for: [0x01])
+            }
+            Issue.record("Expected commit unknown result")
+        } catch let error as StorageTransactionCleanupError {
+            Issue.record(
+                "Unknown commit outcome was replaced by a cleanup failure: \(error)"
+            )
+        } catch let error as StorageError {
+            #expect(error.code == .commitUnknownResult)
+            #expect(error.operation == .commit)
+            #expect(error.retryDisposition == .requiresIdempotency)
+        }
+    }
+
+    private func makeEngine(
+        transport: any CloudflareDurableObjectStorageTransport =
+            InMemoryCloudflareDurableObjectStorageTransport()
+    ) async throws -> CloudflareDurableObjectStorageEngine {
         let client = CloudflareDurableObjectStorageWireClient(
-            transport: InMemoryCloudflareDurableObjectStorageTransport()
+            transport: transport
         )
         let partitionIdentity = try StoragePartitionIdentity(databaseID: "main")
         return try await CloudflareDurableObjectSharedClientRouter(

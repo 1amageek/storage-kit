@@ -75,9 +75,26 @@ public protocol DirectoryAccess: AnyObject, Sendable {
         in parent: Directory,
         transaction: any TransactionAccess
     ) async throws
+
+    /// Rejects, before any I/O, a mutation this backend's configured
+    /// transaction semantics cannot carry.
+    ///
+    /// Both the catalog writes (operations 2, 4, 5 and `openOrInitializeRoot`)
+    /// and a Partition write binding depend on the same detection: a row this
+    /// transaction only read must conflict with a concurrent transaction that
+    /// writes it. A backend whose configured isolation cannot produce that
+    /// conflict narrows the capability here with `unsupportedOperation` instead
+    /// of writing under semantics that admit a child below a removed parent or
+    /// data inside a removed Partition.
+    ///
+    /// Reads are never gated: opening, listing, and leasing stay available at
+    /// every isolation level. The default admits every operation.
+    func admitMutation(_ operation: StorageOperation) throws
 }
 
 extension DirectoryAccess {
+    public func admitMutation(_ operation: StorageOperation) throws {}
+
     /// Operation 1 restricted to plain Directories.
     public func openDirectory(
         _ name: String,

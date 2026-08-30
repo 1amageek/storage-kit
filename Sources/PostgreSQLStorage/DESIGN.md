@@ -26,7 +26,7 @@ SPEC §7.3.
 | `PostgreSQLStorageTransaction`: buffered writes, read-your-writes replay for point reads, buffer flush before range reads, advisory-lock atomics, `BEGIN ISOLATION LEVEL …` through `COMMIT`/`ROLLBACK`, exactly-once connection release | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
 | `PostgreSQLBindingBytes`: one copy of each bound key or value into independently owned `ByteBuffer` storage | `PartitionLease` (StorageKit) |
 | `PostgreSQLResultBytesOwner` / `PostgreSQLResultBytesFactory` / `PostgreSQLResultBytesLifecycleObserver`: result byte ownership and lifecycle evidence | Framework binding of `#Directory` declarations |
-| Catalog placement and the READ COMMITTED mutation admission rule (PG-3) | Retry policy (owned by the caller's transaction runner) |
+| Catalog placement and the SERIALIZABLE-only mutation admission rule (PG-3) | Retry policy (owned by the caller's transaction runner) |
 
 Authority: catalog rows in the configured relation are the sole existence
 authority for Directories and Partitions of this backend (SPEC §12.3, package
@@ -49,7 +49,7 @@ PostgreSQLStorageEngine
   ├─ client: PostgresClient + runTask                  pool run loop
   ├─ configuration: PostgreSQLConfiguration            isolation, tableName, schema policy
   ├─ transactionDomain: StorageTransactionDomain       identity + lease issuance gate
-  ├─ directoryAccess: KeyValueDirectoryCatalog         mutationAdmission = READ COMMITTED rejection
+  ├─ directoryAccess: KeyValueDirectoryCatalog         mutationAdmission = non-SERIALIZABLE rejection
   ├─ resultBytesFactory: PostgreSQLResultBytesFactory  result byte owners (+ lifecycle observer in tests)
   └─ creates PostgreSQLStorageTransaction
            ├─ eager   (withTransaction): engine-owned connection and BEGIN/COMMIT/ROLLBACK
@@ -90,7 +90,7 @@ package depends on `PostgreSQLStorage`.
 |---|---|
 | PG-1 | Every transaction runs inside one `BEGIN ISOLATION LEVEL …` block on one connection; `COMMIT` succeeds at most once and `ROLLBACK` completes cleanup; concurrent commit or cancel callers observe the same single completion. |
 | PG-2 | Catalog rows and data rows of one transaction commit in the same PostgreSQL transaction. |
-| PG-3 | Catalog writes (operations 2, 4, 5 and `openOrInitializeRoot`) are admitted only under `.serializable`; under `.repeatableRead` and `.readCommitted` they fail with `unsupportedOperation` before any catalog I/O, while the read operations (1, 3 and `openRoot`) remain available. The invariant being enforced is that a parent a catalog walk observed conflicts with its concurrent removal, and that a removal conflicts with a child created concurrently below it. `.repeatableRead` gives neither: the walk's parent read and the removal's child scan are disjoint from the rows the other statement writes, so both transactions commit and leave a child under a removed parent. Only `.serializable` turns that read-write dependency into a serialization failure, which the caller's runner retries. Data-row operations are unaffected by this rule. |
+| PG-3 | Catalog writes (operations 2, 4, 5 and `openOrInitializeRoot`) and Partition write bindings (`PartitionLease.withWriteAccess`) are admitted only under `.serializable`; under `.repeatableRead` and `.readCommitted` they fail with `unsupportedOperation` before any I/O, while the read operations (1, 3 and `openRoot`), lease issuance, and `withReadAccess` remain available. The invariant being enforced is that a parent a catalog walk observed conflicts with its concurrent removal, that a removal conflicts with a child created concurrently below it, and that a write bound to a Partition generation conflicts with that Partition's concurrent removal. `.repeatableRead` gives none of the three: the walk's parent read, the removal's child scan, and the binding's generation read are each disjoint from the rows the other transaction writes, so both commit and leave a child under a removed parent or data under a removed Partition. Only `.serializable` turns those read-write dependencies into a serialization failure, which the caller's runner retries. Data-row operations outside a write binding are unaffected by this rule. |
 | PG-4 | A nested transaction reuses the parent's connection; `commit()` merges its buffer into the parent and `cancel()` discards it; neither touches the native transaction. |
 | PG-5 | A lazily acquired connection is leased exactly once per transaction: concurrent first-touch callers share one acquisition task, and `commit()` or `cancel()` releases the parked connection exactly once. |
 | PG-6 | Each bound key or value is copied exactly once from the `ByteString` borrow into final independently owned `ByteBuffer` storage, because PostgresNIO may retain the parameter after the borrow returns. |
@@ -136,8 +136,9 @@ createTransaction() -> no connection yet
 - All native failures cross the boundary as `StorageError` with `backend == .postgreSQL`
   through the engine's `mapError`; serialization failures are typed and left to the
   caller's retry policy.
-- Isolation is a StorageKit configuration contract, not a driver default; READ COMMITTED
-  narrows the Directory capability (PG-3) instead of weakening its semantics.
+- Isolation is a StorageKit configuration contract, not a driver default; a level
+  below SERIALIZABLE narrows the Directory capability (PG-3) instead of weakening
+  its semantics.
 - Connection demand is bounded by `PostgreSQLConnectionBudget` at configuration time;
   the pool never grows past the driver configuration.
 - Key, value, mutation, and Directory bounds are the StorageKit bounds.
@@ -147,7 +148,7 @@ createTransaction() -> no connection yet
 | Contract | Evidence |
 |---|---|
 | D-1…D-12, operations 1–5, root bootstrap, L-1…L-3, L-7, L-8 | `Tests/PostgreSQLStorageTests/PostgreSQLDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps with a unique relation per test) |
-| PG-3 | `PostgreSQLDirectoryConformanceTests.readCommittedRejectsCatalogMutation` |
+| PG-3 | `PostgreSQLDirectoryConformanceTests.readCommittedRejectsCatalogMutation`, `repeatableReadRejectsCatalogMutation`, `repeatableReadRejectsPartitionWriteBinding` (which also asserts that lease issuance and `withReadAccess` still work) |
 | PG-1, PG-2, PG-4, PG-9, transaction semantics | `PostgreSQLStorageTests`, `DatabaseFrameworkTransactionContractTests` |
 | PG-5, PG-8 | `PostgreSQLClientLifecycleTests` (with `PostgreSQLClientLifecycleLogRecorder`) |
 | PG-6 | `PostgreSQLBindingBytesTests` |

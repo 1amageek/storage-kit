@@ -66,16 +66,26 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     private let resultBytesFactory: PostgreSQLResultBytesFactory
 
     /// The Directory catalog decides existence by reading a node and then
-    /// writing it in the same transaction. READ COMMITTED does not detect that
-    /// read-then-write conflict, so catalog mutation is rejected up front; reads
-    /// remain available at every isolation level.
+    /// writing elsewhere in the same transaction, and a Partition write binding
+    /// reads the Partition's node and then writes inside its prefix. Both
+    /// depend on that read conflicting with a concurrent transaction that
+    /// removes the node.
+    ///
+    /// REPEATABLE READ does not give that conflict. The reader's row and the
+    /// remover's rows are disjoint, so PostgreSQL's snapshot isolation lets
+    /// both commit and leaves a child under a removed parent or data inside a
+    /// removed Partition. Only SERIALIZABLE turns the read-write dependency
+    /// into a serialization failure the caller's runner retries, so every other
+    /// level is rejected before any I/O. Reads, lease issuance, and read
+    /// bindings remain available at every isolation level.
     private static func directoryMutationAdmission(
         isolationLevel: PostgreSQLIsolationLevel
     ) -> KeyValueDirectoryCatalog.MutationAdmission? {
-        guard isolationLevel == .readCommitted else { return nil }
+        guard isolationLevel != .serializable else { return nil }
+        let configuredLevel = isolationLevel.sqlName
         return { operation in
             throw StorageError.unsupportedOperation(
-                "Directory catalog mutation requires REPEATABLE READ or SERIALIZABLE isolation; this engine is configured with READ COMMITTED",
+                "Directory catalog mutation and Partition write binding require SERIALIZABLE isolation; this engine is configured with \(configuredLevel)",
                 operation: operation,
                 backend: .postgreSQL
             )
@@ -273,6 +283,11 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
         }
     }
 
+    /// Overridden only to reuse an already-active transaction, to hold the
+    /// pooled connection for the whole block, and to keep a non-`StorageError`
+    /// operation failure from being remapped by the connection scope. Commit
+    /// and cancellation stay with `TransactionLifecycleOwner`, which owns the
+    /// unknown-commit rule.
     public func executeTransaction(
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
@@ -308,26 +323,12 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                     resultBytesFactory: resultBytesFactory
                 )
 
-                return try await ActiveTransactionContext
-                    .withActiveTransaction(tx) { _ in
+                let owner = TransactionLifecycleOwner(transaction: tx)
+                try await owner.execute { access in
                     do {
-                        do {
-                            try await operation(tx)
-                        } catch {
-                            let operationError = Self.preserveTransactionBodyFailure(from: error)
-                            do {
-                                try await tx.rollbackInternal(connection: conn)
-                            } catch {
-                                throw StorageTransactionCleanupError(
-                                    operationError: operationError,
-                                    cancellationError: error
-                                )
-                            }
-                            throw operationError
-                        }
-                        try await tx.commitInternal(connection: conn)
+                        try await operation(access)
                     } catch {
-                        throw error
+                        throw Self.preserveTransactionBodyFailure(from: error)
                     }
                 }
             }
@@ -404,8 +405,14 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     private static func recoverTransactionBodyFailure(
         from error: any Error
     ) -> any Error {
-        if error is StorageTransactionCleanupError {
-            return error
+        if let cleanupError = error as? StorageTransactionCleanupError {
+            guard
+                let bodyFailure = cleanupError.operationError
+                    as? TransactionBodyFailure
+            else {
+                return cleanupError
+            }
+            return cleanupError.replacingOperationError(bodyFailure.underlying)
         }
         if let operationError = error as? TransactionBodyFailure {
             return operationError.underlying

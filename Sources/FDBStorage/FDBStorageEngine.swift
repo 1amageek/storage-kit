@@ -214,51 +214,22 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         }
     }
 
+    /// Overridden only to build the FoundationDB transaction and to convert a
+    /// native `FDBError` thrown by the operation. Commit and cancellation stay
+    /// with `TransactionLifecycleOwner`, which owns the unknown-commit rule.
     public func executeTransaction(
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
-        let tx = try createTransaction()
-        try await ActiveTransactionContext.withActiveTransaction(
-            tx
-        ) { _ in
+        let owner = TransactionLifecycleOwner(transaction: try createTransaction())
+        try await owner.execute { access in
             do {
-                try await operation(tx)
+                try await operation(access)
             } catch let error as FDBError {
-                let converted = FDBStorageTransaction.convertFDBError(
+                throw FDBStorageTransaction.convertFDBError(
                     error,
                     operation: .execute
                 )
-                try await cancel(tx, preserving: converted)
-                throw converted
-            } catch {
-                try await cancel(tx, preserving: error)
-                throw error
             }
-
-            do {
-                try await tx.commit()
-            } catch {
-                if let storageError = error as? StorageError,
-                   storageError.code == .commitUnknownResult {
-                    throw storageError
-                }
-                try await cancel(tx, preserving: error)
-                throw error
-            }
-        }
-    }
-
-    private func cancel(
-        _ transaction: FDBStorageTransaction,
-        preserving operationError: any Error
-    ) async throws {
-        do {
-            try await transaction.cancel()
-        } catch {
-            throw StorageTransactionCleanupError(
-                operationError: operationError,
-                cancellationError: error
-            )
         }
     }
 

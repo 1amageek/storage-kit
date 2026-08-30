@@ -73,7 +73,7 @@ Layering inside the module:
 | `transactionDomain` | One domain per engine instance; every transaction, Directory, Partition, and lease produced by the engine carries this domain. It also owns the shutdown gate that closes lease issuance. |
 | `directoryAccess` | Exactly one `DirectoryAccess` realization; no protocol default. |
 | `createTransaction()` | Admission through `StorageEngineLifecycle`; rejected with `invalidOperation` after `requestShutdown()`. |
-| `executeTransaction(_:)` | Runs the operation under `TransactionLifecycleOwner`: commit on success, cancel on failure, operation and cleanup failures preserved as `StorageTransactionCleanupError`. |
+| `executeTransaction(_:)` | Runs the operation under `TransactionLifecycleOwner`: commit on success, cancel on failure, operation and cleanup failures preserved as `StorageTransactionCleanupError`, and a commit whose outcome is unknown rethrown unwrapped without cancellation. A backend overrides this member only to construct its own transaction and to convert its native body failures; the owner still completes it. |
 | `leasePartition(_:transaction:)` | Extension; issues `PartitionLease` after a domain check, a shutdown check, and generation validation in the caller's transaction. Every later binding of that lease revalidates in its own transaction (details in the Directory component design). |
 | `requestShutdown()` / `waitUntilShutdown()` | Shutdown rejects new transactions and new lease issuance, then completes admitted backend cleanup. It does not wait for outstanding leases: a lease after shutdown cannot perform I/O because transaction admission is closed, and waiting would let a leaked lease hang shutdown. |
 
@@ -102,9 +102,19 @@ holding deterministic path-derived prefixes is foreign data and is rejected
 - `execute(operation:)` borrows the transaction as `any TransactionAccess` to
   the operation inside `ActiveTransactionContext`, commits on success, cancels
   on failure, and returns or throws exactly one outcome.
-- Adapters that must not cancel after a particular commit failure (FDB
-  `commitUnknownResult`) express that through the owner's
-  `retainsTransactionAfterCommitFailure` predicate rather than by bypassing the
+- The owner decides the disposition of a commit failure itself, from the
+  failure. A commit that failed `commitUnknownResult` is rethrown unwrapped and
+  is never followed by a cancellation, because the transaction may already have
+  been applied and a backend that reached that state reports the same unknown
+  outcome from its own cancellation, which would replace the outcome with
+  `StorageTransactionCleanupError`. Every other commit failure is followed by
+  the cancellation. This rule is universal, not adapter-supplied:
+  `commitUnknownResult` is a Layer 0 meaning with one retry disposition
+  (`requiresIdempotency`), so a per-adapter predicate would only re-admit the
+  cross-backend divergence it is meant to prevent.
+- `FDBStorage` and `PostgreSQLStorage` override `executeTransaction` to
+  construct their transaction and to convert their native body failures, then
+  complete it through the owner. No backend commits or cancels around the
   owner.
 
 ## State, Ownership, and Lifecycle
@@ -138,6 +148,7 @@ holding deterministic path-derived prefixes is foreign data and is rejected
 | Cursor advance ordering, post-advance validation, finish coordination | `Tests/StorageKitTests/TransactionRangeCleanupTests.swift` |
 | Directory, Partition, root bootstrap, lease contracts on the reference engine | `Tests/StorageKitTests/InMemoryDirectoryConformanceTests.swift` driving `StorageKitConformance` |
 | Reference-only escape and compile-level attenuation | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
+| Sole commit authority: an unknown commit outcome reaches the caller unwrapped and uncancelled | `Tests/CloudflareDurableObjectStorageTests/CloudflareDurableObjectStorageWireClientTests.swift` |
 
 Changing any public contract here requires re-verifying every adapter module
 through the shared `StorageKitConformance` fixture and the database-framework

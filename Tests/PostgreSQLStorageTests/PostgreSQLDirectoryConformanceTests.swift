@@ -1,3 +1,4 @@
+import DatabaseTypes
 import Foundation
 import PostgreSQLStorage
 import StorageKit
@@ -115,6 +116,105 @@ struct PostgreSQLDirectoryConformanceTests {
             try await engine.directoryAccess.openRoot(transaction: transaction)
         }
         #expect(after == nil)
+        await engine.waitUntilShutdown()
+    }
+
+    /// REPEATABLE READ commits a catalog write against a snapshot that another
+    /// transaction has already superseded, because PostgreSQL only detects a
+    /// conflict between writes that touch the same row. The catalog's
+    /// read-then-write walk is therefore unenforceable at this level, and every
+    /// catalog mutation is rejected exactly as it is under READ COMMITTED.
+    @Test(.timeLimit(.minutes(1))) func repeatableReadRejectsCatalogMutation() async throws {
+        let engine = try await PostgreSQLStorageEngine(
+            configuration: try Self.makeConfiguration(isolationLevel: .repeatableRead)
+        )
+        defer { engine.requestShutdown() }
+        let before = try await engine.withTransaction { transaction in
+            try await engine.directoryAccess.openRoot(transaction: transaction)
+        }
+        #expect(before == nil)
+
+        var rejection: StorageError?
+        do {
+            _ = try await engine.withTransaction { transaction in
+                try await engine.directoryAccess.openOrInitializeRoot(transaction: transaction)
+            }
+        } catch let error as StorageError {
+            rejection = error
+        }
+        #expect(rejection?.code == .unsupportedOperation)
+        #expect(rejection?.operation == .initialize)
+
+        let after = try await engine.withTransaction { transaction in
+            try await engine.directoryAccess.openRoot(transaction: transaction)
+        }
+        #expect(after == nil)
+        await engine.waitUntilShutdown()
+    }
+
+    /// A write bound to a Partition depends on the same read-then-write
+    /// conflict as a catalog mutation: the generation walk only reads the node
+    /// a concurrent removal writes. Under REPEATABLE READ the binding is
+    /// therefore rejected before any I/O, while reading the catalog, issuing
+    /// the lease, and binding read access stay available.
+    @Test(.timeLimit(.minutes(1))) func repeatableReadRejectsPartitionWriteBinding() async throws {
+        var configuration = try Self.makeConfiguration(isolationLevel: .serializable)
+        let writer = try await PostgreSQLStorageEngine(configuration: configuration)
+        let created = try await writer.withTransaction { transaction -> Partition in
+            let root = try await writer.directoryAccess.openOrInitializeRoot(
+                transaction: transaction
+            )
+            return try await writer.directoryAccess.openOrCreatePartition(
+                "p",
+                in: root,
+                transaction: transaction
+            )
+        }
+        let dataKey = ByteString(Array(created.root.root.prefix) + [0x6B])
+        await writer.shutdown()
+
+        configuration.isolationLevel = .repeatableRead
+        let engine = try await PostgreSQLStorageEngine(configuration: configuration)
+        defer { engine.requestShutdown() }
+
+        try await engine.withTransaction { transaction in
+            guard let root = try await engine.directoryAccess.openRoot(
+                transaction: transaction
+            ) else {
+                Issue.record("The serializable engine's root must still be readable")
+                return
+            }
+            guard let partition = try await engine.directoryAccess.openPartition(
+                "p",
+                in: root,
+                transaction: transaction
+            ) else {
+                Issue.record("The serializable engine's Partition must still be readable")
+                return
+            }
+            let lease = try await engine.leasePartition(partition, transaction: transaction)
+            let existing = try await lease.withReadAccess(transaction) { access in
+                try await access.getValue(for: dataKey)
+            }
+            #expect(existing == nil)
+
+            var rejection: StorageError?
+            do {
+                try await lease.withWriteAccess(transaction) { access in
+                    try access.setValue([0x01], for: dataKey)
+                }
+            } catch let error as StorageError {
+                rejection = error
+            }
+            #expect(rejection?.code == .unsupportedOperation)
+            #expect(rejection?.operation == .write)
+            lease.release()
+        }
+
+        let unwritten = try await engine.withTransaction { transaction in
+            try await transaction.getValue(for: dataKey)
+        }
+        #expect(unwritten == nil)
         await engine.waitUntilShutdown()
     }
 }

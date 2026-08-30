@@ -139,7 +139,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             return rootDirectory
         }
         try await requireRootHoldsNoForeignData(transaction: transaction, operation: .initialize)
-        try admitMutation(operation: .initialize)
+        try admitMutation(.initialize)
         try transaction.setValue(Tuple(Layout.firstNumber).pack(), for: rootAllocatorKey)
         return rootDirectory
     }
@@ -252,7 +252,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             try requireLayer(edge.layer, expected: layer, name: name, operation: .write)
             return directory(at: address, edge: edge, layerRoot: layerRoot)
         }
-        try admitMutation(operation: .write)
+        try admitMutation(.write)
         let number = try await allocateNumber(layerRoot: layerRoot, transaction: transaction)
         let prefix = Layout.contentPrefix(layerRoot: layerRoot, number: number)
         try transaction.setValue(
@@ -384,7 +384,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
                 message: "Node '\(newName)' already exists in the destination Directory"
             )
         }
-        try admitMutation(operation: .write)
+        try admitMutation(.write)
         try transaction.clear(
             key: Layout.edgeKey(
                 layerRoot: layerRoot,
@@ -424,7 +424,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
                 operation: .delete
             )
         }
-        try admitMutation(operation: .delete)
+        try admitMutation(.delete)
         try await clearSubtree(of: edge, layerRoot: layerRoot, transaction: transaction)
         try transaction.clear(
             key: Layout.edgeKey(
@@ -669,7 +669,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         )
     }
 
-    private func admitMutation(operation: StorageOperation) throws {
+    public func admitMutation(_ operation: StorageOperation) throws {
         guard let mutationAdmission else { return }
         try mutationAdmission(operation)
     }

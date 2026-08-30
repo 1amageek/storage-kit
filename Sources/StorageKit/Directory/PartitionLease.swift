@@ -57,10 +57,20 @@ public struct PartitionLease: ~Copyable, Sendable {
     }
 
     /// Binds read and write access to the Partition inside `transaction`.
+    ///
+    /// The binding is admitted before any I/O. A write bound to this
+    /// Partition's generation must conflict with that Partition's concurrent
+    /// removal, which is the same read-then-write detection the catalog
+    /// depends on: the generation walk only reads the node the removal writes.
+    /// A backend whose configured transaction semantics cannot produce that
+    /// conflict rejects the write binding here, so a write is never admitted
+    /// into a Partition the store may already have removed. `withReadAccess`
+    /// is unaffected.
     public nonisolated(nonsending) func withWriteAccess<R>(
         _ transaction: any TransactionAccess,
         _ body: (borrowing BoundWriteAccess) async throws -> R
     ) async throws -> R {
+        try directoryAccess.admitMutation(.write)
         try await requireBinding(of: transaction, operation: .write)
         let scope = PartitionBindingScope()
         defer { scope.close() }
