@@ -218,7 +218,6 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
         let tx = try createTransaction()
-        defer { transactionDomain.leases.releaseIntents(for: tx) }
         try await ActiveTransactionContext.withActiveTransaction(
             tx
         ) { _ in
@@ -264,7 +263,7 @@ public final class FDBStorageEngine: StorageEngine, Sendable {
     }
 
     public func requestShutdown() {
-        transactionDomain.leases.requestShutdown()
+        transactionDomain.requestShutdown()
         storageLifecycle.requestShutdown { [self] in
             releaseDatabase()
         }

@@ -23,7 +23,7 @@ required by SPEC §7.3.
 | `SQLiteConnectionHandle`: one connection per engine, `kv_store` schema bootstrap, `PRAGMA journal_mode=WAL`, `auto_vacuum=INCREMENTAL`, `busy_timeout`, native error conversion | The SQLite library and its file locking model |
 | `SQLiteTransactionCoordinator` (actor): FIFO connection lease, `BEGIN IMMEDIATE`, the savepoint stack for nested transactions, terminal cleanup | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
 | `SQLiteStorageTransaction`: buffered synchronous mutations, lazy coordinator entry on the first asynchronous operation, commit-at-most-once, cancel, `StorageCompactionTransaction` | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
-| `SQLiteRangeResult`, `SQLiteRangeIteratorState`, `SQLiteRangeCursorLifetime`: statement-backed lazy cursors with explicit terminal finish | `PartitionLeaseRegistry` and `PartitionLease` (StorageKit) |
+| `SQLiteRangeResult`, `SQLiteRangeIteratorState`, `SQLiteRangeCursorLifetime`: statement-backed lazy cursors with explicit terminal finish | `PartitionLease` (StorageKit) |
 | Catalog placement: the engine instantiates `KeyValueDirectoryCatalog(transactionDomain:backend: .sqlite)` bound to its domain | Framework binding of `#Directory` declarations |
 
 Authority: the catalog rows inside `kv_store` are the sole existence authority
@@ -46,7 +46,7 @@ SQLiteStorageEngine
   ├─ connection: SQLiteConnectionHandle        serialized native calls, PRAGMAs, kv_store
   ├─ lifetime: SQLiteStorageLifetime            engine-owned resource lifetime
   ├─ coordinator: SQLiteTransactionCoordinator  actor: FIFO lease, BEGIN IMMEDIATE, savepoints
-  ├─ transactionDomain: StorageTransactionDomain identity + PartitionLeaseRegistry
+  ├─ transactionDomain: StorageTransactionDomain identity + lease issuance gate
   ├─ directoryAccess: KeyValueDirectoryCatalog  (StorageKit) reads/writes kv_store via the transaction
   └─ creates SQLiteStorageTransaction
            ├─ root: owns BEGIN IMMEDIATE … COMMIT/ROLLBACK through the coordinator
@@ -86,7 +86,7 @@ Dependency direction: `SQLiteStorage -> StorageKit`, `SQLiteStorage -> DatabaseT
 | SQ-4 | Catalog mutations and data mutations of one transaction commit in the same native transaction; a Directory create, move, or removal is never visible without the data written beside it. |
 | SQ-5 | Catalog keys begin with `0xFE`; Directory and Partition root prefixes are Tuple-encoded integers and never begin with `0xFE`, so catalog rows and data rows in `kv_store` are disjoint. |
 | SQ-6 | `SQLITE_BUSY` and `SQLITE_LOCKED` past `busy_timeout` map to `transactionBusy`; the adapter performs no internal retry. |
-| SQ-7 | `requestShutdown()` closes lease issuance (`transactionDomain.leases.requestShutdown()`) and transaction admission before backend cleanup; admitted transactions keep the resources needed for their own terminal cleanup; `waitUntilShutdown()` awaits the coordinator and connection release. |
+| SQ-7 | `requestShutdown()` closes lease issuance (`transactionDomain.requestShutdown()`) and transaction admission before backend cleanup; admitted transactions keep the resources needed for their own terminal cleanup; `waitUntilShutdown()` awaits the coordinator and connection release. |
 | SQ-8 | A range cursor holds its prepared statement until `finish()`; an abandoned iterator is finalized synchronously through the connection handle by `SQLiteRangeCursorLifetime`, never by an unstructured task. |
 | SQ-9 | `StorageCompactionTransaction` runs `PRAGMA incremental_vacuum` inside the coordinator window and reports `SQLiteIncrementalCompactionMetrics`; capability presence is a type-level fact, not a runtime probe. |
 
@@ -119,7 +119,7 @@ KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog k
 | Connection lease, transaction/savepoint stack, waiter queue | `SQLiteTransactionCoordinator` | engine lifetime; entries live from lease acquisition to terminal cleanup |
 | Buffered mutations, lifecycle phase | `SQLiteStorageTransaction` | from creation to terminal commit or cancel |
 | Prepared range statement | `SQLiteRangeIteratorState` guarded by `SQLiteRangeCursorLifetime` | until `finish()` or iterator abandonment |
-| Lease registrations and intents | `PartitionLeaseRegistry` (StorageKit) | released by lease end of lifetime / transaction completion |
+| Lease registration | `LeaseRegistration` (StorageKit) | released at lease end of lifetime |
 
 ## Failure, Concurrency, and Constraints
 

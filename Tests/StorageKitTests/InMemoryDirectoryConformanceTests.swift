@@ -56,9 +56,9 @@ struct InMemoryDirectoryConformanceTests {
         try await conformance.verifyLeaseLifecycle()
     }
 
-    @Test("Lease subtree exclusion", .timeLimit(.minutes(1)))
-    func leaseSubtreeExclusion() async throws {
-        try await conformance.verifyLeaseSubtreeExclusion()
+    @Test("Lease staleness detection", .timeLimit(.minutes(1)))
+    func leaseStalenessDetection() async throws {
+        try await conformance.verifyLeaseStalenessDetection()
     }
 
     @Test("Transactional atomicity", .timeLimit(.minutes(1)))

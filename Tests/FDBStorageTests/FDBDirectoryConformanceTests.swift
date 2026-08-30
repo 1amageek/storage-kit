@@ -108,9 +108,9 @@ struct FDBDirectoryConformanceTests {
         try await Self.withConformance { try await $0.verifyLeaseLifecycle() }
     }
 
-    @Test("Lease subtree exclusion", .timeLimit(.minutes(1)))
-    func leaseSubtreeExclusion() async throws {
-        try await Self.withConformance { try await $0.verifyLeaseSubtreeExclusion() }
+    @Test("Lease staleness detection", .timeLimit(.minutes(1)))
+    func leaseStalenessDetection() async throws {
+        try await Self.withConformance { try await $0.verifyLeaseStalenessDetection() }
     }
 
     @Test("Transactional atomicity", .timeLimit(.minutes(1)))

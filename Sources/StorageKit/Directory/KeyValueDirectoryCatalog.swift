@@ -345,12 +345,6 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             )
         }
         try admitMutation(operation: .write)
-        try transactionDomain.leases.registerIntent(
-            covering: movedAddress,
-            transaction: transaction,
-            operation: .write,
-            backend: backend
-        )
         try transaction.clear(
             key: Layout.edgeKey(
                 layerRoot: layerRoot,
@@ -391,12 +385,6 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             )
         }
         try admitMutation(operation: .delete)
-        try transactionDomain.leases.registerIntent(
-            covering: address,
-            transaction: transaction,
-            operation: .delete,
-            backend: backend
-        )
         try await clearSubtree(of: edge, layerRoot: layerRoot, transaction: transaction)
         try transaction.clear(
             key: Layout.edgeKey(

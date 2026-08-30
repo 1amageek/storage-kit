@@ -59,8 +59,6 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
         case directoryLayerMismatch = "directory_layer_mismatch"
         /// A move would cross a Partition boundary.
         case partitionBoundaryViolation = "partition_boundary_violation"
-        /// An active Partition lease covers the affected subtree.
-        case directoryLeased = "directory_leased"
         /// A transaction, Directory, or Partition belongs to another engine.
         case storageDomainMismatch = "storage_domain_mismatch"
         /// A lease, cursor, or binding no longer matches the catalog.
@@ -110,7 +108,7 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
              .dataCorruption,
              .resourceUnavailable,
              .incompatibleStorageLayout, .directoryLayerMismatch,
-             .partitionBoundaryViolation, .directoryLeased,
+             .partitionBoundaryViolation,
              .storageDomainMismatch, .staleLease, .invalidDirectoryAddress:
             return .never
         }

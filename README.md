@@ -374,15 +374,20 @@ try await engine.withTransaction { transaction in
   require `TransactionAccess` and are atomic with the transaction that carries
   them. `move` relocates a whole node, Partitions included, within one Directory
   Layer, and `remove` deletes a child with its entire subtree.
-- `engine.leasePartition(_:transaction:)` validates the Partition against the
-  catalog inside the transaction, binds key bounds to the Partition root, and
-  blocks moves and removals of any ancestor while the lease is active.
+- `engine.leasePartition(_:transaction:)` resolves the Partition through the
+  catalog inside the caller's transaction and binds key bounds to the Partition
+  root.
 - `PartitionLease.withReadAccess` / `withWriteAccess` expose bounded access
   objects; a key outside the Partition fails with a typed error before any
   backend call.
-- A Partition under a pending move or removal cannot be leased (`staleLease`);
-  a subtree covered by an active lease refuses `move` and `remove`
-  with `directoryLeased`.
+- A lease is not an exclusion: `move` and `remove` stay admitted while one is
+  held, because admitting a destructive operation is a decision above this
+  layer. What a lease guarantees is that stale work fails instead of being
+  redirected. Issuance and every binding re-resolve the Partition in the
+  caller's transaction, so an address that is absent, no longer a Partition, or
+  carrying a different keyspace prefix fails with `staleLease`. Prefixes are
+  never reused, so the guarantee holds across engine instances and processes
+  reading the same store.
 - Tuple encoding is frozen as Tuple V1 by `TupleV1GoldenVectorTests`; Directory
   root prefixes are Tuple-encoded integers allocated by the catalog.
 

@@ -114,7 +114,7 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     }
 
     public func requestShutdown() {
-        transactionDomain.leases.requestShutdown()
+        transactionDomain.requestShutdown()
         let lifetime = lifetime
         let coordinator = coordinator
         let connection = connection

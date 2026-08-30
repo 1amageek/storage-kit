@@ -24,16 +24,16 @@ active work to one Partition.
 | `DirectoryAccess` contract and the five semantic operations | Authorization of any operation |
 | `KeyValueDirectoryCatalog`: the catalog realization for InMemory, SQLite, PostgreSQL, Cloudflare DO | The FDB realization (owned by `FDBStorage`, which must satisfy the same contract) |
 | The InspectRoot → Open / Initialize / Reject bootstrap decision, read from the root's own allocation authority | Deleting or rewriting roots (never in production) |
-| `PartitionLeaseRegistry`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Deciding which Partition a request may lease |
+| `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Deciding which Partition a request may lease, and whether a removal that would invalidate one is admissible |
 
 ## Related Designs
 
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
 | [StorageKit module](../DESIGN.md) | parent | `TransactionReadAccess`, `TransactionAccess`, `StorageEngine.transactionDomain`, `StorageError`, `Subspace`, `Tuple` | Supplies the transaction and encoding contracts the catalog is built on. | Catalog keys use the Tuple encoding; a Tuple change is a layout change. |
-| [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess`, `PartitionLeaseRegistry.registerIntent` | Realizes the same node model over the native FoundationDB Directory Layer. | A Partition is a native node whose layer bytes are `partition`; native partitions nest, so no custom layer type is used. |
+| [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess` | Realizes the same node model over the native FoundationDB Directory Layer. | A Partition is a native node whose layer bytes are `partition`; native partitions nest, so no custom layer type is used. |
 | [SQLiteStorage module](../../SQLiteStorage/DESIGN.md), [PostgreSQLStorage module](../../PostgreSQLStorage/DESIGN.md), [CloudflareDurableObjectStorage module](../../CloudflareDurableObjectStorage/DESIGN.md) | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL rejects `readCommitted` isolation for catalog mutation through `MutationAdmission` (owned by PostgreSQLStorage). |
-| database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | A Partition removal is recursive; the Framework no longer proves its Subspaces empty first. |
+| database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | A Partition removal is recursive and unconditional here; the Framework decides admissibility, including whether one of its own leases is active (SPEC §12.3), before it calls. |
 
 ## Architecture
 
@@ -47,11 +47,13 @@ active work to one Partition.
  TransactionReadAccess / TransactionAccess (caller's transaction)
 
  StorageEngine.leasePartition
-   -> PartitionLeaseRegistry.reserve            (domain, shutdown, intent check)
-   -> DirectoryAccess.openDirectory(at:)        (prefix re-check in caller txn)
+   -> domain and shutdown check
+   -> DirectoryAccess.openDirectory(at:)        (prefix check in caller txn)
    -> PartitionLease (~Copyable)
-        -> withReadAccess  -> BoundReadAccess  (~Copyable, borrowed)
-        -> withWriteAccess -> BoundWriteAccess (~Copyable, borrowed)
+        -> withReadAccess  -> openDirectory(at:) in the binding txn
+                           -> BoundReadAccess  (~Copyable, borrowed)
+        -> withWriteAccess -> openDirectory(at:) in the binding txn
+                           -> BoundWriteAccess (~Copyable, borrowed)
 ```
 
 ## Contracts and Invariants
@@ -116,8 +118,8 @@ operations convert it to `StorageError.invalidDirectoryAddress`.
 | 1 | `open(_:expecting:in:transaction:)` | Read | `TransactionReadAccess` | returns `nil` | never creates; a non-`nil` expectation is verified against the stored tag → `directoryLayerMismatch` |
 | 2 | `openOrCreate(_:layer:in:transaction:)` | Write | `TransactionAccess` | creates with `layer` | an existing node with a different tag fails `directoryLayerMismatch`; creation is atomic with the caller's transaction; a parent that is absent when the write runs fails `keyNotFound` (D-13) |
 | 3 | `listChildren(in:after:limit:transaction:)` | Read | `TransactionReadAccess` | empty page | returns `DirectoryEntry` (name + tag); `limit` 1…1000, ordered by encoded key, `after` exclusive |
-| 4 | `move(_:in:to:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | whole-node rename, Partitions included; a destination parent that is absent when the write runs fails `keyNotFound` (D-13); different containing layer: `partitionBoundaryViolation`; into own subtree: `invalidDirectoryAddress`; target exists: `invalidOperation`; leased subtree: `directoryLeased` |
-| 5 | `remove(_:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | atomic recursive removal of the node, its descendants, and their data; leased subtree: `directoryLeased`. There is no empty-only precondition |
+| 4 | `move(_:in:to:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | whole-node rename, Partitions included; a destination parent that is absent when the write runs fails `keyNotFound` (D-13); different containing layer: `partitionBoundaryViolation`; into own subtree: `invalidDirectoryAddress`; target exists: `invalidOperation` |
+| 5 | `remove(_:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | atomic recursive removal of the node, its descendants, and their data. There is no empty-only precondition, and no lease precondition |
 
 `expecting: nil` performs no tag verification and matches the FoundationDB
 empty-layer open. The stored tag is always read and returned on the resolved
@@ -180,7 +182,9 @@ live node, so a write through a handle from before the recreation lands in the
 new node rather than failing. That is the consequence of positioning by
 address: D-13 makes absence observable, not identity. Making a superseded
 resolution fail is the stale-generation rule of SPEC §9.3, which the lease
-layer owns and which is not settled here.
+layer owns: a `PartitionLease` re-resolves its own Partition in every
+transaction it is bound to (L-2), so a superseded Partition fails there
+instead of being written through here.
 
 ### `KeyValueDirectoryCatalog` layout (V1)
 
@@ -283,8 +287,8 @@ is never initialized, opened, or rejected because of another root's data.
 | ID | Invariant | Enforcement |
 |---|---|---|
 | L-1 | Lease, transaction, and Partition domains match | `storageDomainMismatch` at issuance and at every bind |
-| L-2 | A lease blocks a removal or move whose subtree intersects the leased subtree | registry check in operations 4 and 5 → `directoryLeased` |
-| L-3 | A stale generation fails; work is never redirected | issuance re-resolves the address in the caller's transaction and compares `keyspacePrefix` → `staleLease` |
+| L-2 | A lease is validated against the store at issuance and again at every access binding | the address walk runs in the issuing or binding transaction, so the resolution enters that transaction's read set |
+| L-3 | A stale generation fails; work is never redirected | an absent node, a non-Partition layer, or a different `keyspacePrefix` → `staleLease` |
 | L-4 | Read binding cannot mutate | `BoundReadAccess` has no mutation members |
 | L-5 | Write binding cannot commit or cancel | `BoundWriteAccess` has no lifecycle members |
 | L-6 | Bound access and cursors cannot escape the closure | noncopyable, borrowed; cursors validate the binding scope before every advance → `staleLease` |
@@ -305,30 +309,30 @@ node its own lease is bound to and report `dataCorruption` on the next create.
 Removing a Partition is still one range clear `[P, strinc(P))`, because the
 catalog clears through the transaction, not through bound access.
 
-Registry (per `StorageTransactionDomain`, in-process):
+Staleness is the only lease mechanism, and the store is its only authority:
 
-- `reserve(address)` runs before validation so a concurrent removal sees the
-  lease; it is rejected after `requestShutdown()` (`resourceUnavailable`) and
-  while a removal or move intent intersects the address (`staleLease`).
-- Operations 4 and 5 register a subtree intent keyed by the caller's
-  transaction object. The transaction releases its own intents when it commits
-  or cancels, so an intent never outlives the mutation it protects; the
-  registry additionally holds the transaction only weakly inside its `Mutex`,
-  which reclaims the intents of a transaction that was abandoned without
-  either outcome. The direction of error is always conservative (a lease is
-  refused, never issued over a pending removal).
-- Both guards compare subtrees, not one direction of ancestry. A lease covers
-  the whole subtree under its Partition and a move or removal covers the whole
-  subtree under its node, and two ancestor-closed sets intersect exactly when
-  one root is an ancestor-or-self of the other, so `StorageAddress`
-  `subtreeIntersects` is the single relation both use. Testing only one
-  direction would admit removing a node beneath an active lease on one side
-  and leasing a Partition that a pending removal is about to delete from
-  beneath on the other.
-- Cross-process: the registry cannot see other processes. There the invariant
-  is L-3 (staleness at issuance), not prevention; every backend already
-  behaves this way and the fixture proves it by removing and recreating a
-  Partition between two resolutions.
+- A lease does not block operation 4 or 5. Removal and move are unconditional
+  here; whether removing a Partition that something is using is admissible is
+  a database-operation decision the Framework makes before it calls
+  (SPEC §12.3).
+- The prefix allocator never reuses a number, so a Partition removed and
+  recreated at the same address always carries a different `keyspacePrefix`.
+  Comparing the prefix is therefore a complete staleness test: it needs no
+  record of who else is running, and it gives the same answer in every process
+  that reads the same store.
+- Issuance and every bind perform the same walk in the transaction that will
+  use the lease. Concurrency is then the backend's: the resolution is in that
+  transaction's read set, so a removal committing concurrently makes the
+  transaction conflict rather than silently succeed.
+- The mechanism therefore holds across engine instances and processes, which a
+  process-local registry could not do: a second engine over the same store
+  invalidates a lease the first engine issued, without the first engine
+  observing anything in memory.
+- A bind costs one address walk — the root read plus one read per address
+  component — so a caller holds a binding for the span of the work it covers
+  rather than opening one per key. The walk is not deduplicated against earlier
+  reads in the same transaction: what it shares with them is the read set, not
+  the round trip.
 
 ## Runtime Flows
 
@@ -337,9 +341,9 @@ Lease issuance:
 ```text
 leasePartition(partition, transaction)
   1. domain check (engine, partition.domain, transaction)        -> storageDomainMismatch
-  2. registry.reserve(partition.root.address)                    -> resourceUnavailable | staleLease
-  3. walk address from openRoot through open in `transaction`    -> nil, non-Partition, or prefix mismatch: release, staleLease
-  4. return PartitionLease(partition, registration)
+  2. shutdown check                                              -> resourceUnavailable
+  3. walk address from openRoot through open in `transaction`    -> nil, non-Partition, or prefix mismatch: staleLease
+  4. return PartitionLease(partition, directoryAccess)
 ```
 
 Bound read:
@@ -347,6 +351,7 @@ Bound read:
 ```text
 lease.withReadAccess(transaction) { access in ... }
   - domain check, registration active check
+  - step 3 of issuance repeated in `transaction`          -> staleLease
   - BindingScope opened; BoundReadAccess borrowed to the closure
   - every read validates key containment (L-8) and scope/lease (L-6)
   - scope closed on return; escaped cursors fail on next advance
@@ -357,7 +362,7 @@ Recursive removal:
 ```text
 remove(name, in: parent)
   edge = read(parent layer, parent.prefix, name)          absent -> keyNotFound
-  admitMutation; registerIntent(address)                  leased -> directoryLeased
+  admitMutation
   pending = [edge.childPrefix, tag]
   while node = pending.pop
       for each child edge page under (node layer, node.prefix)
@@ -374,13 +379,13 @@ A Partition child needs no walk: one range covers its whole subtree.
 | State | Owner | Lifetime |
 |---|---|---|
 | Catalog edges and per-layer allocators | backend keyspace, mutated only through the caller's transaction | durable |
-| Lease registrations and intents | `PartitionLeaseRegistry` (`Mutex`) | registration: until `release()` or `PartitionLease` deinit; intent: until owner completion or transaction deallocation |
+| Lease registration | `LeaseRegistration` (`Mutex`) | until `release()` or `PartitionLease` deinit |
 | Binding scope | `PartitionLease.withReadAccess` / `withWriteAccess` | one closure |
 
 ## Failure, Concurrency, and Constraints
 
 `StorageError.Code` cases owned here: `incompatibleStorageLayout`,
-`directoryLayerMismatch`, `partitionBoundaryViolation`, `directoryLeased`,
+`directoryLayerMismatch`, `partitionBoundaryViolation`,
 `storageDomainMismatch`, `staleLease`, `invalidDirectoryAddress`. All have
 retry disposition `never`.
 
@@ -401,10 +406,12 @@ confirming edge keys stay within each backend's key bound.
 | Contract | Evidence |
 |---|---|
 | Values and bounds | `Tests/StorageKitTests/DirectoryValueTests.swift` |
-| D-1…D-12, state machine, operations 1–5, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests`. `verifyForeignRootRejection` is key-value only: FoundationDB has no such state, and `FDBDirectoryConformanceTests.siblingRootsAreIndependent` carries the per-root isolation it used to prove |
-| L-2 subtree intersection in both directions, intent release at commit and cancel | `DirectoryConformanceCase.verifyLeaseSubtreeExclusion` run by every adapter suite |
+| D-1…D-12, state machine, operations 1–5, L-1, L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests`. `verifyForeignRootRejection` is key-value only: FoundationDB has no such state, and `FDBDirectoryConformanceTests.siblingRootsAreIndependent` carries the per-root isolation it used to prove |
+| L-2 revalidation at bind, including a lease bound to a transaction later than the one that issued it | `DirectoryConformanceCase.verifyLeaseStalenessDetection` run by every adapter suite |
+| L-2 across engine instances over one store | `Tests/SQLiteStorageTests/SQLiteCrossEngineLeaseTests.swift`; SQLite is the cheapest backend that admits two engines over one physical root, and the guarantee is a property of the walk rather than of the adapter |
 | D-13 on both write operations, under a plain and a Partition parent | `DirectoryConformanceCase.verifyStaleParentRejection` run by every adapter suite; FoundationDB passes it before the key-value catalog does, which is the evidence that the native layer already held the guarantee |
-| L-4, L-5 (compile-level), L-6 escape, registry intersection relation | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
+| L-4, L-5 | the type declarations: `BoundReadAccess` declares no mutation member and `BoundWriteAccess` declares no lifecycle member, so a violation does not compile and no run can observe one |
+| L-6 escape, L-8 at the binding, and release and staleness as a holder observes them | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 
 Changing the catalog layout, the bootstrap witness of any backend, or any
 operation semantics requires updating this design first, then the StorageKit

@@ -24,7 +24,7 @@ SPEC §7.3.
 | `PostgreSQLConfiguration`: client configuration, isolation level (default `.serializable`), validated bare `tableName`, schema policy `createIfNeeded` / `assumeExists`; `PostgreSQLConfiguration+Production` and `PostgreSQLConnectionBudget` for serverless connection budgeting | The PostgreSQL wire protocol and pool (`postgres-nio`) |
 | `PostgreSQLStorageEngine`: `PostgresClient` run task, schema bootstrap, transaction creation in eager, lazy, and nested modes, native error mapping, shutdown | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
 | `PostgreSQLStorageTransaction`: buffered writes, read-your-writes replay for point reads, buffer flush before range reads, advisory-lock atomics, `BEGIN ISOLATION LEVEL …` through `COMMIT`/`ROLLBACK`, exactly-once connection release | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
-| `PostgreSQLBindingBytes`: one copy of each bound key or value into independently owned `ByteBuffer` storage | `PartitionLeaseRegistry` and `PartitionLease` (StorageKit) |
+| `PostgreSQLBindingBytes`: one copy of each bound key or value into independently owned `ByteBuffer` storage | `PartitionLease` (StorageKit) |
 | `PostgreSQLResultBytesOwner` / `PostgreSQLResultBytesFactory` / `PostgreSQLResultBytesLifecycleObserver`: result byte ownership and lifecycle evidence | Framework binding of `#Directory` declarations |
 | Catalog placement and the READ COMMITTED mutation admission rule (PG-3) | Retry policy (owned by the caller's transaction runner) |
 
@@ -48,7 +48,7 @@ invariant P-4).
 PostgreSQLStorageEngine
   ├─ client: PostgresClient + runTask                  pool run loop
   ├─ configuration: PostgreSQLConfiguration            isolation, tableName, schema policy
-  ├─ transactionDomain: StorageTransactionDomain       identity + PartitionLeaseRegistry
+  ├─ transactionDomain: StorageTransactionDomain       identity + lease issuance gate
   ├─ directoryAccess: KeyValueDirectoryCatalog         mutationAdmission = READ COMMITTED rejection
   ├─ resultBytesFactory: PostgreSQLResultBytesFactory  result byte owners (+ lifecycle observer in tests)
   └─ creates PostgreSQLStorageTransaction
@@ -129,7 +129,7 @@ createTransaction() -> no connection yet
 | Write buffer, lifecycle phase | `PostgreSQLStorageTransaction` | creation to terminal state; nested buffers merge into the parent |
 | Bound parameter bytes | `PostgreSQLBindingBytes` → `ByteBuffer` | until the query completes (owned independently of the source borrow) |
 | Result bytes | `PostgreSQLResultBytesOwner` | until the consuming cursor or value is released; observed by the lifecycle observer in tests |
-| Lease registrations and intents | `PartitionLeaseRegistry` (StorageKit) | released by lease end of lifetime / transaction completion |
+| Lease registration | `LeaseRegistration` (StorageKit) | released at lease end of lifetime |
 
 ## Failure, Concurrency, and Constraints
 

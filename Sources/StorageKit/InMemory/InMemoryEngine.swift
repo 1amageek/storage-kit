@@ -262,7 +262,7 @@ public final class InMemoryEngine: StorageEngine, Sendable {
     }
 
     public func requestShutdown() {
-        transactionDomain.leases.requestShutdown()
+        transactionDomain.requestShutdown()
         storageLifecycle.requestShutdown()
     }
 
@@ -601,10 +601,6 @@ public final class InMemoryTransaction: Transaction, Sendable {
     // MARK: - Transaction Management
 
     public func commit() async throws {
-        // A terminal outcome ends every pending move or removal this
-        // transaction staged, so its subtree intents stop blocking lease
-        // issuance here rather than at deallocation.
-        defer { releaseSubtreeIntents() }
         enum Start {
             case leader(TransactionOperationCompletion, CommitPayload)
             case wait(TransactionOperationCompletion)
@@ -680,10 +676,6 @@ public final class InMemoryTransaction: Transaction, Sendable {
     }
 
     public func cancel() async throws {
-        // A terminal outcome ends every pending move or removal this
-        // transaction staged, so its subtree intents stop blocking lease
-        // issuance here rather than at deallocation.
-        defer { releaseSubtreeIntents() }
         enum Start {
             case leader(TransactionOperationCompletion)
             case waitForCancellation(TransactionOperationCompletion)

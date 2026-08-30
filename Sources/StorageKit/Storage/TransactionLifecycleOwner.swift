@@ -21,9 +21,6 @@ package struct TransactionLifecycleOwner: ~Copyable {
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws {
         let transaction = self.transaction
-        defer {
-            transaction.transactionDomain.leases.releaseIntents(for: transaction as AnyObject)
-        }
         try await ActiveTransactionContext.withActiveTransaction(transaction) { access in
             do {
                 try await operation(access)

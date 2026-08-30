@@ -64,14 +64,20 @@ adapter test target (one @Test per step)
   The step also proves that the failure is absence rather than fabrication: no
   ancestor is rebuilt, and a rebuilt ancestor would carry no layer tag and yield
   a tree that no operation created and no invariant describes.
-- `verifyLeaseSubtreeExclusion` proves the direction of SPEC §8.3 that
-  `verifyLeaseLifecycle` does not reach: a lease covers the whole subtree under
-  its Partition, so a node below it cannot be moved or removed, and a removal
-  pending below a Partition blocks leasing that Partition. It also drives a
-  caller-owned transaction from `createOwnedTransaction()` through `commit()`
-  and `cancel()` and keeps the transaction object alive across the check, so a
-  passing run proves the intents were released by the outcome rather than by
-  deallocation.
+- `verifyLeaseStalenessDetection` proves the direction of SPEC §9.3 that
+  `verifyLeaseLifecycle` does not reach: a lease is answered by the store, not
+  by the object that issued it. One lease is carried across four caller-owned
+  transactions. It binds successfully in a transaction later than the one that
+  issued it, which is what makes the check meaningful rather than a restatement
+  of issuance. A third transaction then removes and recreates the Partition at
+  the same address, and the fixture asserts the recreated Partition carries a
+  different `keyspacePrefix`, because the prefix allocator is strictly
+  monotonic and never reuses a number. In the fourth transaction both
+  `withWriteAccess` and `withReadAccess` must fail `staleLease`, and the
+  recreated Partition must hold none of the data written under the old one.
+  Driving `createOwnedTransaction()` through `commit()` and `cancel()` while
+  keeping each transaction object alive across the check means a passing run
+  proves the outcome came from the store rather than from deallocation.
 - `verifyForeignRootRejection` applies to key-value engines only, and the
   restriction is a property of the backends rather than a gap in the fixture.
   A key-value root shares one flat keyspace with whatever wrote to it first,

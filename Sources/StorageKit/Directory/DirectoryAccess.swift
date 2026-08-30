@@ -164,3 +164,39 @@ extension DirectoryAccess {
         return partition
     }
 }
+
+extension DirectoryAccess {
+    /// Resolves `partition` in `transaction` and fails when the live node is a
+    /// different generation than the one the caller holds.
+    ///
+    /// This is the single staleness test behind every Partition lease. The
+    /// prefix allocator never reuses a number, so a Partition removed and
+    /// recreated at the same address always carries a different
+    /// `keyspacePrefix`; comparing prefixes therefore separates the two
+    /// generations without any record of what else is running.
+    ///
+    /// The walk runs in `transaction`, which puts the resolution into that
+    /// transaction's read set. A removal committing concurrently then makes
+    /// `transaction` conflict rather than letting it write into a Partition
+    /// that no longer exists.
+    package func requirePartitionGeneration(
+        _ partition: Partition,
+        operation: StorageOperation,
+        transaction: any TransactionReadAccess
+    ) async throws {
+        let current = try await openDirectory(
+            at: partition.root.address,
+            transaction: transaction
+        )
+        guard let current,
+              current.layer.isPartition,
+              current.keyspacePrefix == partition.keyspacePrefix
+        else {
+            throw StorageError.staleLease(
+                "Partition no longer exists at its address with the same keyspace",
+                operation: operation,
+                backend: backend
+            )
+        }
+    }
+}

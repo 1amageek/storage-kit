@@ -30,7 +30,7 @@ them.
 | `CloudflareDurableObjectStorageTransaction` and `CloudflareDurableObjectTransactionState`: buffered wire mutations, read and write conflict ranges, observed read version, deadline, phase state machine, single-commit request, unknown-outcome preservation | Durable Object routing and lifecycle (application-owned) |
 | `CloudflareDurableObjectStorageClient` protocol, `…WireClient`, `…StorageTransport`, transport failure types, timed calls | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
 | `CloudflareDurableObjectLimits` and `…LimitsError`: bounded keys, boundaries, values, mutations, conflict ranges, page size, split points, selector steps | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
-| Range scanning (`…RangeScan`, `…RangeScanning`, `…RangeResult`, `…ByteOrdering`) | `PartitionLeaseRegistry` and `PartitionLease` (StorageKit) |
+| Range scanning (`…RangeScan`, `…RangeScanning`, `…RangeResult`, `…ByteOrdering`) | `PartitionLease` (StorageKit) |
 | Catalog placement: the engine instantiates `KeyValueDirectoryCatalog(transactionDomain:backend: .cloudflareDurableObject)` | Framework binding of `#Directory` declarations |
 
 Authority: the catalog rows stored beneath the configured partition identity in
@@ -54,7 +54,7 @@ Partitions of this backend (SPEC §12.3, package invariant P-4).
 CloudflareDurableObjectStorageEngine
   ├─ configuration: partitionIdentity, client, limits, monotonicClock
   ├─ readiness gate at init: client.readiness(...) -> schemaVersion == 1 && metadataInitialized
-  ├─ transactionDomain: StorageTransactionDomain      identity + PartitionLeaseRegistry
+  ├─ transactionDomain: StorageTransactionDomain      identity + lease issuance gate
   ├─ directoryAccess: KeyValueDirectoryCatalog        (StorageKit) over wire read/range/commit
   └─ creates CloudflareDurableObjectStorageTransaction
            ├─ state (Mutex): mutations, read/write conflict ranges, phase, observedReadVersion, deadline
@@ -135,7 +135,7 @@ KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog k
 | Configuration and client | `CloudflareDurableObjectStorageEngine` | engine lifetime |
 | `CloudflareDurableObjectTransactionState` (mutations, conflict ranges, phase, versions, deadline) | `CloudflareDurableObjectStorageTransaction` behind a `Mutex` | creation to terminal phase |
 | Response bytes | final Swift-owned storage produced by the transport | until the consuming cursor or value is released |
-| Lease registrations and intents | `PartitionLeaseRegistry` (StorageKit) | released by lease end of lifetime / transaction completion |
+| Lease registration | `LeaseRegistration` (StorageKit) | released at lease end of lifetime |
 
 ## Failure, Concurrency, and Constraints
 

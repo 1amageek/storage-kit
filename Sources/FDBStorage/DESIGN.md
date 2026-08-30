@@ -23,8 +23,8 @@ SPEC §7.3.
 | FDB client startup and the retained database handle of one engine | The FoundationDB C client and its safe Swift ownership (`fdb-swift-bindings`) |
 | `FDBStorageTransaction`: read, write, range, atomic, commit-at-most-once, cancel, error conversion, and the exclusive Directory operation window | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
 | Borrowed result byte lifetime bound to the retained owner | Native Directory Layer algorithms: HCA prefix allocation, node metadata, nested partition layers, version keys |
-| `FDBDirectoryLayout`: native path composition below the root path and the one-to-one `LayerTag` ↔ `DirectoryType` mapping | `PartitionLeaseRegistry`, `PartitionLease` (StorageKit) |
-| `FDBDirectoryAccess`: the five semantic Directory operations plus root open and initialize, layer-tag verification on every open, Partition boundary and own-subtree rejection, listing order and pagination, lease intent order, native error mapping | Framework binding of `#Directory` declarations |
+| `FDBDirectoryLayout`: native path composition below the root path and the one-to-one `LayerTag` ↔ `DirectoryType` mapping | `PartitionLease` (StorageKit) |
+| `FDBDirectoryAccess`: the five semantic Directory operations plus root open and initialize, layer-tag verification on every open, Partition boundary and own-subtree rejection, listing order and pagination, native error mapping | Framework binding of `#Directory` declarations |
 
 Authority: the native Directory Layer metadata below `Configuration.rootPath`
 is the sole existence authority for this backend (SPEC §12.3). A node's
@@ -38,7 +38,7 @@ of its own below `rootPath`.
 |---|---|---|---|---|
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to database-framework. |
 | [StorageKit module](../StorageKit/DESIGN.md) | depends on | `StorageEngine`, `TransactionReadAccess`, `TransactionAccess`, `StorageError`, `Subspace`, `StorageTransactionDomain` | Supplies the contracts this adapter realizes. | `Subspace` here is `StorageKit.Subspace`; the bindings own a different `Subspace` type. |
-| [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `Directory`, `DirectoryEntry`, `LayerTag`, `Partition`, `StorageAddress`, `DirectoryLimits`, `PartitionLeaseRegistry.registerIntent` | Defines the operations, failure codes, bounds, root bootstrap state machine, and intent rules this module must satisfy. | Intent registration happens after validation, before the native mutation (FD-7). |
+| [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `Directory`, `DirectoryEntry`, `LayerTag`, `Partition`, `StorageAddress`, `DirectoryLimits` | Defines the operations, failure codes, bounds, and root bootstrap state machine this module must satisfy. | Removal and move have no lease precondition; a lease detects a superseded Partition when it is bound (L-2). |
 | [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `FDBDirectoryConformanceTests`. | Every step runs here except `verifyForeignRootRejection`, which has no FoundationDB state to produce: the native layer never allocates a prefix already in use, so a StorageKit write cannot land on foreign bytes. |
 | `fdb-swift-bindings` | depends on | `FDBClient`, `DatabaseProtocol`, `TransactionProtocol`, `DirectoryLayer`, `DirectorySubspace`, `DirectoryType`, `DirectoryError` | Native client, transactions, and Directory Layer. | `createOrOpen` creates missing ancestors as untyped nodes, so this adapter checks the parent itself (FD-10), and writes the layer version key when absent; `list` returns names in Swift `String` order and paginates nothing; `move` keeps the prefix; `remove` is recursive; a `partition` node roots a nested layer and partitions may nest. |
 
@@ -47,7 +47,7 @@ of its own below `rootPath`.
 ```text
 FDBStorageEngine
   ├─ database: Mutex<(any DatabaseProtocol)?>      client startup, shutdown release
-  ├─ transactionDomain: StorageTransactionDomain   identity + PartitionLeaseRegistry
+  ├─ transactionDomain: StorageTransactionDomain   identity + lease issuance gate
   ├─ directoryAccess: FDBDirectoryAccess ──uses──> FDBDirectoryLayout
   │        │                                          (rootPath + address, LayerTag <-> DirectoryType)
   │        └─ per operation: DirectoryLayer(database:) from fdb-swift-bindings
@@ -105,10 +105,9 @@ The mapping is one to one and adds no encoding of its own.
 | FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` exists: `openRoot` reports its absence as an uninitialized root and never writes, and `openOrInitializeRoot` creates it in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. A node found at `rootPath` is opened rather than adjudicated: the native layer never allocates a prefix already in use, so no StorageKit write can land on bytes written outside it, and which node `rootPath` names is an operator decision. `requireRoot` still refuses a node whose layer is not the default, so a native partition at the root path fails with `directoryLayerMismatch`. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
 | FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized root is observed without touching the layer version key. |
-| FD-4 | A move never resurrects a stale destination: a missing destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. Both are checked before any lease intent is registered. |
+| FD-4 | A move never resurrects a stale destination: a missing destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. Both are checked before the native mutation. |
 | FD-5 | Listings sort native names by UTF-8 bytes, apply `after` exclusively, and honor `limit` in `1...DirectoryLimits.maximumListLimit`; each row resolves the child to read its stored tag, so a `DirectoryEntry` carries the node's real layer. A child that disappears between `list` and its resolution is skipped, and a listing below a stale parent is an empty page. |
 | FD-6 | Removal is recursive and has no emptiness precondition: the native layer clears every descendant node and the whole content range of the removed node, which for a Partition is one range. A missing node fails with `keyNotFound` before any mutation. |
-| FD-7 | A move or removal registers its lease intent after every validation succeeded and immediately before the native mutation, so a rejected operation leaves no pending intent in the transaction. |
 | FD-8 | A node moves only within the Directory Layer that contains it, Partitions included: source and destination must share the same containing content base, otherwise `partitionBoundaryViolation`; a target inside the moved subtree fails with `invalidDirectoryAddress(.targetInsideMovedSubtree)`. |
 | FD-9 | Every Directory operation of a transaction runs inside `withDirectoryOperation`, which rejects a transaction of another engine (`storageDomainMismatch`), enforces exclusivity with the transaction's own access, and marks `openOrInitializeRoot`, `openOrCreate`, `move`, and `remove` as mutations. |
 | FD-10 | A create never fabricates the parent chain. `openOrCreate` resolves the child first and, when it is absent, requires the parent node to exist before creating it, so a create below a removed parent fails with `keyNotFound` instead of having its ancestors recreated as untyped nodes. Nothing other than the named child is ever created. |
@@ -172,7 +171,6 @@ resolve tx -> require source and destination domains -> both child addresses
        -> target inside moved subtree    -> invalidDirectoryAddress (FD-8)
        -> destination exists             absent  -> keyNotFound (FD-4)
        -> new path free                  taken   -> invalidOperation (FD-4)
-       -> registerIntent                 leased  -> directoryLeased (FD-7)
        -> layer.move(oldPath, newPath)   prefix and subtree preserved
 ```
 
@@ -182,7 +180,6 @@ Operation 5 (`remove`):
 resolve tx -> require parent domain -> child address
   -> withDirectoryOperation(writes: true)
        -> layer.exists(path)     false -> keyNotFound
-       -> registerIntent         leased -> directoryLeased (FD-7)
        -> layer.remove(path)     recursive; a Partition clears as one range (FD-6)
 ```
 
@@ -193,7 +190,6 @@ resolve tx -> require parent domain -> child address
 | Database handle | `FDBStorageEngine.database` (`Mutex`) | from `init` until `requestShutdown` releases it; Directory operations retain it per call through `retainedDatabaseForDirectoryOperation` |
 | `DirectoryLayer` instance | `FDBDirectoryAccess.withLayer` | one per operation; holds no state beyond its subspaces |
 | Directory operation token | `FDBStorageTransaction` | the duration of one `withDirectoryOperation` call |
-| Lease intents | `PartitionLeaseRegistry` (StorageKit) | released when the transaction completes (`executeTransaction` defer) |
 
 ## Failure, Concurrency, and Constraints
 

@@ -31,10 +31,10 @@ transaction lifecycle owner, and the InMemory reference engine.
 |---|---|---|---|---|
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to every adapter and to database-framework. |
 | [Directory component](Directory/DESIGN.md) | child | `DirectoryAccess`, `Directory`, `Partition`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess`, `KeyValueDirectoryCatalog` | Placement, catalog authority, root bootstrap, leases. | Read operations accept only `TransactionReadAccess`; catalog reads never create. |
-| [Storage component](Storage/DESIGN.md) | child | `StorageEngine`, `Transaction`, cursors, `StorageError`, `StorageEngineLifecycle`, `StorageTransactionDomain` | Transaction and bound contracts; the cursor state owns advance ordering, post-advance validation, and terminal cleanup. | `StorageTransactionDomain` now also owns the lease registry. Cursor scope validation belongs to the cursor state, not to a caller wrapper. |
+| [Storage component](Storage/DESIGN.md) | child | `StorageEngine`, `Transaction`, cursors, `StorageError`, `StorageEngineLifecycle`, `StorageTransactionDomain` | Transaction and bound contracts; the cursor state owns advance ordering, post-advance validation, and terminal cleanup. | `StorageTransactionDomain` owns domain identity and the shutdown gate on lease issuance. Cursor scope validation belongs to the cursor state, not to a caller wrapper. |
 | [Tuple component](Tuple/DESIGN.md) | child | `Tuple`, `Subspace`, `TupleElement`, `strinc`, admission-aware `pack(admitting:)` | Tuple encoding frozen by golden vectors; admission measures the exact packed byte count before the single result allocation. | Any byte-layout change is a layout change. The admission callback is a caller resource boundary, never a backend limit. |
 | `InMemory/` sources | child (no component design yet) | `InMemoryEngine`, `InMemoryTransaction` | Reference engine with conflict detection and versionstamps. | Reference only; must pass every shared fixture. |
-| database-framework | used by | all public contracts | Composes containers and kernels. | Holds leases, never raw Partition addresses, as authority. |
+| database-framework | used by | all public contracts | Composes containers and kernels. | Holds leases, never raw Partition addresses, as authority. Whether a removal that would strand one of its leases is admissible is its own decision (SPEC §12.3); StorageKit removal has no lease precondition. |
 
 ## Architecture
 
@@ -45,7 +45,7 @@ transaction lifecycle owner, and the InMemory reference engine.
  StorageEngine ----------------------------------------- +
    |  createTransaction                                  |
    v                                                     v
- TransactionLifecycleOwner (package, ~Copyable)   PartitionLeaseRegistry (per domain)
+ TransactionLifecycleOwner (package, ~Copyable)   StorageTransactionDomain (per engine)
    |  owns exactly one Transaction                        |
    |  borrows attenuated TransactionAccess to callback    |
    |  commit at most once / authoritative cancel          |
@@ -60,7 +60,7 @@ Layering inside the module:
 | Values | `ByteString` (database-types), `Tuple`, `Subspace`, `LayerTag`, `DirectoryEntry`, `StorageAddress`, `Directory`, `Partition` | database-types |
 | Access contracts | `TransactionReadAccess`, `TransactionAccess`, `Transaction`, `KeySelector`, `KeyValueCursor`, `StreamingMode` | Values |
 | Placement | `DirectoryAccess`, `KeyValueDirectoryCatalog`, `DirectoryLimits` | Access contracts |
-| Leases | `PartitionLeaseRegistry`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Placement |
+| Leases | `PartitionLease`, `LeaseRegistration`, `BoundReadAccess`, `BoundWriteAccess` | Placement |
 | Lifecycle | `StorageEngine`, `StorageEngineLifecycle`, `StorageTransactionDomain`, `TransactionLifecycleOwner`, `StorageTransactionExecutor` | Leases |
 | Reference | `InMemoryEngine`, `InMemoryTransaction` | all above |
 
@@ -70,11 +70,11 @@ Layering inside the module:
 
 | Member | Contract |
 |---|---|
-| `transactionDomain` | One domain per engine instance; every transaction, Directory, Partition, and lease produced by the engine carries this domain. |
+| `transactionDomain` | One domain per engine instance; every transaction, Directory, Partition, and lease produced by the engine carries this domain. It also owns the shutdown gate that closes lease issuance. |
 | `directoryAccess` | Exactly one `DirectoryAccess` realization; no protocol default. |
 | `createTransaction()` | Admission through `StorageEngineLifecycle`; rejected with `invalidOperation` after `requestShutdown()`. |
 | `executeTransaction(_:)` | Runs the operation under `TransactionLifecycleOwner`: commit on success, cancel on failure, operation and cleanup failures preserved as `StorageTransactionCleanupError`. |
-| `leasePartition(_:transaction:)` | Extension; issues `PartitionLease` after domain check, registry reservation, and generation validation in the caller's transaction (details in the Directory component design). |
+| `leasePartition(_:transaction:)` | Extension; issues `PartitionLease` after a domain check, a shutdown check, and generation validation in the caller's transaction. Every later binding of that lease revalidates in its own transaction (details in the Directory component design). |
 | `requestShutdown()` / `waitUntilShutdown()` | Shutdown rejects new transactions and new lease issuance, then completes admitted backend cleanup. It does not wait for outstanding leases: a lease after shutdown cannot perform I/O because transaction admission is closed, and waiting would let a leaked lease hang shutdown. |
 
 Removed in this revision: `namespaceResolver`, `namespaceCatalog`,
@@ -106,8 +106,6 @@ holding deterministic path-derived prefixes is foreign data and is rejected
   `commitUnknownResult`) express that through the owner's
   `retainsTransactionAfterCommitFailure` predicate rather than by bypassing the
   owner.
-- On completion the owner releases the transaction's subtree intents in the
-  domain's lease registry.
 
 ## State, Ownership, and Lifecycle
 
@@ -115,13 +113,13 @@ holding deterministic path-derived prefixes is foreign data and is rejected
 |---|---|---|
 | Engine lifecycle phase | `StorageEngineLifecycle` (`Mutex`) | engine instance |
 | Active transaction set | engine (`Mutex`) | until commit/cancel completes |
-| Lease registry | `StorageTransactionDomain.leases` | engine instance |
+| Lease issuance gate | `StorageTransactionDomain` (`Mutex`) | engine instance |
 | Transaction ownership | `TransactionLifecycleOwner` | one `execute` call |
 | Bound access scope | `PartitionLease.withReadAccess` / `withWriteAccess` | one closure |
 
 ## Failure, Concurrency, and Constraints
 
-- Shared mutable state uses `Mutex` (`StorageEngineLifecycle`, registry,
+- Shared mutable state uses `Mutex` (`StorageEngineLifecycle`, domain,
   InMemory store) or actor isolation; no `@unchecked Sendable` outside verified
   immutable backings.
 - `withReadAccess` / `withWriteAccess` are `nonisolated(nonsending)` so the

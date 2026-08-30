@@ -54,7 +54,7 @@ public final class CloudflareDurableObjectStorageEngine: StorageEngine, Sendable
     }
 
     public func requestShutdown() {
-        transactionDomain.leases.requestShutdown()
+        transactionDomain.requestShutdown()
         storageLifecycle.requestShutdown()
     }
 

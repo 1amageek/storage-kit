@@ -1,20 +1,16 @@
 import Synchronization
 
-/// Registry-backed identity of one Partition lease.
+/// Shared, `Sendable` identity of one Partition lease.
 ///
-/// The registration is the shared, `Sendable` core behind a noncopyable
-/// `PartitionLease` and the bound access values and cursors it produces.
-/// Release is idempotent and happens exactly once against the registry.
+/// The registration is the core behind a noncopyable `PartitionLease` and the
+/// bound access values and cursors it produces, so a cursor that outlived its
+/// binding observes the release. Release is idempotent.
 package final class LeaseRegistration: Sendable {
-    package let id: UInt64
     package let address: StorageAddress
-    private let registry: PartitionLeaseRegistry
     private let active = Mutex(true)
 
-    init(id: UInt64, address: StorageAddress, registry: PartitionLeaseRegistry) {
-        self.id = id
+    init(address: StorageAddress) {
         self.address = address
-        self.registry = registry
     }
 
     package var isActive: Bool {
@@ -24,15 +20,11 @@ package final class LeaseRegistration: Sendable {
     /// Returns `true` when this call performed the release.
     @discardableResult
     package func release() -> Bool {
-        let wasActive = active.withLock { state in
+        active.withLock { state in
             let was = state
             state = false
             return was
         }
-        if wasActive {
-            registry.release(registrationID: id)
-        }
-        return wasActive
     }
 
     package func requireActive(
@@ -46,9 +38,5 @@ package final class LeaseRegistration: Sendable {
                 backend: backend
             )
         }
-    }
-
-    deinit {
-        release()
     }
 }

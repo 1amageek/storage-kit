@@ -287,12 +287,6 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                     message: "Node '\(newName)' already exists in the destination Directory"
                 )
             }
-            try transactionDomain.leases.registerIntent(
-                covering: movedAddress,
-                transaction: storage,
-                operation: operation,
-                backend: backend
-            )
             let moved = try await layer.move(
                 oldPath: oldPath,
                 newPath: newPath,
@@ -324,12 +318,6 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                     operation: operation
                 )
             }
-            try transactionDomain.leases.registerIntent(
-                covering: address,
-                transaction: storage,
-                operation: operation,
-                backend: backend
-            )
             // Removal is recursive and has no emptiness precondition: the
             // native layer clears every descendant node and the whole content
             // range of the removed node, which for a Partition is one range.

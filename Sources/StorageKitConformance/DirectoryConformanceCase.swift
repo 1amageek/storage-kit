@@ -675,9 +675,9 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
         }
     }
 
-    /// Leases bound data access to the Partition, block move and removal of any
-    /// covering subtree, detect stale Partition values, and stop being issued
-    /// after shutdown.
+    /// Leases bind data access to the Partition, are issued only against the
+    /// live generation, do not exclude anyone from moving or removing that
+    /// Partition, and stop being issued after shutdown.
     public func verifyLeaseLifecycle() async throws {
         let step = "lease lifecycle"
         try await withEngine { engine in
@@ -697,19 +697,17 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
                 let root = try await requireRoot(catalog, transaction, step)
                 let lease = try await engine.leasePartition(partition, transaction: transaction)
                 try require(lease.isActive, step, "a fresh lease must be active")
-                try await requireFailure(.directoryLeased, step, "removing a leased Partition") {
-                    try await catalog.remove("p", in: root, transaction: transaction)
-                }
+
+                // A lease retains a generation; it does not exclude anyone.
+                // Moving the ancestor of a leased Partition is admitted here,
+                // and the lease observes the consequence when it is bound.
                 let nestedLease = try await engine.leasePartition(nested, transaction: transaction)
-                try await requireFailure(.directoryLeased, step, "moving the ancestor of a leased Partition") {
-                    _ = try await catalog.move("parent", in: root, to: "moved", in: root, transaction: transaction)
-                }
-                try await requireFailure(.directoryLeased, step, "removing the ancestor of a leased Partition") {
-                    try await catalog.remove("parent", in: root, transaction: transaction)
+                let movedParent = try await catalog.move("parent", in: root, to: "moved", in: root, transaction: transaction)
+                try require(movedParent.address == (try StorageAddress(["moved"])), step, "a lease must not block an ancestor move")
+                try await requireFailure(.staleLease, step, "binding a lease whose Partition was moved out from under it") {
+                    try await nestedLease.withReadAccess(transaction) { _ in }
                 }
                 nestedLease.release()
-                let movedParent = try await catalog.move("parent", in: root, to: "moved", in: root, transaction: transaction)
-                try require(movedParent.address == (try StorageAddress(["moved"])), step, "ancestor move must succeed once the lease is released")
                 let value = try await lease.withWriteAccess(transaction) { access -> ByteString? in
                     try access.setValue([0x01], for: dataKey)
                     try await requireFailure(.invalidOperation, step, "writing outside the Partition") {
@@ -729,7 +727,7 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
             try await engine.withTransaction { transaction in
                 let root = try await requireRoot(catalog, transaction, step)
                 try await catalog.remove("p", in: root, transaction: transaction)
-                try await requireFailure(.staleLease, step, "leasing a Partition whose removal is pending in the same transaction") {
+                try await requireFailure(.staleLease, step, "leasing a Partition this transaction has already removed") {
                     _ = try await engine.leasePartition(partition, transaction: transaction)
                 }
             }
@@ -762,7 +760,7 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
                 try await engine.withTransaction { transaction in
                     let root = try await requireRoot(catalog, transaction, step)
                     try await catalog.remove("q", in: root, transaction: transaction)
-                    try await requireFailure(.staleLease, step, "leasing under a pending removal intent") {
+                    try await requireFailure(.staleLease, step, "leasing a Partition this transaction has already removed") {
                         _ = try await engine.leasePartition(other, transaction: transaction)
                     }
                     throw AbortTransaction()
@@ -770,7 +768,7 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
             }
             try await engine.withTransaction { transaction in
                 let lease = try await engine.leasePartition(other, transaction: transaction)
-                try require(lease.isActive, step, "intents of a cancelled transaction must be released")
+                try require(lease.isActive, step, "a removal that never committed must leave the Partition leasable")
                 lease.release()
             }
 
@@ -783,76 +781,78 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
         }
     }
 
-    /// SPEC §8.3: a move or removal fails while an active `PartitionLease`
-    /// covers any node in the affected subtree, and a transaction stops
-    /// blocking lease issuance when it commits or cancels.
+    /// SPEC §9.3 L-2/L-3: a lease is validated against the store at issuance
+    /// and again at every binding, so a Partition that was replaced under a
+    /// lease fails the binding instead of redirecting the work into the new
+    /// Partition.
     ///
-    /// A lease covers the whole subtree under its Partition and a move or
-    /// removal covers the whole subtree under its node, so both guards test
-    /// whether the two subtrees intersect. `verifyLeaseLifecycle` proves the
-    /// direction where the affected subtree contains the lease; this step
-    /// proves the opposite direction, where the lease contains the affected
-    /// subtree, and it drives the transaction through the caller-owned
-    /// lifecycle instead of `withTransaction`.
-    public func verifyLeaseSubtreeExclusion() async throws {
-        let step = "lease subtree exclusion"
+    /// The decisive case is a lease bound to a transaction other than the one
+    /// that issued it. Nothing in the process records that this lease exists,
+    /// and nothing needs to: the prefix allocator never reuses a number, so
+    /// the live node either carries the leased keyspace or it is a different
+    /// generation. That test gives the same answer in every process reading
+    /// the same store, which is why removal needs no lease precondition.
+    public func verifyLeaseStalenessDetection() async throws {
+        let step = "lease staleness detection"
         try await withEngine { engine in
             let catalog = engine.directoryAccess
-            let created = try await engine.withTransaction { transaction -> (Partition, Partition) in
+            let tenant = try await engine.withTransaction { transaction -> Partition in
                 let root = try await catalog.openOrInitializeRoot(transaction: transaction)
-                let tenant = try await catalog.openOrCreatePartition("tenant", in: root, transaction: transaction)
-                _ = try await catalog.openOrCreateDirectory("under-lease", in: tenant.root, transaction: transaction)
-                _ = try await catalog.openOrCreateDirectory("under-intent", in: tenant.root, transaction: transaction)
-                let victim = try await catalog.openOrCreatePartition("victim", in: root, transaction: transaction)
-                return (tenant, victim)
+                return try await catalog.openOrCreatePartition("tenant", in: root, transaction: transaction)
             }
-            let (tenant, victim) = created
+            let dataKey = key(in: tenant.root, suffix: [0x6B])
 
-            // A lease reaches every node inside its Partition, so a node below
-            // the leased Partition cannot be moved or removed while it is held.
-            try await engine.withTransaction { transaction in
-                let lease = try await engine.leasePartition(tenant, transaction: transaction)
-                try await requireFailure(.directoryLeased, step, "removing a node below an active lease") {
-                    try await catalog.remove("under-lease", in: tenant.root, transaction: transaction)
+            // The lease outlives the transaction that issued it. This is the
+            // lifetime a process-local registration could describe but not
+            // decide, because the answer lives in the store.
+            let issuing = try engine.createOwnedTransaction()
+            try await withLease(engine, tenant, issuing) { lease in
+                try await lease.withWriteAccess(issuing) { access in
+                    try access.setValue([0x01], for: dataKey)
                 }
-                try await requireFailure(.directoryLeased, step, "moving a node below an active lease") {
-                    _ = try await catalog.move("under-lease", in: tenant.root, to: "moved", in: tenant.root, transaction: transaction)
+                try await issuing.commit()
+
+                // A later transaction revalidates and still succeeds while the
+                // Partition is the same generation.
+                let sameGeneration = try engine.createOwnedTransaction()
+                let carried = try await lease.withReadAccess(sameGeneration) { access in
+                    try await access.getValue(for: dataKey)
                 }
-                lease.release()
-                try await catalog.remove("under-lease", in: tenant.root, transaction: transaction)
-            }
+                try require(carried == [0x01], step, "a lease must keep working in a later transaction while its Partition is unchanged")
+                try await sameGeneration.cancel()
 
-            // The intent guard is the same relation seen from the other side: a
-            // removal pending below a Partition blocks leasing that Partition.
-            // Committing the caller-owned transaction releases the intent while
-            // the transaction object is still alive, so the release cannot be
-            // attributed to deallocation.
-            let committed = try engine.createOwnedTransaction()
-            try await catalog.remove("under-intent", in: tenant.root, transaction: committed)
-            try await requireFailure(.staleLease, step, "leasing a Partition while a removal below it is pending") {
-                _ = try await engine.leasePartition(tenant, transaction: committed)
-            }
-            try await committed.commit()
-            try await engine.withTransaction { transaction in
-                let lease = try await engine.leasePartition(tenant, transaction: transaction)
-                try require(lease.isActive, step, "committing a caller-owned transaction must release its intents")
-                lease.release()
-            }
-            withExtendedLifetime(committed) {}
+                // Removal is admitted with the lease held.
+                let recreated = try await engine.withTransaction { transaction -> Partition in
+                    let root = try await requireRoot(catalog, transaction, step)
+                    try await catalog.remove("tenant", in: root, transaction: transaction)
+                    return try await catalog.openOrCreatePartition("tenant", in: root, transaction: transaction)
+                }
+                try require(recreated.keyspacePrefix != tenant.keyspacePrefix, step, "a recreated Partition must receive a new keyspace")
 
-            let cancelled = try engine.createOwnedTransaction()
-            let cancelledRoot = try await requireRoot(catalog, cancelled, step)
-            try await catalog.remove("victim", in: cancelledRoot, transaction: cancelled)
-            try await requireFailure(.staleLease, step, "leasing a Partition whose removal is pending") {
-                _ = try await engine.leasePartition(victim, transaction: cancelled)
+                // The binding is where the stale generation is caught. Without
+                // revalidation the write below would land in the new Partition.
+                let stale = try engine.createOwnedTransaction()
+                try await requireFailure(.staleLease, step, "write-binding a lease whose Partition was replaced") {
+                    try await lease.withWriteAccess(stale) { access in
+                        try access.setValue([0x02], for: dataKey)
+                    }
+                }
+                try await requireFailure(.staleLease, step, "read-binding a lease whose Partition was replaced") {
+                    try await lease.withReadAccess(stale) { access in
+                        _ = try await access.getValue(for: dataKey)
+                    }
+                }
+                try await stale.cancel()
+
+                try await engine.withTransaction { transaction in
+                    try await self.withLease(engine, recreated, transaction) { fresh in
+                        let carried = try await fresh.withReadAccess(transaction) { access in
+                            try await access.getValue(for: self.key(in: recreated.root, suffix: [0x6B]))
+                        }
+                        try self.require(carried == nil, step, "the recreated Partition must not expose the removed Partition's data")
+                    }
+                }
             }
-            try await cancelled.cancel()
-            try await engine.withTransaction { transaction in
-                let lease = try await engine.leasePartition(victim, transaction: transaction)
-                try require(lease.isActive, step, "cancelling a caller-owned transaction must release its intents")
-                lease.release()
-            }
-            withExtendedLifetime(cancelled) {}
         }
     }
 
@@ -904,6 +904,22 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
     }
 
     // MARK: - Support
+
+    /// Scoped borrow of one `PartitionLease`, released at end of scope.
+    ///
+    /// A lease is noncopyable, so it cannot be returned from a closure or held
+    /// in a `Sendable` result. Binding it through a closure is how a step keeps
+    /// one lease alive across several transactions, and letting the lease end
+    /// its own lifetime exercises the release-on-deinit path.
+    private nonisolated(nonsending) func withLease(
+        _ engine: Engine,
+        _ partition: Partition,
+        _ transaction: any TransactionReadAccess,
+        _ body: (borrowing PartitionLease) async throws -> Void
+    ) async throws {
+        let lease = try await engine.leasePartition(partition, transaction: transaction)
+        try await body(lease)
+    }
 
     private func withEngine<R: Sendable>(
         _ body: (Engine) async throws -> R

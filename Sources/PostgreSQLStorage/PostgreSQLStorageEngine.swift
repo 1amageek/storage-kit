@@ -307,7 +307,6 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                     transactionDomain: transactionDomain,
                     resultBytesFactory: resultBytesFactory
                 )
-                defer { transactionDomain.leases.releaseIntents(for: tx) }
 
                 return try await ActiveTransactionContext
                     .withActiveTransaction(tx) { _ in
@@ -338,7 +337,7 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
     }
 
     public func requestShutdown() {
-        transactionDomain.leases.requestShutdown()
+        transactionDomain.requestShutdown()
         let runTask = runTask
         storageLifecycle.requestShutdown(
             prepare: {

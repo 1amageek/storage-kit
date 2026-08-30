@@ -107,14 +107,14 @@ extension StorageEngine {
         try await StorageTransactionExecutor(engine: self).withTransaction(operation)
     }
 
-    /// Issues an exclusive lease for `partition` after re-validating it in
-    /// `transaction`.
+    /// Issues a lease for `partition` after resolving it in `transaction`.
     ///
-    /// The lease is reserved before validation so a concurrent move or removal
-    /// cannot slip between the catalog check and the registration. Validation
-    /// walks the Partition's address through the catalog; a missing node, a
-    /// node that is no longer a Partition, or a different keyspace prefix means
-    /// the Partition value is stale.
+    /// Validation walks the Partition's address through the catalog inside
+    /// `transaction`: a missing node, a node that is no longer a Partition, or
+    /// a different keyspace prefix means the Partition value is stale. The same
+    /// walk runs again every time the lease is bound to a transaction, so a
+    /// lease that outlives the transaction that issued it cannot carry a
+    /// superseded Partition into a later one.
     public func leasePartition(
         _ partition: Partition,
         transaction: any TransactionReadAccess
@@ -134,36 +134,17 @@ extension StorageEngine {
                 backend: backend
             )
         }
-        let bounds = PartitionKeyBounds(partition: partition, backend: backend)
-        let registration = try transactionDomain.leases.reserve(
-            partition.root.address,
-            backend: backend
+        try transactionDomain.requireLeaseIssuance(backend: backend)
+        try await directoryAccess.requirePartitionGeneration(
+            partition,
+            operation: .open,
+            transaction: transaction
         )
-        let current: Directory?
-        do {
-            current = try await directoryAccess.openDirectory(
-                at: partition.root.address,
-                transaction: transaction
-            )
-        } catch {
-            registration.release()
-            throw error
-        }
-        guard let current,
-              current.layer.isPartition,
-              current.keyspacePrefix == partition.keyspacePrefix
-        else {
-            registration.release()
-            throw StorageError.staleLease(
-                "Partition no longer exists at its address with the same keyspace",
-                operation: .open,
-                backend: backend
-            )
-        }
         return PartitionLease(
             partition: partition,
-            registration: registration,
-            bounds: bounds
+            directoryAccess: directoryAccess,
+            registration: LeaseRegistration(address: partition.root.address),
+            bounds: PartitionKeyBounds(partition: partition, backend: backend)
         )
     }
 }

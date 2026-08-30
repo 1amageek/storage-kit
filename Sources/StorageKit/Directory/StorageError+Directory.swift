@@ -38,19 +38,6 @@ extension StorageError {
         )
     }
 
-    public static func directoryLeased(
-        _ message: String,
-        operation: StorageOperation = .delete,
-        backend: StorageBackend = .unknown
-    ) -> StorageError {
-        StorageError(
-            code: .directoryLeased,
-            operation: operation,
-            backend: backend,
-            message: message
-        )
-    }
-
     public static func storageDomainMismatch(
         _ message: String,
         operation: StorageOperation = .open,
