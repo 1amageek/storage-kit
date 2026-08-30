@@ -17,20 +17,60 @@ import StorageKit
 /// cluster can hold unrelated native directories beside them and two catalogs
 /// with distinct root paths never observe each other's nodes.
 enum FDBDirectoryLayout {
-    /// Native layer value of a node this catalog initialized as a storage root
-    /// (FD-1).
+    /// Byte, inside the root node's own content prefix, that separates this
+    /// adapter's root record from everything a caller can address (FD-1).
     ///
-    /// The native layer creates the ancestors of a path as ordinary
-    /// empty-layer Directories, so a node at the configured root path can
-    /// exist because an unrelated engine opened a path through it. Only root
-    /// initialization writes this value, which is what makes it the witness
-    /// that the node is a storage root rather than such an ancestor.
+    /// `Directory.nodeSubspaceByte` is the byte the Directory component
+    /// reserves above every Tuple type code, and every key a caller derives
+    /// from a `Subspace` is Tuple-encoded, so no `StorageAddress` resolves into
+    /// this region.
+    private static let rootRecordByte: UInt8 = 0x72
+
+    /// Key of the record that witnesses an initialized storage root.
     ///
-    /// The value is reserved in both directions of this mapping, so it never
-    /// enters the tag space a caller works with: `nativeType(for:)` refuses a
-    /// caller tag equal to it, and `layerTag(for:)` refuses a node that
-    /// carries it.
-    static let rootLayer = DirectoryType.custom("storage-kit")
+    /// The native layer never hands out a prefix already in use, so the root
+    /// node's content prefix belongs to this catalog alone. Existence of the
+    /// node itself is not the witness: the native layer creates the ancestors
+    /// of a path as ordinary untyped Directories, so a node at the configured
+    /// root path can exist because an unrelated engine opened a path through
+    /// it. Only root initialization writes this key.
+    static func rootRecordKey(rootPrefix: ByteString) -> ByteString {
+        rootPrefix
+            .appending(Directory.nodeSubspaceByte)
+            .appending(rootRecordByte)
+    }
+
+    /// Value this catalog writes at `rootRecordKey(rootPrefix:)`.
+    ///
+    /// The record is adjudicated by what it holds rather than by its presence,
+    /// because a raw Layer 0 transaction can write anywhere. A key holding
+    /// anything else is foreign data in the root, not an initialized root.
+    ///
+    /// The encoding is the StorageKit Tuple, the same one the key-value
+    /// catalogs witness their roots with, and not the native layer's own.
+    static var rootRecordValue: ByteString {
+        StorageKit.Tuple(rootRecordName).pack()
+    }
+
+    private static let rootRecordName = "storage-kit"
+
+    /// Whether `value` is the record this catalog writes for a storage root.
+    ///
+    /// Bytes that are not a Tuple, a Tuple of another shape, or a Tuple naming
+    /// anything else are all foreign: the caller reports
+    /// `incompatibleStorageLayout` rather than adopting or overwriting them.
+    static func isRootRecord(_ value: ByteString) -> Bool {
+        let elements: [any StorageKit.TupleElement]
+        do {
+            elements = try StorageKit.Tuple.unpack(from: value)
+        } catch {
+            return false
+        }
+        guard elements.count == 1, let name = elements[0] as? String else {
+            return false
+        }
+        return name == rootRecordName
+    }
 
     /// Native path of `address` below `rootPath`.
     static func nativePath(rootPath: [String], address: StorageAddress) -> [String] {
@@ -41,38 +81,24 @@ enum FDBDirectoryLayout {
     ///
     /// `nil` types a plain Directory: the native layer stores no layer value
     /// for such a node, and `LayerTag.default` is the empty tag. Every other
-    /// tag is application-opaque bytes (SPEC §4) and the native layer stores
-    /// it verbatim, so the root marker is the only rejected tag: writing it
-    /// onto a child would place a node that every engine reads as a storage
-    /// root below one that already is.
-    static func nativeType(
-        for layer: LayerTag,
-        operation: StorageOperation,
-        backend: StorageBackend
-    ) throws -> DirectoryType? {
+    /// tag is application-opaque bytes (SPEC §4) and the native layer stores it
+    /// verbatim. No value is reserved: the root record of FD-1 lives in the
+    /// root node's content prefix, not in any node's layer value, so a caller
+    /// tag round-trips here exactly as it does on a key-value backend.
+    static func nativeType(for layer: LayerTag) -> DirectoryType? {
         if layer.isDefault {
             return nil
         }
         if layer.isPartition {
             return .partition
         }
-        let type = DirectoryType(rawValue: Array(layer.bytes))
-        guard type != rootLayer else {
-            throw StorageError(
-                code: .invalidOperation,
-                operation: operation,
-                backend: backend,
-                message: "Layer tag '\(rootLayer.description)' is reserved for the storage root"
-            )
-        }
-        return type
+        return DirectoryType(rawValue: Array(layer.bytes))
     }
 
     /// StorageKit layer tag of a resolved native node.
     ///
-    /// A node carrying the root marker is a storage root, and this call
-    /// resolves nodes that are not one, so the marker is refused here rather
-    /// than handed back as a tag no caller could write again.
+    /// The only failure is a native layer value longer than a `LayerTag`
+    /// admits, which no StorageKit write can produce.
     static func layerTag(
         for type: DirectoryType?,
         operation: StorageOperation,
@@ -83,13 +109,6 @@ enum FDBDirectoryLayout {
         }
         if case .partition = type {
             return .partition
-        }
-        guard type != rootLayer else {
-            throw StorageError.incompatibleStorageLayout(
-                "a node below this root carries the storage root marker",
-                operation: operation,
-                backend: backend
-            )
         }
         switch Result(catching: { () throws(DirectoryAddressError) in
             try LayerTag(ByteString(type.rawValue))

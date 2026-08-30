@@ -210,16 +210,16 @@ struct FDBDirectoryConformanceTests {
         }
     }
 
-    /// A node at the configured root path is a storage root only when it
-    /// carries the root marker (FD-1).
+    /// A node at the configured root path is a storage root only when it holds
+    /// this catalog's root record (FD-1).
     ///
     /// The native layer creates the ancestors of a path as ordinary
     /// empty-layer Directories, so an engine configured below this path brings
     /// the node into existence on its way down. A bootstrap that asked only
     /// whether the node exists would adopt that node, and the two engines
     /// would then allocate inside one another.
-    @Test("An unmarked node at the root path is not a storage root", .timeLimit(.minutes(1)))
-    func unmarkedRootNodeIsRejected() async throws {
+    @Test("An unrecorded node at the root path is not a storage root", .timeLimit(.minutes(1)))
+    func unrecordedRootNodeIsRejected() async throws {
         let roots = RootPathAllocator()
         let rootPath = roots.next()
         let layer = DirectoryLayer(database: try FDBClient.openDatabase())
@@ -229,14 +229,14 @@ struct FDBDirectoryConformanceTests {
             let exists = try await layer.exists(path: rootPath)
             #expect(exists, "the ancestor walk must have created the node at the root path")
 
-            await Self.expectFailure(.incompatibleStorageLayout, "openRoot on an unmarked node") {
+            await Self.expectFailure(.incompatibleStorageLayout, "openRoot on an unrecorded node") {
                 try await engine.withTransaction { transaction in
                     _ = try await catalog.openRoot(transaction: transaction)
                 }
             }
             await Self.expectFailure(
                 .incompatibleStorageLayout,
-                "openOrInitializeRoot on an unmarked node"
+                "openOrInitializeRoot on an unrecorded node"
             ) {
                 try await engine.withTransaction { transaction in
                     _ = try await catalog.openOrInitializeRoot(transaction: transaction)
@@ -259,8 +259,8 @@ struct FDBDirectoryConformanceTests {
             try await engine.withTransaction { transaction in
                 _ = try await engine.directoryAccess.openOrInitializeRoot(transaction: transaction)
             }
-            // The inner root's own creation left an unmarked node on the outer
-            // path, which FD-1 refuses.
+            // The inner root's own creation left an unrecorded node on the
+            // outer path, which FD-1 refuses.
             let outer = try await FDBStorageEngine(configuration: .init(rootPath: outerPath))
             await Self.expectFailure(.incompatibleStorageLayout, "openRoot above an inner root") {
                 try await outer.withTransaction { transaction in
@@ -314,46 +314,108 @@ struct FDBDirectoryConformanceTests {
         }
     }
 
-    /// The root marker is reserved in both directions of the layout mapping,
-    /// so a caller can neither write it onto a node nor read one back.
-    @Test("The root marker is reserved against caller layer tags", .timeLimit(.minutes(1)))
-    func rootMarkerIsReservedAgainstCallerTags() async throws {
+    /// No layer value is reserved, so a caller tag that happens to spell this
+    /// catalog's own name round-trips like any other tag (FD-1).
+    ///
+    /// The witness of an initialized root is a record inside the root node's
+    /// content prefix, not a layer value, so SPEC §4 holds unchanged here:
+    /// every tag other than `partition` is application-opaque, is stored and
+    /// read back exactly, and names a child rather than a storage root.
+    @Test("No layer tag is reserved against caller tags", .timeLimit(.minutes(1)))
+    func noLayerTagIsReservedAgainstCallerTags() async throws {
         let roots = RootPathAllocator()
         let rootPath = roots.next()
         let layer = DirectoryLayer(database: try FDBClient.openDatabase())
         try await Self.withEngine(rootPath: rootPath, base: roots.base) { engine in
             let catalog = engine.directoryAccess
-            let marker = try LayerTag(utf8: FDBDirectoryLayout.rootLayer.description)
+            let tag = try LayerTag(utf8: "storage-kit")
             try await engine.withTransaction { transaction in
                 let root = try await catalog.openOrInitializeRoot(transaction: transaction)
-                await Self.expectFailure(.invalidOperation, "openOrCreate with the reserved tag") {
-                    _ = try await catalog.openOrCreate(
-                        "child",
-                        layer: marker,
-                        in: root,
-                        transaction: transaction
-                    )
-                }
+                let created = try await catalog.openOrCreate(
+                    "child",
+                    layer: tag,
+                    in: root,
+                    transaction: transaction
+                )
+                #expect(created.layer == tag)
+                let reopened = try await catalog.open(
+                    "child",
+                    expecting: tag,
+                    in: root,
+                    transaction: transaction
+                )
+                #expect(reopened?.layer == tag)
+                let entries = try await catalog.listChildren(
+                    in: root,
+                    after: nil,
+                    limit: 10,
+                    transaction: transaction
+                )
+                #expect(entries.map(\.name) == ["child"])
+                #expect(entries.first?.layer == tag)
             }
-            let created = try await layer.list(path: rootPath)
-            #expect(created.isEmpty, "a rejected tag must not create the node")
 
-            // A node created outside StorageKit can still carry the marker, and
-            // it is a storage root wherever it is found rather than a child
-            // carrying a tag no caller could write back.
-            _ = try await layer.createOrOpen(
-                path: rootPath + ["nested"],
-                type: FDBDirectoryLayout.rootLayer
-            )
-            try await engine.withTransaction { transaction in
-                let root = try #require(try await catalog.openRoot(transaction: transaction))
-                await Self.expectFailure(.incompatibleStorageLayout, "openDirectory on a marked node") {
-                    _ = try await catalog.openDirectory("nested", in: root, transaction: transaction)
+            // The tag reaches the native layer verbatim, and the node carrying
+            // it is a child: it holds no root record of its own.
+            let child = try await layer.open(path: rootPath + ["child"])
+            #expect(child.type == .custom("storage-kit"))
+            let record = try await engine.withTransaction { transaction -> ByteString? in
+                try await transaction.getValue(
+                    for: FDBDirectoryLayout.rootRecordKey(rootPrefix: ByteString(child.prefix))
+                )
+            }
+            #expect(record == nil)
+        }
+    }
+
+    /// The root record is adjudicated by what it holds, so a key holding
+    /// anything else is foreign data in the root rather than an initialized
+    /// root (FD-1).
+    ///
+    /// The native layer never hands out a prefix already in use, so no
+    /// StorageKit write reaches this key on a node someone else owns. A raw
+    /// Layer 0 transaction can still write anywhere, and adopting whatever it
+    /// left would allocate this catalog's nodes on top of another writer's
+    /// keys.
+    @Test("A foreign root record is rejected", .timeLimit(.minutes(1)))
+    func foreignRootRecordIsRejected() async throws {
+        let foreignValues: [ByteString] = [
+            // Not a Tuple at all.
+            ByteString([0x01, 0x02, 0x03]),
+            // A Tuple naming something else.
+            StorageKit.Tuple("storage").pack(),
+            // A Tuple of another shape.
+            StorageKit.Tuple(Int64(0)).pack()
+        ]
+        for (index, foreign) in foreignValues.enumerated() {
+            let roots = RootPathAllocator()
+            try await Self.withEngine(rootPath: roots.next(), base: roots.base) { engine in
+                let catalog = engine.directoryAccess
+                let prefix = try await engine.withTransaction { transaction -> ByteString in
+                    try await catalog.openOrInitializeRoot(transaction: transaction).keyspacePrefix
                 }
-                await Self.expectFailure(.incompatibleStorageLayout, "listChildren over a marked node") {
-                    _ = try await catalog.listChildren(
-                        in: root, after: nil, limit: 10, transaction: transaction
+                try await engine.withTransaction { transaction in
+                    try transaction.setValue(
+                        foreign,
+                        for: FDBDirectoryLayout.rootRecordKey(rootPrefix: prefix)
                     )
+                }
+
+                await Self.expectFailure(
+                    .incompatibleStorageLayout,
+                    "openRoot over foreign record \(index)"
+                ) {
+                    try await engine.withTransaction { transaction in
+                        _ = try await catalog.openRoot(transaction: transaction)
+                    }
+                }
+                await Self.expectFailure(
+                    .incompatibleStorageLayout,
+                    "openOrInitializeRoot over foreign record \(index)"
+                ) {
+                    try await engine.withTransaction { transaction in
+                        _ = try await catalog.openOrInitializeRoot(transaction: transaction)
+                    }
                 }
             }
         }
@@ -462,10 +524,10 @@ struct FDBDirectoryConformanceTests {
     /// A native node created outside StorageKit keeps its own layer value, so a
     /// typed open reports a mismatch instead of adopting the node.
     ///
-    /// At the root path the marker of FD-1 decides first: a node carrying a
-    /// foreign layer value was not initialized by this catalog, so the root
-    /// open reports an incompatible layout rather than a tag mismatch. On a
-    /// child, FD-2 tag verification is the gate.
+    /// At the root path the shape check of FD-1 decides first: this catalog
+    /// initializes an untyped node, so any layer value there belongs to another
+    /// writer and the root open reports an incompatible layout rather than a
+    /// tag mismatch. On a child, FD-2 tag verification is the gate.
     @Test("Foreign layer value is rejected", .timeLimit(.minutes(1)))
     func foreignLayerValueIsRejected() async throws {
         let roots = RootPathAllocator()
@@ -623,8 +685,9 @@ struct FDBDirectoryConformanceTests {
     /// Removes the per-test base path through a bootstrapped client so cleanup
     /// never depends on the engine under test.
     ///
-    /// Every root path of a step extends `base`, and this adapter owns no key
-    /// of its own, so removing that node removes the whole step's state.
+    /// Every root path of a step extends `base`, and the only key this adapter
+    /// owns is the root record inside a root node's own content prefix, so
+    /// removing that node removes the whole step's state.
     private static func cleanUp(_ base: [String]) async throws {
         let layer = DirectoryLayer(database: try FDBClient.openDatabase())
         if try await layer.exists(path: base) {

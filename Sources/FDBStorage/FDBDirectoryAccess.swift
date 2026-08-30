@@ -35,18 +35,22 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
 
     // MARK: - Root
 
-    /// The root marker on the native node at `rootPath`: the sole witness that
-    /// this root is initialized (SPEC §8.7, FD-1).
+    /// The root record inside the content prefix of the native node at
+    /// `rootPath`: the sole witness that this root is initialized
+    /// (SPEC §8.7, FD-1).
     ///
-    /// This adapter owns no key of its own. The native Directory Layer never
-    /// allocates a prefix that is already in use, so no StorageKit write can
-    /// land on bytes written outside it, and the whole bootstrap question is
-    /// which node this root owns. Existence of the node does not answer it:
-    /// the native layer creates the ancestors of a path as ordinary
-    /// empty-layer Directories, so opening a root at `["a", "b"]` brings
-    /// `["a"]` into existence as a side effect. The witness is therefore
-    /// `FDBDirectoryLayout.rootLayer`, which only initialization writes, and
-    /// an unmarked node at `rootPath` is refused rather than adopted.
+    /// The native Directory Layer never allocates a prefix that is already in
+    /// use, so the root node's content prefix belongs to this adapter alone and
+    /// the whole bootstrap question is which node this root owns. Existence of
+    /// the node does not answer it: the native layer creates the ancestors of a
+    /// path as ordinary untyped Directories, so opening a root at
+    /// `["a", "b"]` brings `["a"]` into existence as a side effect. The witness
+    /// is therefore the record only initialization writes, and a node at
+    /// `rootPath` without it is refused rather than adopted.
+    ///
+    /// The witness is not a layer value. SPEC §4 gives every tag other than
+    /// `partition` to the application, so reading a root out of one would make
+    /// a caller's own tag either forge a storage root or be refused.
     ///
     /// One cluster hosts one storage root per root path, so existence is asked
     /// of that node and never of the cluster. Another root's nodes and the
@@ -62,7 +66,11 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 return nil
             }
             let node = try await layer.open(path: rootPath, transaction: native)
-            return try requireRoot(node, operation: operation)
+            return try await requireRoot(
+                node,
+                transaction: native,
+                operation: operation
+            )
         }
     }
 
@@ -70,22 +78,31 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         let operation = StorageOperation.initialize
         let storage = try resolve(transaction, operation: operation)
         return try await withLayer(storage, writes: true, operation: operation) { layer, native in
-            // The node is resolved before it is created, so an existing node
-            // is adjudicated by `requireRoot` and reported as an incompatible
-            // layout. Asking `createOrOpen` for the marker instead would let
-            // the native layer answer the same state with its own layer
-            // mismatch, which names a different failure than the one that
-            // happened.
+            // The node is resolved before it is created, so an existing node is
+            // adjudicated by `requireRoot`: an untyped node this catalog never
+            // recorded is reported as an incompatible layout rather than
+            // adopted, and one carrying a layer value keeps the failure that
+            // names what is actually there.
             if let node = try await openIfExists(layer, path: rootPath, transaction: native) {
-                return try requireRoot(node, operation: operation)
+                return try await requireRoot(
+                    node,
+                    transaction: native,
+                    operation: operation
+                )
             }
             try await requireNoAncestorRoot(layer, transaction: native, operation: operation)
             let node = try await layer.createOrOpen(
                 path: rootPath,
-                type: FDBDirectoryLayout.rootLayer,
+                type: nil,
                 transaction: native
             )
-            return try requireRoot(node, operation: operation)
+            // The record and the node commit together in the caller's
+            // transaction, so a root is never observed created but unrecorded.
+            try native.setValue(
+                FDBDirectoryLayout.rootRecordValue,
+                for: FDBDirectoryLayout.rootRecordKey(rootPrefix: ByteString(node.prefix))
+            )
+            return try requireRootShape(node, operation: operation)
         }
     }
 
@@ -130,11 +147,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         let storage = try resolve(transaction, operation: operation)
         try requireDomain(of: parent, operation: operation)
         let address = try childAddress(of: parent, name, operation: operation)
-        let type = try FDBDirectoryLayout.nativeType(
-            for: tag,
-            operation: operation,
-            backend: backend
-        )
+        let type = FDBDirectoryLayout.nativeType(for: tag)
         // The native create recreates every missing ancestor as an untyped
         // node, so a removed parent would otherwise be rebuilt into a tree that
         // no operation created and no invariant describes. Re-resolving refuses
@@ -456,27 +469,57 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         )
     }
 
-    /// The catalog root is the marked node at `rootPath`, and its children are
-    /// allocated from the native root layer's content base.
+    /// The catalog root is the recorded node at `rootPath`, and its children
+    /// are allocated from the native root layer's content base.
     ///
-    /// The marker is verified here instead of being mapped through
-    /// `FDBDirectoryLayout.layerTag`, and the root is returned with
-    /// `LayerTag.default`, so both backend classes expose the same root value
-    /// and no caller learns the marker.
+    /// A node this catalog initialized is untyped, so any layer value refuses
+    /// the node before its content prefix is read: a native partition names the
+    /// shape mismatch, and any other type is a node someone else placed at this
+    /// path. A record on such a node would be data inside a keyspace this
+    /// adapter does not own.
     private func requireRoot(
         _ node: DirectorySubspace,
+        transaction native: any TransactionProtocol,
         operation: StorageOperation
-    ) throws -> Directory {
-        guard node.type != DirectoryType.partition else {
-            throw StorageError.directoryLayerMismatch(
-                "The configured root path is not a plain Directory",
+    ) async throws -> Directory {
+        let root = try requireRootShape(node, operation: operation)
+        switch try await rootRecordState(prefix: root.keyspacePrefix, transaction: native) {
+        case .present:
+            return root
+        case .absent:
+            throw StorageError.incompatibleStorageLayout(
+                "the node at the configured root path was not initialized as a storage root",
+                operation: operation,
+                backend: backend
+            )
+        case .foreign:
+            throw StorageError.incompatibleStorageLayout(
+                "the storage root record holds a value no Directory catalog wrote",
                 operation: operation,
                 backend: backend
             )
         }
-        guard node.type == FDBDirectoryLayout.rootLayer else {
+    }
+
+    /// The root `Directory` of an untyped node, refusing every typed one.
+    ///
+    /// The root is returned with `LayerTag.default` instead of being mapped
+    /// through `FDBDirectoryLayout.layerTag`, so both backend classes expose
+    /// the same root value.
+    private func requireRootShape(
+        _ node: DirectorySubspace,
+        operation: StorageOperation
+    ) throws -> Directory {
+        if let type = node.type {
+            guard type != DirectoryType.partition else {
+                throw StorageError.directoryLayerMismatch(
+                    "The configured root path is not a plain Directory",
+                    operation: operation,
+                    backend: backend
+                )
+            }
             throw StorageError.incompatibleStorageLayout(
-                "the node at the configured root path was not initialized as a storage root",
+                "the node at the configured root path carries a layer value this catalog never wrote",
                 operation: operation,
                 backend: backend
             )
@@ -490,14 +533,42 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         )
     }
 
+    /// What the root record of the node at `prefix` says about that node.
+    ///
+    /// Presence alone is not the answer, because a raw Layer 0 transaction can
+    /// write anywhere: only this catalog's own value witnesses a storage root.
+    /// Each caller decides what the other two states mean — `requireRoot`
+    /// refuses both rather than adopting or overwriting them, while the
+    /// ancestor walk treats anything but this catalog's record as "not one of
+    /// this catalog's roots".
+    ///
+    /// The read is not a snapshot read, so a concurrent write to the record
+    /// conflicts with the transaction that observed it.
+    private func rootRecordState(
+        prefix: ByteString,
+        transaction native: any TransactionProtocol
+    ) async throws -> RootRecordState {
+        let key = FDBDirectoryLayout.rootRecordKey(rootPrefix: prefix)
+        guard let value = try await native.getValue(for: key, snapshot: false) else {
+            return .absent
+        }
+        return FDBDirectoryLayout.isRootRecord(value) ? .present : .foreign
+    }
+
+    private enum RootRecordState {
+        case absent
+        case present
+        case foreign
+    }
+
     /// Refuses a root path that lies inside another storage root (FD-1a).
     ///
-    /// One node per proper ancestor of `rootPath` is read in the caller's
-    /// transaction. The default root path has a single component and therefore
-    /// no proper ancestor, so this walk reads nothing there. The reverse order
-    /// of creation is already refused by `requireRoot`, because the outer path
-    /// then holds the empty-layer node the inner root's own creation left
-    /// behind.
+    /// One node and one record per proper ancestor of `rootPath` are read in
+    /// the caller's transaction. The default root path has a single component
+    /// and therefore no proper ancestor, so this walk reads nothing there. The
+    /// reverse order of creation is already refused by `requireRoot`, because
+    /// the outer path then holds the unrecorded node the inner root's own
+    /// creation left behind.
     private func requireNoAncestorRoot(
         _ layer: DirectoryLayer,
         transaction native: any TransactionProtocol,
@@ -509,8 +580,15 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         for end in 1..<rootPath.count {
             let ancestor = Array(rootPath[0..<end])
             guard let node = try await openIfExists(layer, path: ancestor, transaction: native),
-                  node.type == FDBDirectoryLayout.rootLayer
+                  node.type == nil
             else {
+                continue
+            }
+            let state = try await rootRecordState(
+                prefix: ByteString(node.prefix),
+                transaction: native
+            )
+            guard state == .present else {
                 continue
             }
             throw StorageError.incompatibleStorageLayout(

@@ -70,8 +70,9 @@ this package.
 |---|---|
 | `rootPath: [String]` | Native path that owns the engine's root Directory. Default `Configuration.defaultRootPath = ["storage-kit"]`. Must be non-empty with non-empty components; otherwise `StorageError(.invalidOperation, operation: .open)` before any client work. Engines with distinct root paths on one cluster never observe each other's Directories, because a root path that nests inside another initialized root is rejected at bootstrap rather than opened. |
 
-Root state is scoped by `rootPath`: the node at that path is the whole of
-this root's bootstrap state (FD-1). Two engines with distinct root paths
+Root state is scoped by `rootPath`: the node at that path and the record
+inside its own content prefix are the whole of this root's bootstrap state
+(FD-1). Two engines with distinct root paths
 therefore never observe each other's root, and neither is initialized, opened,
 or rejected because of the other's data.
 
@@ -81,16 +82,20 @@ The mapping is one to one and adds no encoding of its own.
 
 | StorageKit node | Native path | Native layer type |
 |---|---|---|
-| root | `rootPath` | `.custom("storage-kit")`, the root marker of FD-1 |
+| root | `rootPath` | none (plain node); the root record of FD-1 lives in the node's content prefix, not its layer value |
 | child named `name`, `LayerTag.default` | parent path + `name` | none (plain node) |
 | child named `name`, `LayerTag.partition` | parent path + `name` | `.partition` |
 | child named `name`, other tag `t` | parent path + `name` | `.custom(t)` |
 
-- The root marker is reserved in both directions of the mapping, which is what
-  keeps it out of the tag space: `nativeType(for:)` refuses a caller tag equal
-  to it, and `layerTag(for:)` refuses a node that carries it. A caller can
-  therefore neither write the marker onto a node nor read one back as a
-  `LayerTag`, and a node carrying it is a storage root wherever it is found.
+- The mapping reserves no tag value. SPEC §8.7 keeps the bootstrap witness out
+  of the layer-tag value space entirely, so every tag other than `partition`
+  round-trips unchanged on this backend exactly as on a key-value backend.
+  The root record instead occupies `rootPrefix ‖ FE ‖ 72`: the native layer
+  hands the root node's prefix to nobody else, `FE` is the byte the Directory
+  component reserves above every Tuple type code, and every key a caller
+  derives from a `Subspace` is Tuple-encoded, so no address can name it. It is
+  nonetheless adjudicated by its value, not its presence, because a raw
+  Layer 0 transaction can still write anywhere.
 
 - `Directory.keyspacePrefix` is the native HCA-allocated prefix of the node.
   `Directory.root.prefix` is that prefix for a plain Directory and
@@ -108,8 +113,8 @@ The mapping is one to one and adds no encoding of its own.
 
 | ID | Invariant |
 |---|---|
-| FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` carries the root marker `FDBDirectoryLayout.rootLayer`: `openRoot` reports an absent node as an uninitialized root and never writes, and `openOrInitializeRoot` creates the node with that marker in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. Existence of the node is not the witness, because the native layer creates the ancestors of a path as ordinary empty-layer Directories: a node at `rootPath` without the marker is foreign and fails `incompatibleStorageLayout` instead of being adopted. A native partition at the root path fails `directoryLayerMismatch`. The root `Directory` this adapter returns carries `LayerTag.default`, so the marker is never observable to a caller, and the marker value is reserved against caller tags in both directions of the layout mapping. |
-| FD-1a | Storage roots do not nest. Bootstrap reads each proper ancestor of `rootPath` in the caller's transaction and fails `incompatibleStorageLayout` when one carries the root marker; the reverse order is already refused by FD-1, because the outer path's node then exists without a marker. The default root path has no proper ancestor. Without FD-1a an outer root would list an inner root among its own children and remove it recursively. |
+| FD-1 | The native layer below `rootPath` is the sole existence authority for nodes, and this adapter owns exactly one key: the root record at `FDBDirectoryLayout.rootRecordKey(rootPrefix:)`, inside the root node's own content prefix. The root is initialized exactly when that key holds `FDBDirectoryLayout.rootRecordValue`: `openRoot` reports an absent node as an uninitialized root and never writes, and `openOrInitializeRoot` creates an untyped node at `rootPath` and writes the record in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. Existence of the node is not the witness, because the native layer creates the ancestors of a path as ordinary untyped Directories: a node at `rootPath` whose record is absent, or holds bytes this adapter did not write, is foreign and fails `incompatibleStorageLayout` instead of being adopted. A node carrying any layer value fails at the root path — `directoryLayerMismatch` for a native partition, `incompatibleStorageLayout` for any other type — so a caller's own tag can neither be mistaken for a root nor be refused for carrying one. The root `Directory` this adapter returns carries `LayerTag.default`. |
+| FD-1a | Storage roots do not nest. Bootstrap reads each proper ancestor of `rootPath` in the caller's transaction and fails `incompatibleStorageLayout` when one holds the root record; the reverse order is already refused by FD-1, because the outer path's node then exists without a record. The default root path has no proper ancestor, so the walk reads nothing there; otherwise it costs one node resolution and one record read per proper ancestor. Without FD-1a an outer root would list an inner root among its own children and remove it recursively. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
 | FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized root is observed without touching the layer version key. |
 | FD-4 | A move never resurrects a stale destination: both endpoints are re-resolved from the root in the caller's transaction before the native mutation, so a missing source or destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. |
@@ -136,7 +141,7 @@ The mapping is one to one and adds no encoding of its own.
 
 | Behavior | KV catalog | FDBStorage |
 |---|---|---|
-| Bootstrap witness | the root layer's allocator key, plus an unbounded emptiness probe that rejects foreign data | the root marker on the native node at `rootPath`, plus an ancestor scan that refuses a nested root; data below the node cannot collide, because the native layer never allocates a prefix in use |
+| Bootstrap witness | the root layer's allocator key, plus an unbounded emptiness probe that rejects foreign data | the root record inside the content prefix of the native node at `rootPath`, plus an ancestor scan that refuses a nested root; data below the node cannot collide, because the native layer never allocates a prefix in use |
 | Root prefix | `Tuple(0)` under the domain root layer | HCA-allocated native prefix below `rootPath` |
 | Foreign nodes | cannot exist; the catalog owns every edge | a native node created outside StorageKit is listed and resolvable, and carries its own layer tag |
 
@@ -243,8 +248,9 @@ resolve tx -> require parent domain -> child address
 | D-1…D-12, operations 1–5, the root bootstrap state machine, L-1…L-3, L-7, L-8, FD-1, FD-3…FD-9 | `Tests/FDBStorageTests/FDBDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps) |
 | Layout names and layer values, nested Partition creation and containment | `FDBDirectoryConformanceTests.nativeNodesCarryStorageKitNamesAndLayers` |
 | FD-2 on foreign native nodes: typed root, child, and Partition mismatch, and the tag returned by a listing | `FDBDirectoryConformanceTests.foreignLayerValueIsRejected` |
-| FD-1 root marker: an unmarked node at `rootPath` is refused instead of adopted, and an ancestor walk through the path does not initialize a root there | `FDBDirectoryConformanceTests.unmarkedRootNodeIsRejected` |
-| FD-1a nesting, both orders, and the reservation of the marker against caller tags | `FDBDirectoryConformanceTests.storageRootsDoNotNest`, `rootMarkerIsReservedAgainstCallerTags` |
+| FD-1 root record: a node at `rootPath` whose record is absent, whose record holds foreign bytes, or which carries any layer value is refused instead of adopted, and an ancestor walk through the path does not initialize a root there | `FDBDirectoryConformanceTests.unrecordedRootNodeIsRejected`, `foreignRootRecordIsRejected` |
+| FD-1 tag parity: no layer tag is reserved, so a caller tag equal to the adapter's own name round-trips like any other | `FDBDirectoryConformanceTests.noLayerTagIsReservedAgainstCallerTags` |
+| FD-1a nesting, both orders of creation | `FDBDirectoryConformanceTests.storageRootsDoNotNest` |
 | A layer tag that is not valid UTF-8 stays application-opaque | `FDBDirectoryConformanceTests.layerTagThatIsNotUTF8RoundTrips` |
 | Root path isolation and configuration validation | `FDBDirectoryConformanceTests.distinctRootPathsIsolateCatalogs`, `rootPathConfigurationIsValidated` |
 | FD-1 root scoping: a fresh root initializes beside occupied roots, and one root's state never decides another's | `FDBDirectoryConformanceTests.rootInitializesOnANonemptyCluster`, `siblingRootsAreIndependent` |
