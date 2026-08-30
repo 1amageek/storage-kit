@@ -53,6 +53,16 @@ state; no second cursor state is introduced at the caller boundary.
 
 - Post-validation is completed before a row becomes observable, before the
   ready state is published, and before a concurrent finish boundary resolves.
+- A cursor issued by a bound Partition access belongs to the binding scope that
+  issued it. Closing that scope completes the cursor's backend cleanup, so an
+  escaped cursor has no outstanding capability — cleanup included — once the
+  binding closes, and no cleanup is left to run against a transaction its owner
+  has already closed.
+- A commit whose outcome is unknown is reported as that unknown outcome. The
+  transaction owner does not cancel, clean up, or wrap it into a different
+  failure, because the transaction may already have been applied. This holds in
+  every transaction owner, including the backends that override transaction
+  execution.
 - `finish()` waits for an in-flight advance boundary. Cursor lifetime owners
   are released only after backend cleanup and post-validation have completed.
 - A validation, cancellation, iteration, or cleanup failure remains typed.

@@ -87,7 +87,7 @@ Partition subtree is.
 | Type | Definition | Bounds (`DirectoryLimits`) |
 |---|---|---|
 | `LayerTag` | opaque tag bytes of a node; `.default` is empty, `.partition` is UTF-8 `partition` | 0…255 bytes |
-| `StorageAddress` | the logical path value: ordered exact UTF-8 name components from the root, empty = root; no normalization, no separator parsing | component 1…255 UTF-8 bytes; depth ≤ 64 |
+| `StorageAddress` | the logical path value: ordered exact UTF-8 name components from the root, empty = root; no normalization, no separator parsing; equality and hashing are decided on the component UTF-8 bytes, not by `String` comparison | component 1…255 UTF-8 bytes; depth ≤ 64 |
 | `Directory` | `domain` (identity), `address`, `layer`, `keyspacePrefix`, package `layerRoot`, `root: Subspace` | — |
 | `DirectoryEntry` | one listing row: `name`, `layer` | — |
 | `Partition` | a `Directory` whose `layer.isPartition`; constructed only from such a node | — |
@@ -117,7 +117,7 @@ operations convert it to `StorageError.invalidDirectoryAddress`.
 |---|---|---|---|---|---|
 | 1 | `open(_:expecting:in:transaction:)` | Read | `TransactionReadAccess` | returns `nil` | never creates; a non-`nil` expectation is verified against the stored tag → `directoryLayerMismatch` |
 | 2 | `openOrCreate(_:layer:in:transaction:)` | Write | `TransactionAccess` | creates with `layer` | an existing node with a different tag fails `directoryLayerMismatch`; creation is atomic with the caller's transaction; a parent that is absent when the write runs fails `keyNotFound` (D-13) |
-| 3 | `listChildren(in:after:limit:transaction:)` | Read | `TransactionReadAccess` | empty page | returns `DirectoryEntry` (name + tag); `limit` 1…1000, ordered by encoded key, `after` exclusive |
+| 3 | `listChildren(in:after:limit:transaction:)` | Read | `TransactionReadAccess` | empty page | returns `DirectoryEntry` (name + tag); `limit` 1…1000, ordered by encoded key, `after` exclusive; the bound is applied by the backend read, never by truncating a materialized listing |
 | 4 | `move(_:in:to:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | whole-node rename, Partitions included; a destination parent that is absent when the write runs fails `keyNotFound` (D-13); different containing layer: `partitionBoundaryViolation`; into own subtree: `invalidDirectoryAddress`; target exists: `invalidOperation` |
 | 5 | `remove(_:in:transaction:)` | Write | `TransactionAccess` | `keyNotFound` | atomic recursive removal of the node, its descendants, and their data. There is no empty-only precondition, and no lease precondition |
 
@@ -146,13 +146,14 @@ catalog.domain`; a mismatch fails `storageDomainMismatch` before any I/O.
 | ID | Guarantee | Enforcement |
 |---|---|---|
 | D-1 | Hierarchical naming with exact UTF-8 components | `StorageAddress.validateComponent` |
+| D-1a | One component is one storage identity: addresses that differ in component bytes are never equal, and equal addresses always encode to equal keys | `StorageAddress` equality and hashing run over the UTF-8 bytes |
 | D-2 | Stable resolution: the same address resolves to the same `keyspacePrefix` until moved or removed | the child edge stores the content prefix |
 | D-3 | Opaque root: callers cannot derive a prefix from a name | prefixes are per-layer allocator numbers, never name-derived |
 | D-4 | Disjoint siblings: distinct children never share a prefix | Tuple-encoded `Int64` allocations are prefix-free |
 | D-5 | Create, move, remove are atomic with the caller's transaction | all catalog writes go through the caller's `TransactionAccess` |
 | D-6 | Read-only open never creates | read operations take `TransactionReadAccess` only |
 | D-7 | Domain identity: values from one engine are rejected by another | `storageDomainMismatch` |
-| D-8 | Bounded enumeration | `limit` 1…1000, else `invalidOperation` |
+| D-8 | Bounded enumeration | `limit` 1…1000, else `invalidOperation`; the page is produced by a bounded backend read in key order, so cost and order both come from the store |
 | D-9 | A stated layer expectation is verified on open | `directoryLayerMismatch` |
 | D-10 | A Partition keyspace is contiguous: every descendant node, Subspace, and key lies in `[P, strinc(P))` | the nested layer allocates only inside `P` |
 | D-11 | Partitions nest, and no node moves into or out of a Partition | the containing layer base of source and destination must be equal |
@@ -252,10 +253,12 @@ KeyValueDirectoryCatalog                    -- witness: the root layer allocator
                                         write: Initialize (allocator = Tuple(1))
   allocator absent, root nonempty    -> Reject    incompatibleStorageLayout
 
-FDBDirectoryAccess                          -- witness: the native node at the root path
-  node exists                        -> Open      (requireRoot rejects a `partition` node)
+FDBDirectoryAccess                          -- witness: the root marker on the node at the root path
+  node exists, marker present        -> Open      (requireRoot rejects a `partition` node)
+  node exists, marker absent         -> Reject    incompatibleStorageLayout
+  node absent, an ancestor is a root -> Reject    incompatibleStorageLayout
   node absent                        -> read:  nil
-                                        write: Initialize (createOrOpen at the root path)
+                                        write: Initialize (createOrOpen with the marker)
 ```
 
 No dual read/write of two layouts; production never deletes or rewrites a
@@ -272,9 +275,31 @@ them:
   precondition of initialization, and the probe covers the whole root.
 - FoundationDB allocates every prefix through the native Directory Layer,
   which never returns a prefix already in use, so no StorageKit write can land
-  on foreign bytes. What the configured root path names is an operator
-  decision; StorageKit verifies only that the node there is a plain Directory
-  and not a native partition.
+  on foreign bytes. Existence of the node is still not the witness: the native
+  layer creates the ancestors of a path as ordinary empty-layer Directories, so
+  opening a root at `["a", "b"]` brings `["a"]` into existence as a side
+  effect. The witness is therefore the marker this catalog writes — the node's
+  native layer string `storage-kit` — which only initialization writes and
+  which implicit ancestor creation never sets.
+
+The root marker is a native-layer value, not a `LayerTag` a caller observes.
+`requireRoot` verifies it and returns the root `Directory` with `.default`, so
+both backend classes expose the same root value and no caller learns the
+marker.
+
+Storage roots do not nest, and the marker closes both orders of creation:
+
+| Created first | Created second | Outcome for the second |
+|---|---|---|
+| `["a", "b"]` | `["a"]` | the node exists with an empty native layer → `incompatibleStorageLayout` |
+| `["a"]` | `["a", "b"]` | a proper ancestor carries the marker → `incompatibleStorageLayout` |
+
+The ancestor check reads one node per proper ancestor of the configured root
+path, in the caller's transaction. The default root path has no proper
+ancestor, so the check costs nothing there. Without it, the outer root would
+list the inner root among its own children and `remove` would destroy it
+recursively — a whole storage root deleted through an operation that names one
+child.
 
 "Root" is one storage root, never a whole physical store. A backend whose
 store is its own storage root answers emptiness for the store. A backend that
@@ -291,7 +316,7 @@ is never initialized, opened, or rejected because of another root's data.
 | L-3 | A stale generation fails; work is never redirected | an absent node, a non-Partition layer, or a different `keyspacePrefix` → `staleLease` |
 | L-4 | Read binding cannot mutate | `BoundReadAccess` has no mutation members |
 | L-5 | Write binding cannot commit or cancel | `BoundWriteAccess` has no lifecycle members |
-| L-6 | Bound access and cursors cannot escape the closure | noncopyable, borrowed; cursors validate the binding scope before every advance → `staleLease` |
+| L-6 | Bound access and cursors cannot escape the closure | noncopyable, borrowed; cursors validate the binding scope before every advance → `staleLease`, and the binding scope owns every cursor it issued and completes that cursor's backend cleanup as part of closing, so no capability of an escaped cursor — cleanup included — is still outstanding when the binding closes |
 | L-7 | Releasing the last lease is not success | release returns nothing; the caller's transaction outcome is the result |
 | L-8 | Keys are confined to the Partition's content region | every key must lie in `[P, P ‖ FE)`; a range end may equal `P ‖ FE` only through `firstGreaterOrEqual`; `getKey` returns `nil` when the resolved key lies outside |
 

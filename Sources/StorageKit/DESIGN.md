@@ -93,7 +93,7 @@ holding deterministic path-derived prefixes is foreign data and is rejected
 | M-3 | `cancel()` is authoritative: after it returns, backend cleanup is complete or a typed cleanup failure is reported. |
 | M-4 | Every failure is a `StorageError`; unsupported operations fail `unsupportedOperation`, never empty success. |
 | M-5 | Read operations accept `TransactionReadAccess` and cannot mutate. |
-| M-6 | Cursors are scoped: advancing a cursor after its owning scope closed fails typed. |
+| M-6 | Cursors are scoped: advancing a cursor after its owning scope closed fails typed, and closing the scope completes the cleanup of every cursor it issued, so no capability of an issued cursor outlives the scope. |
 | M-7 | Bounds (`keyTooLarge`, `valueTooLarge`, `transactionTooLarge`, `invalidPointReadMaximum`, `pointReadValueTooLarge`) are enforced before backend I/O where the bound is known. |
 
 ### `TransactionLifecycleOwner` (package, `~Copyable`)

@@ -68,7 +68,7 @@ this package.
 
 | Field | Contract |
 |---|---|
-| `rootPath: [String]` | Native path that owns the engine's root Directory. Default `Configuration.defaultRootPath = ["storage-kit"]`. Must be non-empty with non-empty components; otherwise `StorageError(.invalidOperation, operation: .open)` before any client work. Engines with distinct root paths on one cluster never observe each other's Directories. |
+| `rootPath: [String]` | Native path that owns the engine's root Directory. Default `Configuration.defaultRootPath = ["storage-kit"]`. Must be non-empty with non-empty components; otherwise `StorageError(.invalidOperation, operation: .open)` before any client work. Engines with distinct root paths on one cluster never observe each other's Directories, because a root path that nests inside another initialized root is rejected at bootstrap rather than opened. |
 
 Root state is scoped by `rootPath`: the node at that path is the whole of
 this root's bootstrap state (FD-1). Two engines with distinct root paths
@@ -102,7 +102,8 @@ The mapping is one to one and adds no encoding of its own.
 
 | ID | Invariant |
 |---|---|
-| FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` exists: `openRoot` reports its absence as an uninitialized root and never writes, and `openOrInitializeRoot` creates it in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. A node found at `rootPath` is opened rather than adjudicated: the native layer never allocates a prefix already in use, so no StorageKit write can land on bytes written outside it, and which node `rootPath` names is an operator decision. `requireRoot` still refuses a node whose layer is not the default, so a native partition at the root path fails with `directoryLayerMismatch`. |
+| FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` carries the root marker `FDBDirectoryLayout.rootLayer`: `openRoot` reports an absent node as an uninitialized root and never writes, and `openOrInitializeRoot` creates the node with that marker in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. Existence of the node is not the witness, because the native layer creates the ancestors of a path as ordinary empty-layer Directories: a node at `rootPath` without the marker is foreign and fails `incompatibleStorageLayout` instead of being adopted. A native partition at the root path fails `directoryLayerMismatch`. The root `Directory` this adapter returns carries `LayerTag.default`, so the marker is never observable to a caller. |
+| FD-1a | Storage roots do not nest. Bootstrap reads each proper ancestor of `rootPath` in the caller's transaction and fails `incompatibleStorageLayout` when one carries the root marker; the reverse order is already refused by FD-1, because the outer path's node then exists without a marker. The default root path has no proper ancestor. Without FD-1a an outer root would list an inner root among its own children and remove it recursively. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
 | FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized root is observed without touching the layer version key. |
 | FD-4 | A move never resurrects a stale destination: a missing destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. Both are checked before the native mutation. |
@@ -129,7 +130,7 @@ The mapping is one to one and adds no encoding of its own.
 
 | Behavior | KV catalog | FDBStorage |
 |---|---|---|
-| Bootstrap witness | the root layer's allocator key, plus an unbounded emptiness probe that rejects foreign data | the native node at `rootPath`; foreign data cannot collide, because the native layer never allocates a prefix in use, so there is nothing to reject |
+| Bootstrap witness | the root layer's allocator key, plus an unbounded emptiness probe that rejects foreign data | the root marker on the native node at `rootPath`, plus an ancestor scan that refuses a nested root; data below the node cannot collide, because the native layer never allocates a prefix in use |
 | Root prefix | `Tuple(0)` under the domain root layer | HCA-allocated native prefix below `rootPath` |
 | Foreign nodes | cannot exist; the catalog owns every edge | a native node created outside StorageKit is listed and resolvable, and carries its own layer tag |
 
