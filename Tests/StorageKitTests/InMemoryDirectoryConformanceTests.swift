@@ -16,6 +16,11 @@ struct InMemoryDirectoryConformanceTests {
         try await conformance.verifyForeignRootRejection()
     }
 
+    @Test("Foreign root allocator rejection", .timeLimit(.minutes(1)))
+    func foreignRootAllocatorRejection() async throws {
+        try await conformance.verifyForeignRootAllocatorRejection()
+    }
+
     @Test("Create and open", .timeLimit(.minutes(1)))
     func createAndOpen() async throws {
         try await conformance.verifyCreateAndOpen()

@@ -109,7 +109,9 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     /// initialized (SPEC §8.7).
     ///
     /// Every content prefix of the root layer is handed out by this key, so a
-    /// catalog that owns the root owns it, and nothing else writes it. Nothing
+    /// catalog that owns the root owns it, and nothing else writes it. The
+    /// witness is the value it holds rather than its presence; see
+    /// `rootAllocatorHoldsNextNumber`. Nothing
     /// else records the same fact: a second witness can disagree with this one,
     /// and a disagreement is a state neither `openRoot` nor
     /// `openOrInitializeRoot` can resolve without either fabricating a root or
@@ -122,7 +124,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         transaction: any TransactionReadAccess
     ) async throws -> Directory? {
         try requireDomain(of: transaction, operation: .open)
-        guard try await transaction.getValue(for: rootAllocatorKey) != nil else {
+        guard try await rootAllocatorHoldsNextNumber(transaction: transaction, operation: .open) else {
             try await requireRootHoldsNoForeignData(transaction: transaction, operation: .open)
             return nil
         }
@@ -133,13 +135,51 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         transaction: any TransactionAccess
     ) async throws -> Directory {
         try requireDomain(of: transaction, operation: .initialize)
-        if try await transaction.getValue(for: rootAllocatorKey) != nil {
+        if try await rootAllocatorHoldsNextNumber(transaction: transaction, operation: .initialize) {
             return rootDirectory
         }
         try await requireRootHoldsNoForeignData(transaction: transaction, operation: .initialize)
         try admitMutation(operation: .initialize)
         try transaction.setValue(Tuple(Layout.firstNumber).pack(), for: rootAllocatorKey)
         return rootDirectory
+    }
+
+    /// Whether the root allocator holds the value this catalog writes.
+    ///
+    /// The allocator key lies in the same flat keyspace as every other key, so
+    /// a writer that never ran this catalog can occupy it. Presence of the key
+    /// would then adopt that store as an initialized root and skip the
+    /// emptiness probe below, so the witness is the value: one packed `Tuple`
+    /// holding a next number this catalog could have handed out. Bytes that
+    /// decode to a plausible next number stay indistinguishable from this
+    /// catalog's own allocator, and separating them would need a second
+    /// witness that can disagree with this one.
+    private func rootAllocatorHoldsNextNumber(
+        transaction: any TransactionReadAccess,
+        operation: StorageOperation
+    ) async throws -> Bool {
+        guard let value = try await transaction.getValue(for: rootAllocatorKey) else {
+            return false
+        }
+        let rejection = StorageError.incompatibleStorageLayout(
+            "the storage root allocator holds a value no Directory catalog wrote",
+            operation: operation,
+            backend: backend
+        )
+        let elements: [any TupleElement]
+        do {
+            elements = try Tuple.unpack(from: value)
+        } catch {
+            throw rejection
+        }
+        guard elements.count == 1,
+              let number = elements[0] as? Int64,
+              number >= Layout.firstNumber,
+              number < Int64.max
+        else {
+            throw rejection
+        }
+        return true
     }
 
     /// Rejects an uninitialized root that already holds data.

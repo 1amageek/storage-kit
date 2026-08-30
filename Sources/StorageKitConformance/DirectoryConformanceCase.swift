@@ -104,6 +104,53 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
         }
     }
 
+    /// The root allocator witnesses a key-value root by the value it holds,
+    /// not by the presence of its key.
+    ///
+    /// Key-value engines only, for the reason `ForeignRootProbe` states: the
+    /// allocator key shares one flat keyspace with every other key, so a
+    /// writer that never ran this catalog can occupy it. Presence alone would
+    /// adopt such a store as an initialized root, and the emptiness probe
+    /// never runs, because that store is not empty.
+    public func verifyForeignRootAllocatorRejection() async throws {
+        let step = "foreign root allocator rejection"
+        let allocatorKey = KeyValueDirectoryCatalog.Layout.allocatorKey(layerRoot: ByteString())
+        let foreignValues: [ByteString] = [
+            // Not a Tuple at all: a byte string with no terminator.
+            ByteString([0x01, 0x02, 0x03]),
+            // A Tuple of the wrong shape.
+            Tuple("storage").pack(),
+            // A number below the first one this catalog ever hands out.
+            Tuple(Int64(0)).pack()
+        ]
+        for foreign in foreignValues {
+            try await withEngine { engine in
+                let catalog = engine.directoryAccess
+                try await engine.withTransaction { transaction in
+                    try transaction.setValue(foreign, for: allocatorKey)
+                }
+                try await requireFailure(
+                    .incompatibleStorageLayout,
+                    step,
+                    "openRoot over a foreign allocator value"
+                ) {
+                    _ = try await engine.withTransaction { transaction in
+                        try await catalog.openRoot(transaction: transaction)
+                    }
+                }
+                try await requireFailure(
+                    .incompatibleStorageLayout,
+                    step,
+                    "openOrInitializeRoot over a foreign allocator value"
+                ) {
+                    _ = try await engine.withTransaction { transaction in
+                        try await catalog.openOrInitializeRoot(transaction: transaction)
+                    }
+                }
+            }
+        }
+    }
+
     /// Operations 1–2: creation is idempotent, opening a missing child yields
     /// nil, one name namespace carries one layer tag, and addresses are
     /// validated.

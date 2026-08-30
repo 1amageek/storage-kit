@@ -81,10 +81,16 @@ The mapping is one to one and adds no encoding of its own.
 
 | StorageKit node | Native path | Native layer type |
 |---|---|---|
-| root | `rootPath` | none (plain node) |
+| root | `rootPath` | `.custom("storage-kit")`, the root marker of FD-1 |
 | child named `name`, `LayerTag.default` | parent path + `name` | none (plain node) |
 | child named `name`, `LayerTag.partition` | parent path + `name` | `.partition` |
 | child named `name`, other tag `t` | parent path + `name` | `.custom(t)` |
+
+- The root marker is reserved in both directions of the mapping, which is what
+  keeps it out of the tag space: `nativeType(for:)` refuses a caller tag equal
+  to it, and `layerTag(for:)` refuses a node that carries it. A caller can
+  therefore neither write the marker onto a node nor read one back as a
+  `LayerTag`, and a node carrying it is a storage root wherever it is found.
 
 - `Directory.keyspacePrefix` is the native HCA-allocated prefix of the node.
   `Directory.root.prefix` is that prefix for a plain Directory and
@@ -102,7 +108,7 @@ The mapping is one to one and adds no encoding of its own.
 
 | ID | Invariant |
 |---|---|
-| FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` carries the root marker `FDBDirectoryLayout.rootLayer`: `openRoot` reports an absent node as an uninitialized root and never writes, and `openOrInitializeRoot` creates the node with that marker in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. Existence of the node is not the witness, because the native layer creates the ancestors of a path as ordinary empty-layer Directories: a node at `rootPath` without the marker is foreign and fails `incompatibleStorageLayout` instead of being adopted. A native partition at the root path fails `directoryLayerMismatch`. The root `Directory` this adapter returns carries `LayerTag.default`, so the marker is never observable to a caller. |
+| FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` carries the root marker `FDBDirectoryLayout.rootLayer`: `openRoot` reports an absent node as an uninitialized root and never writes, and `openOrInitializeRoot` creates the node with that marker in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. Existence of the node is not the witness, because the native layer creates the ancestors of a path as ordinary empty-layer Directories: a node at `rootPath` without the marker is foreign and fails `incompatibleStorageLayout` instead of being adopted. A native partition at the root path fails `directoryLayerMismatch`. The root `Directory` this adapter returns carries `LayerTag.default`, so the marker is never observable to a caller, and the marker value is reserved against caller tags in both directions of the layout mapping. |
 | FD-1a | Storage roots do not nest. Bootstrap reads each proper ancestor of `rootPath` in the caller's transaction and fails `incompatibleStorageLayout` when one carries the root marker; the reverse order is already refused by FD-1, because the outer path's node then exists without a marker. The default root path has no proper ancestor. Without FD-1a an outer root would list an inner root among its own children and remove it recursively. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
 | FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized root is observed without touching the layer version key. |
@@ -213,6 +219,8 @@ resolve tx -> require parent domain -> child address
 | D-1…D-12, operations 1–5, the root bootstrap state machine, L-1…L-3, L-7, L-8, FD-1, FD-3…FD-9 | `Tests/FDBStorageTests/FDBDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps) |
 | Layout names and layer values, nested Partition creation and containment | `FDBDirectoryConformanceTests.nativeNodesCarryStorageKitNamesAndLayers` |
 | FD-2 on foreign native nodes: typed root, child, and Partition mismatch, and the tag returned by a listing | `FDBDirectoryConformanceTests.foreignLayerValueIsRejected` |
+| FD-1 root marker: an unmarked node at `rootPath` is refused instead of adopted, and an ancestor walk through the path does not initialize a root there | `FDBDirectoryConformanceTests.unmarkedRootNodeIsRejected` |
+| FD-1a nesting, both orders, and the reservation of the marker against caller tags | `FDBDirectoryConformanceTests.storageRootsDoNotNest`, `rootMarkerIsReservedAgainstCallerTags` |
 | A layer tag that is not valid UTF-8 stays application-opaque | `FDBDirectoryConformanceTests.layerTagThatIsNotUTF8RoundTrips` |
 | Root path isolation and configuration validation | `FDBDirectoryConformanceTests.distinctRootPathsIsolateCatalogs`, `rootPathConfigurationIsValidated` |
 | FD-1 root scoping: a fresh root initializes beside occupied roots, and one root's state never decides another's | `FDBDirectoryConformanceTests.rootInitializesOnANonemptyCluster`, `siblingRootsAreIndependent` |

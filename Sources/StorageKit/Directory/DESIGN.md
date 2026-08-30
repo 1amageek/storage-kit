@@ -248,7 +248,8 @@ no operation resolves without either fabricating a root or destroying data.
 
 ```text
 KeyValueDirectoryCatalog                    -- witness: the root layer allocator `FE 61`
-  allocator present                  -> Open      (root = content number 0)
+  allocator holds a next number      -> Open      (root = content number 0)
+  allocator holds anything else      -> Reject    incompatibleStorageLayout
   allocator absent, root empty       -> read:  nil
                                         write: Initialize (allocator = Tuple(1))
   allocator absent, root nonempty    -> Reject    incompatibleStorageLayout
@@ -273,6 +274,14 @@ them:
   and content prefixes start at `Tuple(1)`, so foreign data can occupy a
   prefix the catalog would later hand out. Emptiness is therefore a
   precondition of initialization, and the probe covers the whole root.
+  A foreign key can also occupy the allocator key itself, and presence of that
+  key would then adopt the root and skip the emptiness probe. The witness is
+  therefore the value this catalog writes: the allocator is read as a packed
+  `Tuple` integer and rejected unless it is a next number in
+  `[1, Int64.max)`. Bytes that decode to a plausible next number stay
+  indistinguishable from this catalog's own allocator; separating them would
+  need a second witness, which is the disagreement no operation resolves, so
+  that residue is stated rather than closed.
 - FoundationDB allocates every prefix through the native Directory Layer,
   which never returns a prefix already in use, so no StorageKit write can land
   on foreign bytes. Existence of the node is still not the witness: the native
