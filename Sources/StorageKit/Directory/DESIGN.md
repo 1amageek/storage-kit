@@ -289,12 +289,13 @@ KeyValueDirectoryCatalog                    -- witness: the root layer allocator
                                         write: Initialize (allocator = Tuple(1))
   allocator absent, root nonempty    -> Reject    incompatibleStorageLayout
 
-FDBDirectoryAccess                          -- witness: the root marker on the node at the root path
-  node exists, marker present        -> Open      (requireRoot rejects a `partition` node)
-  node exists, marker absent         -> Reject    incompatibleStorageLayout
+FDBDirectoryAccess                          -- witness: the root record inside the root node's content prefix
+  node exists, record present        -> Open      (requireRoot rejects a typed node)
+  node exists, record absent         -> Reject    incompatibleStorageLayout
+  node exists, record foreign        -> Reject    incompatibleStorageLayout
   node absent, an ancestor is a root -> Reject    incompatibleStorageLayout
   node absent                        -> read:  nil
-                                        write: Initialize (createOrOpen with the marker)
+                                        write: Initialize (createOrOpen, then the record)
 ```
 
 No dual read/write of two layouts; production never deletes or rewrites a
@@ -318,25 +319,30 @@ them:
   need a second witness, which is the disagreement no operation resolves, so
   that residue is stated rather than closed.
 - FoundationDB allocates every prefix through the native Directory Layer,
-  which never returns a prefix already in use, so no StorageKit write can land
-  on foreign bytes. Existence of the node is still not the witness: the native
-  layer creates the ancestors of a path as ordinary empty-layer Directories, so
+  which never returns a prefix already in use, so the root node's content
+  prefix belongs to this catalog alone and no StorageKit write can land on
+  foreign bytes. Existence of the node is still not the witness: the native
+  layer creates the ancestors of a path as ordinary untyped Directories, so
   opening a root at `["a", "b"]` brings `["a"]` into existence as a side
-  effect. The witness is therefore the marker this catalog writes — the node's
-  native layer string `storage-kit` — which only initialization writes and
-  which implicit ancestor creation never sets.
+  effect. The witness is therefore the record this catalog writes inside that
+  content prefix, which only initialization writes and which implicit ancestor
+  creation never sets. A raw Layer 0 transaction can still write anywhere, so
+  the record is adjudicated by the value it holds rather than by its presence.
 
-The root marker is a native-layer value, not a `LayerTag` a caller observes.
-`requireRoot` verifies it and returns the root `Directory` with `.default`, so
-both backend classes expose the same root value and no caller learns the
-marker.
+The root record lives inside the root node's own content prefix, above every
+Tuple type code, so no `StorageAddress` resolves onto it. It is not a
+`LayerTag` a caller observes, and no layer value is reserved: a caller tag
+round-trips on FoundationDB exactly as it does on a key-value backend
+(SPEC §4). `requireRoot` verifies the record and returns the root `Directory`
+with `.default`, so both backend classes expose the same root value and no
+caller learns the record.
 
-Storage roots do not nest, and the marker closes both orders of creation:
+Storage roots do not nest, and the record closes both orders of creation:
 
 | Created first | Created second | Outcome for the second |
 |---|---|---|
-| `["a", "b"]` | `["a"]` | the node exists with an empty native layer → `incompatibleStorageLayout` |
-| `["a"]` | `["a", "b"]` | a proper ancestor carries the marker → `incompatibleStorageLayout` |
+| `["a", "b"]` | `["a"]` | the node exists carrying no root record → `incompatibleStorageLayout` |
+| `["a"]` | `["a", "b"]` | a proper ancestor carries a root record → `incompatibleStorageLayout` |
 
 The ancestor check reads one node per proper ancestor of the configured root
 path, in the caller's transaction. The default root path has no proper
