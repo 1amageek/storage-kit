@@ -42,8 +42,9 @@ public struct StorageTransactionCleanupError:
     /// A backend that wraps a non-`StorageError` operation failure so its
     /// connection scope cannot remap it must be able to unwrap that failure
     /// again after cleanup also failed, without discarding the cancellation
-    /// failures the owner recorded.
-    public func replacingOperationError(
+    /// failures the owner recorded. Unwrapping a backend's own transport
+    /// wrapper is an adapter concern, so this stays inside the package.
+    package func replacingOperationError(
         _ error: any Error
     ) -> StorageTransactionCleanupError {
         StorageTransactionCleanupError(
