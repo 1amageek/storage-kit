@@ -25,27 +25,17 @@ enum FDBDirectoryLayout {
     /// Native layer type for `layer`.
     ///
     /// `nil` types a plain Directory: the native layer stores no layer value
-    /// for such a node, and `LayerTag.default` is the empty tag.
-    static func nativeType(
-        for layer: LayerTag,
-        operation: StorageOperation,
-        backend: StorageBackend
-    ) throws -> DirectoryType? {
+    /// for such a node, and `LayerTag.default` is the empty tag. Every other
+    /// tag is application-opaque bytes (SPEC §4) and the native layer stores
+    /// it verbatim, so no tag is rejected here.
+    static func nativeType(for layer: LayerTag) -> DirectoryType? {
         if layer.isDefault {
             return nil
         }
         if layer.isPartition {
             return .partition
         }
-        guard let type = DirectoryType(rawValue: Array(layer.bytes)) else {
-            throw StorageError(
-                code: .invalidDirectoryAddress,
-                operation: operation,
-                backend: backend,
-                message: "Layer tag is not valid UTF-8 and cannot be stored by the native Directory Layer"
-            )
-        }
-        return type
+        return DirectoryType(rawValue: Array(layer.bytes))
     }
 
     /// StorageKit layer tag of a resolved native node.

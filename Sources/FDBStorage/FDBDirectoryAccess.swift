@@ -35,22 +35,36 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
 
     // MARK: - Root
 
+    /// Layout marker key of this engine's storage root.
+    ///
+    /// One cluster hosts one storage root per root path, so each root carries
+    /// its own marker and is initialized, opened, and rejected on its own.
+    private var layoutMarkerKey: ByteString {
+        StorageLayoutMarker.key(rootPath: rootPath)
+    }
+
     func openRoot(transaction: any TransactionReadAccess) async throws -> Directory? {
         let operation = StorageOperation.open
         let storage = try resolve(transaction, operation: operation)
-        switch try await StorageLayoutMarker.inspect(transaction: transaction) {
-        case .openV1:
-            break
-        case .uninitialized:
-            return nil
-        case .rejected(let rejection):
-            throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
-        }
+        let marker = try await transaction.getValue(for: layoutMarkerKey)
         return try await withLayer(storage, writes: false, operation: operation) { layer, native in
-            // `exists` resolves the path without touching the layer version
-            // key, so a cluster whose marker is set but whose root path was
-            // never created is observed without a write.
-            guard try await layer.exists(path: rootPath, transaction: native) else {
+            // The storage root of this engine is the native node at `rootPath`,
+            // so emptiness is asked of that node and never of the cluster.
+            // Another root's nodes and the native allocator counters are not
+            // this root's data. `exists` resolves the path without touching the
+            // layer version key, so the observation needs no write.
+            let rootExists = try await layer.exists(path: rootPath, transaction: native)
+            switch StorageLayoutMarker.inspect(marker: marker, rootIsEmpty: !rootExists) {
+            case .openV1:
+                break
+            case .uninitialized:
+                return nil
+            case .rejected(let rejection):
+                throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
+            }
+            // A marked root whose node was removed outside StorageKit reads as
+            // absent rather than as a layout failure.
+            guard rootExists else {
                 return nil
             }
             let node = try await layer.open(path: rootPath, transaction: native)
@@ -61,13 +75,21 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
     func openOrInitializeRoot(transaction: any TransactionAccess) async throws -> Directory {
         let operation = StorageOperation.initialize
         let storage = try resolve(transaction, operation: operation)
-        switch try await StorageLayoutMarker.inspect(transaction: transaction) {
+        let markerKey = layoutMarkerKey
+        let marker = try await transaction.getValue(for: markerKey)
+        // A Directory operation is exclusive with the transaction's own reads
+        // and writes, so the root observation and the marker write are ordered
+        // around it rather than nested inside it.
+        let rootExists = try await withLayer(storage, writes: false, operation: operation) { layer, native in
+            try await layer.exists(path: rootPath, transaction: native)
+        }
+        switch StorageLayoutMarker.inspect(marker: marker, rootIsEmpty: !rootExists) {
         case .openV1:
             break
         case .uninitialized:
             // The marker and the root node commit in one transaction, so a
-            // reader never observes a marked layout without its catalog.
-            try transaction.setValue(StorageLayoutMarker.v1, for: StorageLayoutMarker.key)
+            // reader never observes a marked root without its catalog.
+            try transaction.setValue(StorageLayoutMarker.v1, for: markerKey)
         case .rejected(let rejection):
             throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
         }
@@ -123,11 +145,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         try requireDomain(of: parent, operation: operation)
         let address = try childAddress(of: parent, name, operation: operation)
         let layerRoot = parent.childLayerRoot
-        let type = try FDBDirectoryLayout.nativeType(
-            for: tag,
-            operation: operation,
-            backend: backend
-        )
+        let type = FDBDirectoryLayout.nativeType(for: tag)
         let path = nativePath(of: address)
         return try await withLayer(storage, writes: true, operation: operation) { layer, native in
             // One native call opens or creates the node. Resolving the path
@@ -345,6 +363,11 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
             ) { native in
                 try await body(layer, native)
             }
+        } catch is CancellationError {
+            // Cancellation is a Swift task signal, not a backend failure. The
+            // transaction paths already surface it unchanged, so the Directory
+            // path must not convert it into `backendFailure`.
+            throw CancellationError()
         } catch {
             throw Self.convert(error, operation: operation)
         }

@@ -463,6 +463,10 @@ public final class SQLiteStorageTransaction:
     // MARK: - Terminal Operations
 
     public func commit() async throws {
+        // A terminal outcome ends every pending move or removal this
+        // transaction staged, so its subtree intents stop blocking lease
+        // issuance here rather than at deallocation.
+        defer { releaseSubtreeIntents() }
         defer { releaseContextLeaseIfTerminal() }
         try await commitWithoutReleasingContextLease()
     }
@@ -533,6 +537,10 @@ public final class SQLiteStorageTransaction:
     }
 
     public func cancel() async throws {
+        // A terminal outcome ends every pending move or removal this
+        // transaction staged, so its subtree intents stop blocking lease
+        // issuance here rather than at deallocation.
+        defer { releaseSubtreeIntents() }
         defer { releaseContextLeaseIfTerminal() }
         try await cancelWithoutReleasingContextLease()
     }

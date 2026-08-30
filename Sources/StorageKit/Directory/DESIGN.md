@@ -192,10 +192,10 @@ whose type codes never reach `0xFD`.
   one range `[P, strinc(P))`; a plain child is walked, since its own children
   live in the containing layer. Every visited node also clears its data range
   and its edge.
-- "Root is empty" (InspectRoot) is a limit-1 range read over `[] ..< [0xFF]`.
-  Keys starting with `0xFF` are the FoundationDB system keyspace convention and
-  never the first byte of a Tuple-encoded key; StorageKit treats them as
-  outside the user keyspace on every backend.
+- "Root is empty" (InspectRoot) is the first key at or after `[]` with no
+  upper bound, so a key at or above `[0xFF]` counts as data exactly like any
+  other key. A bounded probe would report a root that holds only such keys as
+  empty and adopt a foreign layout, so the probe is deliberately unbounded.
 
 Version 1 is the layout defined by the current SPEC. The interim catalog that
 allocated every prefix from the domain root allocator was never released, so
@@ -222,12 +222,21 @@ No dual read/write of two layouts; production never deletes or rewrites a
 root. A V0 deterministic-prefix store is "marker absent, nonempty" and is
 rejected.
 
+"Root" here is one storage root, never a whole physical store. A backend whose
+store is its own storage root reads and writes the marker at
+`StorageLayoutMarker.key` and answers emptiness for the store. A backend that
+hosts several storage roots in one store, as FoundationDB does below a
+configured root path, records one marker per root at
+`StorageLayoutMarker.key(rootPath:)` and answers emptiness for that root alone,
+so a root is never initialized, opened, or rejected because of another root's
+data.
+
 ### Leases (L-1…L-8)
 
 | ID | Invariant | Enforcement |
 |---|---|---|
 | L-1 | Lease, transaction, and Partition domains match | `storageDomainMismatch` at issuance and at every bind |
-| L-2 | A lease blocks removal or move of its subtree | registry check in operations 4 and 5 → `directoryLeased` |
+| L-2 | A lease blocks a removal or move whose subtree intersects the leased subtree | registry check in operations 4 and 5 → `directoryLeased` |
 | L-3 | A stale generation fails; work is never redirected | issuance re-resolves the address in the caller's transaction and compares `keyspacePrefix` → `staleLease` |
 | L-4 | Read binding cannot mutate | `BoundReadAccess` has no mutation members |
 | L-5 | Write binding cannot commit or cancel | `BoundWriteAccess` has no lifecycle members |
@@ -253,13 +262,22 @@ Registry (per `StorageTransactionDomain`, in-process):
 
 - `reserve(address)` runs before validation so a concurrent removal sees the
   lease; it is rejected after `requestShutdown()` (`resourceUnavailable`) and
-  while a removal or move intent covers the address (`staleLease`).
+  while a removal or move intent intersects the address (`staleLease`).
 - Operations 4 and 5 register a subtree intent keyed by the caller's
-  transaction object. The intent lives until `TransactionLifecycleOwner`
-  completes the transaction or, for transactions committed directly, until the
-  transaction object is deallocated. The registry holds the transaction only
-  weakly inside its `Mutex`; the direction of error is always conservative
-  (a lease is refused, never issued over a pending removal).
+  transaction object. The transaction releases its own intents when it commits
+  or cancels, so an intent never outlives the mutation it protects; the
+  registry additionally holds the transaction only weakly inside its `Mutex`,
+  which reclaims the intents of a transaction that was abandoned without
+  either outcome. The direction of error is always conservative (a lease is
+  refused, never issued over a pending removal).
+- Both guards compare subtrees, not one direction of ancestry. A lease covers
+  the whole subtree under its Partition and a move or removal covers the whole
+  subtree under its node, and two ancestor-closed sets intersect exactly when
+  one root is an ancestor-or-self of the other, so `StorageAddress`
+  `subtreeIntersects` is the single relation both use. Testing only one
+  direction would admit removing a node beneath an active lease on one side
+  and leasing a Partition that a pending removal is about to delete from
+  beneath on the other.
 - Cross-process: the registry cannot see other processes. There the invariant
   is L-3 (staleness at issuance), not prevention; every backend already
   behaves this way and the fixture proves it by removing and recreating a
@@ -336,8 +354,9 @@ confirming edge keys stay within each backend's key bound.
 | Contract | Evidence |
 |---|---|
 | Values and bounds | `Tests/StorageKitTests/DirectoryValueTests.swift` |
-| D-1…D-12, state machine, operations 1–5, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests` (every step, the marker state machine included; on FoundationDB the marker is one cluster-global key) |
-| L-4, L-5 (compile-level), L-6 escape | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
+| D-1…D-12, state machine, operations 1–5, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests` (every step, the marker state machine included; on FoundationDB the marker is one key per root path) |
+| L-2 subtree intersection in both directions, intent release at commit and cancel | `DirectoryConformanceCase.verifyLeaseSubtreeExclusion` run by every adapter suite |
+| L-4, L-5 (compile-level), L-6 escape, registry intersection relation | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 
 Changing the catalog layout, the marker bytes, or any operation semantics
 requires updating this design first, then the StorageKit module design, then

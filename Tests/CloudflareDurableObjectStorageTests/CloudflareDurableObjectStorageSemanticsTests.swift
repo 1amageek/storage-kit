@@ -134,6 +134,69 @@ struct CloudflareDurableObjectStorageSemanticsTests {
         }
     }
 
+    @Test func emptyStoreKeyProbeConflictsWithAnyLaterInsert() async throws {
+        let engine = try await makeEngine()
+        let prober = try engine.createTransaction()
+        let firstKey = try await prober.getKey(selector: .firstGreaterOrEqual([]))
+        #expect(firstKey == nil)
+
+        let writer = try engine.createTransaction()
+        try writer.setValue([1], for: [0x42])
+        try await writer.commit()
+
+        // The probe answered "the store is empty", so its dependency spans the
+        // whole keyspace and any insert has to invalidate it.
+        try prober.setValue([1], for: [0x01])
+        await #expect(throws: StorageError.self) {
+            try await prober.commit()
+        }
+    }
+
+    @Test func rangeReadDoesNotConflictWithWriteAboveItsEndSelector() async throws {
+        let engine = try await makeEngine()
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([0x10], for: [0x10])
+            try transaction.setValue([0x11], for: [0x11])
+        }
+
+        let reader = try engine.createTransaction()
+        let rows = try await reader.collectRange(
+            from: .firstGreaterOrEqual([0x10]),
+            to: .firstGreaterOrEqual([0x12]),
+            limit: 0
+        )
+        #expect(rows.map(\.0) == [[0x10], [0x11]])
+
+        let writer = try engine.createTransaction()
+        try writer.setValue([1], for: [0x30])
+        try await writer.commit()
+
+        // The end selector settles past the last stored key without scanning
+        // beyond it, so the dependency stays bounded by that selector key.
+        try reader.setValue([1], for: [0x40])
+        try await reader.commit()
+    }
+
+    @Test func rangeReadConflictsWithDeletionOfARowItReturned() async throws {
+        let engine = try await makeEngine()
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([0x11], for: [0x11])
+        }
+
+        let reader = try engine.createTransaction()
+        let firstKey = try await reader.getKey(selector: .firstGreaterOrEqual([]))
+        #expect(firstKey == [0x11])
+
+        let writer = try engine.createTransaction()
+        try writer.clear(key: [0x11])
+        try await writer.commit()
+
+        try reader.setValue([1], for: [0x40])
+        await #expect(throws: StorageError.self) {
+            try await reader.commit()
+        }
+    }
+
     @Test func cancellingInFlightCommitProducesUnknownOutcome() async throws {
         let transport = SuspendingCloudflareDurableObjectStorageTransport()
         let client = CloudflareDurableObjectStorageWireClient(transport: transport)

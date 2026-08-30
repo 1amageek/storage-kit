@@ -106,6 +106,56 @@ struct DirectoryValueTests {
         await engine.shutdown()
     }
 
+    /// A key at or above `[0xFF]` is data exactly like any other key, so the
+    /// absent-marker probe has no upper bound.
+    @Test func layoutMarkerProbeHasNoUpperBound() async throws {
+        let engine = InMemoryEngine()
+        try await engine.withTransaction { transaction in
+            try transaction.setValue([0x01], for: [0xFF, 0x01])
+        }
+        let inspection = try await engine.withTransaction { transaction in
+            try await StorageLayoutMarker.inspect(transaction: transaction)
+        }
+        #expect(inspection == .rejected(.markerAbsentKeyspaceNonempty))
+        await engine.shutdown()
+    }
+
+    /// Each storage root carries its own marker key, and a store that is its
+    /// own root keeps the key its V1 data already uses.
+    @Test func layoutMarkerKeyIsScopedToItsRoot() async throws {
+        #expect(StorageLayoutMarker.key(rootPath: []) == StorageLayoutMarker.key)
+        let one = StorageLayoutMarker.key(rootPath: ["a"])
+        let two = StorageLayoutMarker.key(rootPath: ["b"])
+        let nested = StorageLayoutMarker.key(rootPath: ["a", "b"])
+        #expect(one != two)
+        #expect(one != nested)
+        #expect(one == StorageLayoutMarker.key.appending(contentsOf: Tuple("a").pack()))
+        #expect(nested == StorageLayoutMarker.key.appending(contentsOf: Tuple("a", "b").pack()))
+        for key in [StorageLayoutMarker.key, one, two, nested] {
+            #expect(key.starts(with: StorageLayoutMarker.reservedPrefix))
+        }
+    }
+
+    /// No content prefix a layer allocates starts with the reserved catalog
+    /// byte, so catalog metadata and node content can never overlap.
+    @Test func allocatedContentPrefixesStayOutsideTheReservedRegion() async throws {
+        typealias Layout = KeyValueDirectoryCatalog.Layout
+        #expect(StorageLayoutMarker.reservedPrefix == [Layout.reservedByte])
+        let numbers: [Int64] = [
+            Layout.rootNumber,
+            Layout.firstNumber,
+            -1,
+            Int64.min,
+            127,
+            1 << 20,
+            Int64.max
+        ]
+        for number in numbers {
+            let prefix = Layout.contentPrefix(layerRoot: ByteString(), number: number)
+            #expect(!prefix.starts(with: StorageLayoutMarker.reservedPrefix))
+        }
+    }
+
     @Test func keyValueLayoutV1() async throws {
         typealias Layout = KeyValueDirectoryCatalog.Layout
         let domainRoot = ByteString()

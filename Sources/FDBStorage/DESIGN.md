@@ -40,7 +40,7 @@ existence of a node.
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to database-framework. |
 | [StorageKit module](../StorageKit/DESIGN.md) | depends on | `StorageEngine`, `TransactionReadAccess`, `TransactionAccess`, `StorageError`, `Subspace`, `StorageTransactionDomain` | Supplies the contracts this adapter realizes. | `Subspace` here is `StorageKit.Subspace`; the bindings own a different `Subspace` type. |
 | [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `Directory`, `DirectoryEntry`, `LayerTag`, `Partition`, `StorageAddress`, `DirectoryLimits`, `StorageLayoutMarker`, `PartitionLeaseRegistry.registerIntent` | Defines the operations, failure codes, bounds, marker state machine, and intent rules this module must satisfy. | Intent registration happens after validation, before the native mutation (FD-7). |
-| [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `FDBDirectoryConformanceTests`. | Every step runs here, `verifyLayoutRejection` included; the marker is one key per cluster, so each step first brings the cluster into the state it expects. |
+| [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `FDBDirectoryConformanceTests`. | Every step runs here, `verifyLayoutRejection` included; the fixture drives the layout probe of this adapter, which scopes every marker read and write to the engine's own root path. |
 | `fdb-swift-bindings` | depends on | `FDBClient`, `DatabaseProtocol`, `TransactionProtocol`, `DirectoryLayer`, `DirectorySubspace`, `DirectoryType`, `DirectoryError` | Native client, transactions, and Directory Layer. | `createOrOpen` creates missing ancestors as untyped nodes and writes the layer version key when absent; `list` returns names in Swift `String` order and paginates nothing; `move` keeps the prefix; `remove` is recursive; a `partition` node roots a nested layer and partitions may nest. |
 
 ## Architecture
@@ -71,9 +71,10 @@ this package.
 |---|---|
 | `rootPath: [String]` | Native path that owns the engine's root Directory. Default `Configuration.defaultRootPath = ["storage-kit"]`. Must be non-empty with non-empty components; otherwise `StorageError(.invalidOperation, operation: .open)` before any client work. Engines with distinct root paths on one cluster never observe each other's Directories. |
 
-The layout marker is not scoped by `rootPath`: it is one key per cluster
-(FD-1). Two engines with distinct root paths therefore share the marker and
-each still observes an absent root of its own until it initializes one.
+The layout marker is scoped by `rootPath`: one cluster holds one marker per
+root path (FD-1). Two engines with distinct root paths therefore never observe
+each other's marker, and neither is initialized, opened, or rejected because of
+the other's data.
 
 ### Layout V1
 
@@ -84,7 +85,7 @@ The mapping is one to one and adds no encoding of its own.
 | root | `rootPath` | none (plain node) |
 | child named `name`, `LayerTag.default` | parent path + `name` | none (plain node) |
 | child named `name`, `LayerTag.partition` | parent path + `name` | `.partition` |
-| child named `name`, other tag `t` | parent path + `name` | `.custom(String(utf8: t))` |
+| child named `name`, other tag `t` | parent path + `name` | `.custom(t)` |
 
 - `Directory.keyspacePrefix` is the native HCA-allocated prefix of the node.
   `Directory.root.prefix` is that prefix for a plain Directory and
@@ -94,14 +95,15 @@ The mapping is one to one and adds no encoding of its own.
   prefix. Every descendant node, Subspace, and key of a Partition is therefore
   allocated inside `[P, strinc(P))` (D-10), and partitions nest (D-11). No
   custom layer type of the adapter's own exists.
-- A tag that is not valid UTF-8 cannot be a native layer value and is rejected
-  with `invalidDirectoryAddress` before any I/O.
+- A tag other than the empty tag and `partition` is application-opaque
+  (SPEC §4), so it is carried as native layer bytes with no interpretation and
+  read back exactly, valid UTF-8 or not.
 
 ### Invariants
 
 | ID | Invariant |
 |---|---|
-| FD-1 | The native layer below `rootPath` is the sole existence authority. The only StorageKit-owned key is the layout marker `StorageLayoutMarker.key`, which is cluster-global rather than root-path scoped; `openRoot` and `openOrInitializeRoot` run the shared state machine before touching the native layer, and `openOrInitializeRoot` writes the marker in the caller's transaction together with the root node. |
+| FD-1 | The native layer below `rootPath` is the sole existence authority. The only StorageKit-owned key is the layout marker `StorageLayoutMarker.key(rootPath:)`, one key per root path. Emptiness is asked of the native node at `rootPath` and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. `openRoot` and `openOrInitializeRoot` run the shared state machine before touching the native layer, and `openOrInitializeRoot` writes the marker in the caller's transaction together with the root node. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
 | FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized cluster is observed without touching the layer version key. |
 | FD-4 | A move never resurrects a stale destination: a missing destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. Both are checked before any lease intent is registered. |
@@ -128,7 +130,7 @@ The mapping is one to one and adds no encoding of its own.
 
 | Behavior | KV catalog | FDBStorage |
 |---|---|---|
-| Layout rejection source | marker key state machine over the engine's own keyspace | the same state machine over one cluster-global marker key |
+| Layout rejection source | marker key state machine over the engine's own keyspace | the same state machine over the engine's own root-scoped marker key and root node |
 | Root prefix | `Tuple(0)` under the domain root layer | HCA-allocated native prefix below `rootPath` |
 | Creating a child under a removed parent | writes an edge under the removed parent's prefix, which no path reaches | native `createOrOpen` recreates the missing ancestors as untyped nodes |
 | Foreign nodes | cannot exist; the catalog owns every edge | a native node created outside StorageKit is listed and resolvable, and carries its own layer tag |
@@ -198,7 +200,8 @@ resolve tx -> require parent domain -> child address
   bounds that cost within the transaction's five-second budget.
 - `withDirectoryOperation` serializes Directory operations with the transaction's
   own reads and writes; two engines on one cluster are isolated only by distinct
-  root paths, not by the client, and they share the layout marker (FD-1).
+  root paths, not by the client, and each root path carries its own layout
+  marker (FD-1).
 
 ## Verification and Change Impact
 
@@ -207,14 +210,15 @@ resolve tx -> require parent domain -> child address
 | D-1…D-12, operations 1–5, the marker state machine, L-1…L-3, L-7, L-8, FD-1, FD-3…FD-9 | `Tests/FDBStorageTests/FDBDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps) |
 | Layout V1 names and layer values, nested Partition creation and containment | `FDBDirectoryConformanceTests.nativeNodesCarryStorageKitNamesAndLayers` |
 | FD-2 on foreign native nodes: typed root, child, and Partition mismatch, and the tag returned by a listing | `FDBDirectoryConformanceTests.foreignLayerValueIsRejected` |
-| A layer tag the native layer cannot store | `FDBDirectoryConformanceTests.layerTagThatIsNotUTF8IsRejected` |
+| A layer tag that is not valid UTF-8 stays application-opaque | `FDBDirectoryConformanceTests.layerTagThatIsNotUTF8RoundTrips` |
 | Root path isolation and configuration validation | `FDBDirectoryConformanceTests.distinctRootPathsIsolateCatalogs`, `rootPathConfigurationIsValidated` |
+| FD-1 root scoping: a fresh root initializes beside occupied roots, and a rejected root does not reject its siblings | `FDBDirectoryConformanceTests.rootInitializesOnANonemptyCluster`, `aRejectedRootLeavesItsSiblingsUsable` |
 | Transaction semantics, error mapping, byte ownership, footprint | `FDBStorageEngineTests`, `FDBStorageErrorMappingTests`, `FoundationDBByteOwnershipTests`, `FDBStorageTransactionFootprintTests`, `TransactionActivityDrainTests` |
 
 The suite requires a reachable cluster through `FDB_CLUSTER_FILE` or the
 default cluster file; it creates and removes its own paths below
-`storage-kit-conformance` and clears the cluster-global layout keys after each
-step.
+`storage-kit-conformance` and clears the layout marker keys of the roots it
+used after each step.
 
 Changing the path mapping, the layer-tag mapping, the marker bytes, or the
 root path default is a layout change: update this design, then the Directory

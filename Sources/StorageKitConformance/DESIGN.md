@@ -27,7 +27,7 @@ Parent: [storage-kit/DESIGN.md](../../DESIGN.md). Children: none.
 
 ```text
 adapter test target (one @Test per step)
-    -> DirectoryConformanceCase<Engine>(makeEngine:)
+    -> DirectoryConformanceCase<Engine>(makeEngine:layoutProbe:)
         -> verifyRootInitialization / verifyLayoutRejection
         -> verifyCreateAndOpen / verifyListing / verifyPartitionContiguity
         -> verifyMove / verifyRemove
@@ -38,18 +38,35 @@ adapter test target (one @Test per step)
 ## Contracts and Invariants
 
 - Input: a `@Sendable` factory that returns a fresh engine over an empty
-  keyspace. Every step calls it at least once and shuts the engine down.
+  storage root, and a `LayoutProbe` that puts that root into a state the
+  layout state machine must reject. Every step calls the factory at least once
+  and shuts the engine down. `LayoutProbe.wholeStore` is the default and suits
+  a backend whose whole store is one storage root; a backend that hosts its
+  root below a path in a shared store supplies its own probe.
 - Output: normal return on success; `DirectoryConformanceFailure(step:message:)`
   on a contract violation; adapter errors propagate unchanged.
 - The case asserts only observable `DirectoryAccess` behavior. Key-layout
   facts (marker bytes, allocator encoding, node keys) are owned by
   `KeyValueDirectoryCatalog` tests in `StorageKitTests`.
+- `verifyCreateAndOpen` asserts that a layer tag other than the empty tag and
+  `partition` stays application-opaque: bytes that are not UTF-8 round-trip
+  byte for byte through creation, a verified open, a mismatched open, and
+  enumeration. SPEC F-03 forbids a backend from weakening that, so the
+  assertion belongs to every adapter rather than to one backend's suite.
+- `verifyLeaseSubtreeExclusion` proves the direction of SPEC §8.3 that
+  `verifyLeaseLifecycle` does not reach: a lease covers the whole subtree under
+  its Partition, so a node below it cannot be moved or removed, and a removal
+  pending below a Partition blocks leasing that Partition. It also drives a
+  caller-owned transaction from `createOwnedTransaction()` through `commit()`
+  and `cancel()` and keeps the transaction object alive across the check, so a
+  passing run proves the intents were released by the outcome rather than by
+  deallocation.
 - `verifyLayoutRejection` applies to every engine: the layout marker is the
   StorageKit-owned layout authority on all backends, including FoundationDB,
   where the native Directory Layer owns node existence but not the layout
-  version. Its scope is the engine's keyspace on key-value backends and the
-  whole cluster on FoundationDB, so that adapter's test target brings the
-  cluster into the state each step expects.
+  version. The step never names a key; it acts through `LayoutProbe`, so its
+  scope is exactly the storage root the engine under test owns and one root is
+  never rejected because of another root's data.
 
 ## Verification and Change Impact
 

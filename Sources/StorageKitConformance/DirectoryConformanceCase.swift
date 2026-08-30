@@ -9,10 +9,56 @@ import StorageKit
 /// case never imports a test framework; it reports contract violations as
 /// `DirectoryConformanceFailure` and propagates adapter failures unchanged.
 public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
-    private let makeEngine: @Sendable () async throws -> Engine
+    /// How a backend puts its storage root into a state the layout state
+    /// machine must reject, without going through `DirectoryAccess`.
+    ///
+    /// A backend whose whole store is one storage root writes a stray key and
+    /// records the marker at `StorageLayoutMarker.key`. A backend that hosts
+    /// its root below a path in a shared store leaves at that path what a
+    /// foreign layout would have left, and records the marker at that root's
+    /// own key, so the step observes its own root and not the shared store.
+    public struct LayoutProbe: Sendable {
+        /// Leaves data in the engine's storage root that no StorageKit layout
+        /// wrote, so the root is nonempty while its marker is absent.
+        public var makeRootForeign: @Sendable (Engine) async throws -> Void
 
-    public init(makeEngine: @escaping @Sendable () async throws -> Engine) {
+        /// Records `value` as the layout marker of the engine's storage root.
+        public var writeMarker: @Sendable (Engine, ByteString) async throws -> Void
+
+        public init(
+            makeRootForeign: @escaping @Sendable (Engine) async throws -> Void,
+            writeMarker: @escaping @Sendable (Engine, ByteString) async throws -> Void
+        ) {
+            self.makeRootForeign = makeRootForeign
+            self.writeMarker = writeMarker
+        }
+
+        /// Probe for a backend whose whole store is one storage root.
+        public static var wholeStore: LayoutProbe {
+            LayoutProbe(
+                makeRootForeign: { engine in
+                    try await engine.withTransaction { transaction in
+                        try transaction.setValue([0x01], for: [0x61])
+                    }
+                },
+                writeMarker: { engine, value in
+                    try await engine.withTransaction { transaction in
+                        try transaction.setValue(value, for: StorageLayoutMarker.key)
+                    }
+                }
+            )
+        }
+    }
+
+    private let makeEngine: @Sendable () async throws -> Engine
+    private let layoutProbe: LayoutProbe
+
+    public init(
+        makeEngine: @escaping @Sendable () async throws -> Engine,
+        layoutProbe: LayoutProbe = .wholeStore
+    ) {
         self.makeEngine = makeEngine
+        self.layoutProbe = layoutProbe
     }
 
     private struct AbortTransaction: Error {}
@@ -46,20 +92,18 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
         }
     }
 
-    /// A keyspace without a supported layout is rejected, never adopted.
+    /// A storage root without a supported layout is rejected, never adopted.
     public func verifyLayoutRejection() async throws {
         let step = "layout rejection"
         try await withEngine { engine in
             let catalog = engine.directoryAccess
-            try await engine.withTransaction { transaction in
-                try transaction.setValue([0x01], for: [0x61])
-            }
-            try await requireFailure(.incompatibleStorageLayout, step, "openRoot on a nonempty keyspace without marker") {
+            try await layoutProbe.makeRootForeign(engine)
+            try await requireFailure(.incompatibleStorageLayout, step, "openRoot on a nonempty root without marker") {
                 _ = try await engine.withTransaction { transaction in
                     try await catalog.openRoot(transaction: transaction)
                 }
             }
-            try await requireFailure(.incompatibleStorageLayout, step, "openOrInitializeRoot on a nonempty keyspace without marker") {
+            try await requireFailure(.incompatibleStorageLayout, step, "openOrInitializeRoot on a nonempty root without marker") {
                 _ = try await engine.withTransaction { transaction in
                     try await catalog.openOrInitializeRoot(transaction: transaction)
                 }
@@ -67,9 +111,7 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
         }
         try await withEngine { engine in
             let catalog = engine.directoryAccess
-            try await engine.withTransaction { transaction in
-                try transaction.setValue([0x53, 0x4B, 0x4C, 0x02], for: StorageLayoutMarker.key)
-            }
+            try await layoutProbe.writeMarker(engine, [0x53, 0x4B, 0x4C, 0x02])
             try await requireFailure(.incompatibleStorageLayout, step, "openRoot with an unknown marker") {
                 _ = try await engine.withTransaction { transaction in
                     try await catalog.openRoot(transaction: transaction)
@@ -148,6 +190,25 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
                 try require(untypedPartition?.layer == .partition, step, "an unverified open must report the stored partition tag")
                 let untypedDirectory = try await catalog.open("a", expecting: nil, in: root, transaction: transaction)
                 try require(untypedDirectory?.layer == .default, step, "an unverified open must report the stored default tag")
+
+                // A layer tag other than the empty tag and `partition` is
+                // application-opaque (SPEC §4) and no backend weakens that
+                // (SPEC F-03), so bytes that are not UTF-8 must round-trip
+                // exactly rather than fail or be reinterpreted.
+                let opaque = try LayerTag(ByteString([0xFF, 0xFE, 0x00, 0x80]))
+                let opaqueCreated = try await catalog.openOrCreate("opaque", layer: opaque, in: root, transaction: transaction)
+                try require(opaqueCreated.layer == opaque, step, "a created node must keep its opaque layer tag")
+                let opaqueReopened = try await catalog.open("opaque", expecting: opaque, in: root, transaction: transaction)
+                try require(opaqueReopened?.layer == opaque, step, "an opaque layer tag must read back byte for byte")
+                try await requireFailure(.directoryLayerMismatch, step, "opening an opaque-tagged Directory as a plain Directory") {
+                    _ = try await catalog.open("opaque", expecting: .default, in: root, transaction: transaction)
+                }
+                let opaqueListed = try await catalog.listChildren(in: root, after: nil, limit: 10, transaction: transaction)
+                try require(
+                    opaqueListed.first(where: { $0.name == "opaque" })?.layer == opaque,
+                    step,
+                    "an enumerated entry must carry its opaque layer tag"
+                )
             }
 
             try await recovering({ $0 is AbortTransaction }) {
@@ -661,6 +722,79 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
                 _ = try await engine.leasePartition(other, transaction: admitted)
             }
             try await admitted.cancel()
+        }
+    }
+
+    /// SPEC §8.3: a move or removal fails while an active `PartitionLease`
+    /// covers any node in the affected subtree, and a transaction stops
+    /// blocking lease issuance when it commits or cancels.
+    ///
+    /// A lease covers the whole subtree under its Partition and a move or
+    /// removal covers the whole subtree under its node, so both guards test
+    /// whether the two subtrees intersect. `verifyLeaseLifecycle` proves the
+    /// direction where the affected subtree contains the lease; this step
+    /// proves the opposite direction, where the lease contains the affected
+    /// subtree, and it drives the transaction through the caller-owned
+    /// lifecycle instead of `withTransaction`.
+    public func verifyLeaseSubtreeExclusion() async throws {
+        let step = "lease subtree exclusion"
+        try await withEngine { engine in
+            let catalog = engine.directoryAccess
+            let created = try await engine.withTransaction { transaction -> (Partition, Partition) in
+                let root = try await catalog.openOrInitializeRoot(transaction: transaction)
+                let tenant = try await catalog.openOrCreatePartition("tenant", in: root, transaction: transaction)
+                _ = try await catalog.openOrCreateDirectory("under-lease", in: tenant.root, transaction: transaction)
+                _ = try await catalog.openOrCreateDirectory("under-intent", in: tenant.root, transaction: transaction)
+                let victim = try await catalog.openOrCreatePartition("victim", in: root, transaction: transaction)
+                return (tenant, victim)
+            }
+            let (tenant, victim) = created
+
+            // A lease reaches every node inside its Partition, so a node below
+            // the leased Partition cannot be moved or removed while it is held.
+            try await engine.withTransaction { transaction in
+                let lease = try await engine.leasePartition(tenant, transaction: transaction)
+                try await requireFailure(.directoryLeased, step, "removing a node below an active lease") {
+                    try await catalog.remove("under-lease", in: tenant.root, transaction: transaction)
+                }
+                try await requireFailure(.directoryLeased, step, "moving a node below an active lease") {
+                    _ = try await catalog.move("under-lease", in: tenant.root, to: "moved", in: tenant.root, transaction: transaction)
+                }
+                lease.release()
+                try await catalog.remove("under-lease", in: tenant.root, transaction: transaction)
+            }
+
+            // The intent guard is the same relation seen from the other side: a
+            // removal pending below a Partition blocks leasing that Partition.
+            // Committing the caller-owned transaction releases the intent while
+            // the transaction object is still alive, so the release cannot be
+            // attributed to deallocation.
+            let committed = try engine.createOwnedTransaction()
+            try await catalog.remove("under-intent", in: tenant.root, transaction: committed)
+            try await requireFailure(.staleLease, step, "leasing a Partition while a removal below it is pending") {
+                _ = try await engine.leasePartition(tenant, transaction: committed)
+            }
+            try await committed.commit()
+            try await engine.withTransaction { transaction in
+                let lease = try await engine.leasePartition(tenant, transaction: transaction)
+                try require(lease.isActive, step, "committing a caller-owned transaction must release its intents")
+                lease.release()
+            }
+            withExtendedLifetime(committed) {}
+
+            let cancelled = try engine.createOwnedTransaction()
+            let cancelledRoot = try await requireRoot(catalog, cancelled, step)
+            try await catalog.remove("victim", in: cancelledRoot, transaction: cancelled)
+            try await requireFailure(.staleLease, step, "leasing a Partition whose removal is pending") {
+                _ = try await engine.leasePartition(victim, transaction: cancelled)
+            }
+            try await cancelled.cancel()
+            try await engine.withTransaction { transaction in
+                let lease = try await engine.leasePartition(victim, transaction: transaction)
+                try require(lease.isActive, step, "cancelling a caller-owned transaction must release its intents")
+                lease.release()
+            }
+            withExtendedLifetime(cancelled) {}
         }
     }
 

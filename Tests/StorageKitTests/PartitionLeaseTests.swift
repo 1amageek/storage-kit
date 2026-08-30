@@ -168,12 +168,12 @@ struct PartitionLeaseTests {
                 let lease = try await engine.leasePartition(partition, transaction: transaction)
                 let isActive = lease.isActive
                 #expect(isActive)
-                #expect(engine.transactionDomain.leases.isLeased(within: partition.root.address))
+                #expect(engine.transactionDomain.leases.isLeased(intersecting: partition.root.address))
                 await expectStorageError(.directoryLeased) {
                     try await catalog.remove(partitionName, in: root, transaction: transaction)
                 }
             }
-            #expect(!engine.transactionDomain.leases.isLeased(within: partition.root.address))
+            #expect(!engine.transactionDomain.leases.isLeased(intersecting: partition.root.address))
             try await catalog.remove(partitionName, in: root, transaction: transaction)
         }
         let remaining = try await engine.withTransaction { transaction -> Partition? in
@@ -189,12 +189,12 @@ struct PartitionLeaseTests {
         let registry = PartitionLeaseRegistry()
         let address = try StorageAddress(["a", partitionName])
         let registration = try registry.reserve(address, backend: .inMemory)
-        #expect(registry.isLeased(within: address))
-        try #expect(registry.isLeased(within: StorageAddress(["a"])))
-        try #expect(!registry.isLeased(within: StorageAddress(["b"])))
+        #expect(registry.isLeased(intersecting: address))
+        try #expect(registry.isLeased(intersecting: StorageAddress(["a"])))
+        try #expect(!registry.isLeased(intersecting: StorageAddress(["b"])))
         #expect(registration.release())
         #expect(!registration.release())
-        #expect(!registry.isLeased(within: address))
+        #expect(!registry.isLeased(intersecting: address))
         await expectStorageError(.staleLease) { try registration.requireActive(operation: .read, backend: .inMemory) }
 
         let engine = InMemoryEngine()
@@ -213,6 +213,46 @@ struct PartitionLeaseTests {
 
         registry.requestShutdown()
         await expectStorageError(.resourceUnavailable) { _ = try registry.reserve(address, backend: .inMemory) }
+        await engine.shutdown()
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func registryGuardsBothDirectionsOfSubtreeIntersection() async throws {
+        let registry = PartitionLeaseRegistry()
+        let ancestor = try StorageAddress(["t"])
+        let descendant = try StorageAddress(["t", "inner"])
+        let sibling = try StorageAddress(["u"])
+
+        // A lease at an ancestor is reported for a descendant subtree, which is
+        // what makes a removal inside a leased Partition fail.
+        let ancestorLease = try registry.reserve(ancestor, backend: .inMemory)
+        #expect(registry.isLeased(intersecting: descendant))
+        #expect(!registry.isLeased(intersecting: sibling))
+        #expect(ancestorLease.release())
+
+        // A lease at a descendant is reported for an ancestor subtree.
+        let descendantLease = try registry.reserve(descendant, backend: .inMemory)
+        #expect(registry.isLeased(intersecting: ancestor))
+        #expect(descendantLease.release())
+
+        let engine = InMemoryEngine()
+        let transaction = try engine.createOwnedTransaction()
+
+        // An intent below a Partition blocks leasing that Partition, not only
+        // the node the intent names.
+        try registry.registerIntent(covering: descendant, transaction: transaction, operation: .write, backend: .inMemory)
+        await expectStorageError(.staleLease) { _ = try registry.reserve(ancestor, backend: .inMemory) }
+        let unrelated = try registry.reserve(sibling, backend: .inMemory)
+        #expect(unrelated.release())
+        registry.releaseIntents(for: transaction as AnyObject)
+
+        // A lease at a descendant refuses an intent over its ancestor subtree.
+        let held = try registry.reserve(descendant, backend: .inMemory)
+        await expectStorageError(.directoryLeased) {
+            try registry.registerIntent(covering: ancestor, transaction: transaction, operation: .write, backend: .inMemory)
+        }
+        #expect(held.release())
+        try await transaction.cancel()
         await engine.shutdown()
     }
 }

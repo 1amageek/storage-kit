@@ -129,7 +129,14 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
                 },
                 hasMore: page.count < selected.count,
                 currentCommitVersion: state.versionsByPartitionIdentity[request.partitionIdentity] ?? 0,
-                readConflictRanges: [conflictRange(for: request)]
+                readConflictRanges: [
+                    conflictRange(
+                        for: request,
+                        keys: keys,
+                        startIndex: startIndex,
+                        endIndex: endIndex
+                    )
+                ]
             )
         }
         try onRangeResponse?(request)
@@ -480,11 +487,112 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
         return true
     }
 
-    private func conflictRange(for request: StorageWireRangeRequest) -> StorageWireKeyRange {
-        StorageWireKeyRange(
-            begin: boundaryKey(request.begin),
-            end: boundaryKey(request.end)
-        )
+    /// Reports the key interval the response actually depended on.
+    ///
+    /// The host contract requires the union of the selector resolution
+    /// dependencies and the effective scan interval, not the raw selector
+    /// keys. A selector resolves by comparing stored keys against its own key
+    /// and then walking `offset` positions, so it observes every key between
+    /// the two, and a walk cut short at the end of the store observes the
+    /// absence of every key above it. Raw selector keys lose both facts. They
+    /// also collapse an emptiness probe, which arrives as the boundary pair
+    /// `[selector, selector + 1)` sharing one key, into an empty range that
+    /// reports no dependency at all.
+    ///
+    /// Widening the reported interval is safe because it can only raise a
+    /// spurious conflict, while narrowing it silently drops a real one. Every
+    /// adjustment below therefore widens.
+    private func conflictRange(
+        for request: StorageWireRangeRequest,
+        keys: [ByteString],
+        startIndex: Int,
+        endIndex: Int
+    ) -> StorageWireKeyRange {
+        var lower: ByteString?
+        var upper: ByteString?
+        var lowerIsUnbounded = false
+        var upperIsUnbounded = false
+
+        func widenLower(to candidate: ByteString) {
+            guard let current = lower else {
+                lower = candidate
+                return
+            }
+            if compare(candidate, current) < 0 {
+                lower = candidate
+            }
+        }
+
+        func widenUpper(to candidate: ByteString) {
+            guard let current = upper else {
+                upper = candidate
+                return
+            }
+            if compare(candidate, current) > 0 {
+                upper = candidate
+            }
+        }
+
+        func absorb(_ boundary: StorageWireRangeBoundary, resolvedIndex: Int) {
+            switch boundary {
+            case .unbounded:
+                return
+            case .selector(let selector):
+                widenLower(to: selector.key)
+                widenUpper(to: selector.key)
+                if resolvedIndex < keys.count {
+                    widenLower(to: keys[resolvedIndex])
+                    widenUpper(to: keys[resolvedIndex])
+                }
+                if walkStoppedAtEndOfStore(selector, in: keys) {
+                    upperIsUnbounded = true
+                }
+            }
+        }
+
+        if case .unbounded = request.begin {
+            lowerIsUnbounded = true
+        }
+        if case .unbounded = request.end {
+            upperIsUnbounded = true
+        }
+        absorb(request.begin, resolvedIndex: startIndex)
+        absorb(request.end, resolvedIndex: endIndex)
+
+        // The effective scan interval covers every row the response read, so a
+        // later deletion of one of those rows has to conflict.
+        if startIndex < endIndex {
+            widenLower(to: keys[startIndex])
+            widenUpper(to: singleKeyRange(keys[endIndex - 1]).end)
+        }
+
+        let begin = lowerIsUnbounded ? nil : lower
+        var end = upperIsUnbounded ? nil : upper
+        if let begin, let resolvedEnd = end, compare(begin, resolvedEnd) >= 0 {
+            // A reported range is half-open, so equal bounds would describe an
+            // empty dependency. Extend past the single observed key instead.
+            end = singleKeyRange(begin).end
+        }
+        return StorageWireKeyRange(begin: begin, end: end)
+    }
+
+    /// Reports whether the selector's offset walk was cut short at the end of
+    /// the store rather than settling one position past the last key.
+    ///
+    /// `KeySelector.resolve(in:)` owns the resolution rule and clamps its
+    /// answer to the key count, which hides that difference. Only a walk that
+    /// was cut short observed the absence of further keys, so only it carries
+    /// an unbounded dependency; a walk that settles exactly one position past
+    /// the last key is already described by its own selector key.
+    private func walkStoppedAtEndOfStore(
+        _ selector: StorageWireKeySelector,
+        in keys: [ByteString]
+    ) -> Bool {
+        let lastMatchingIndex =
+            selector.orEqual
+            ? upperBound(keys, for: selector.key) - 1
+            : lowerBound(keys, for: selector.key) - 1
+        return lastMatchingIndex + selector.offset > keys.count
     }
 
     private func resolvedIndex(
@@ -497,17 +605,6 @@ public final class InMemoryCloudflareDurableObjectStorageClient:
             return unboundedIndex
         case .selector(let selector):
             return selector.keySelector.resolve(in: keys)
-        }
-    }
-
-    private func boundaryKey(
-        _ boundary: StorageWireRangeBoundary
-    ) -> ByteString? {
-        switch boundary {
-        case .unbounded:
-            return nil
-        case .selector(let selector):
-            return selector.key
         }
     }
 

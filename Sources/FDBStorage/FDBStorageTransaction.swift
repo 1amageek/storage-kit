@@ -473,6 +473,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     // MARK: - Transaction Control
 
     public func commit() async throws {
+        // A terminal outcome ends every pending move or removal this
+        // transaction staged, so its subtree intents stop blocking lease
+        // issuance here rather than at deallocation.
+        defer { releaseSubtreeIntents() }
         enum Start {
             case leader(TransactionOperationCompletion)
             case waitForCommit(TransactionOperationCompletion)
@@ -698,6 +702,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     }
 
     public func cancel() async throws {
+        // A terminal outcome ends every pending move or removal this
+        // transaction staged, so its subtree intents stop blocking lease
+        // issuance here rather than at deallocation.
+        defer { releaseSubtreeIntents() }
         enum Start {
             case leader(
                 TransactionOperationCompletion,

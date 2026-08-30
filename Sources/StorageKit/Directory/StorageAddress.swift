@@ -54,4 +54,15 @@ public struct StorageAddress: Sendable, Hashable {
         other.components.count >= components.count
             && other.components.starts(with: components)
     }
+
+    /// Whether the subtree rooted at this address and the subtree rooted at
+    /// `other` share at least one node.
+    ///
+    /// Both subtrees are ancestor-closed, so a shared node forces its two
+    /// roots onto one root-to-node path, which orders them by depth. The
+    /// relation is therefore exactly "one root is an ancestor-or-self of the
+    /// other", and it is symmetric: neither address is the subject.
+    public func subtreeIntersects(_ other: StorageAddress) -> Bool {
+        isAncestorOrSelf(of: other) || other.isAncestorOrSelf(of: self)
+    }
 }
