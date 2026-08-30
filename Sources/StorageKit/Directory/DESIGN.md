@@ -360,7 +360,7 @@ is never initialized, opened, or rejected because of another root's data.
 | L-3 | A stale generation fails; work is never redirected | an absent node, a non-Partition layer, or a different `keyspacePrefix` → `staleLease` |
 | L-4 | Read binding cannot mutate | `BoundReadAccess` has no mutation members |
 | L-5 | Write binding cannot commit or cancel | `BoundWriteAccess` has no lifecycle members |
-| L-6 | Bound access and cursors cannot escape the closure | noncopyable, borrowed; cursors validate the binding scope before every advance → `staleLease`, and the binding scope owns every cursor it issued and completes that cursor's backend cleanup as part of closing, so no capability of an escaped cursor — cleanup included — is still outstanding when the binding closes |
+| L-6 | Bound access and cursors cannot escape the closure | noncopyable, borrowed; cursors validate the binding scope on both sides of every advance → `staleLease`, so an advance already in flight when the binding closes does not deliver its row either, and the binding scope owns every cursor it issued and completes that cursor's backend cleanup as part of closing, so no capability of an escaped cursor — cleanup included — is still outstanding when the binding closes |
 | L-7 | Releasing the last lease is not success | release returns nothing; the caller's transaction outcome is the result |
 | L-8 | Keys are confined to the Partition's content region | every key must lie in `[P, P ‖ FE)`; a range end may equal `P ‖ FE` only through `firstGreaterOrEqual`; `getKey` returns `nil` when the resolved key lies outside |
 
@@ -423,7 +423,11 @@ lease.withReadAccess(transaction) { access in ... }
   - step 3 of issuance repeated in `transaction`          -> staleLease
   - BindingScope opened; BoundReadAccess borrowed to the closure
   - every read validates key containment (L-8) and scope/lease (L-6)
-  - scope closed on return; escaped cursors fail on next advance
+  - every issued cursor is adopted by the scope at issuance
+  - on return, and on a body failure, the scope closes:
+      each adopted cursor reaches terminal backend cleanup, newest first,
+      awaiting an advance that is still in flight
+  - an escaped cursor is then already finished and fails on next advance
 ```
 
 Bound write:
@@ -459,6 +463,7 @@ A Partition child needs no walk: one range covers its whole subtree.
 | Catalog edges and per-layer allocators | backend keyspace, mutated only through the caller's transaction | durable |
 | Lease registration | `LeaseRegistration` (`Mutex`) | until `release()` or `PartitionLease` deinit |
 | Binding scope | `PartitionLease.withReadAccess` / `withWriteAccess` | one closure |
+| Cursors issued by a binding | the binding scope, from `rangeCursor` until the scope closes | one closure; the scope drops its references once cleanup completed |
 
 ## Failure, Concurrency, and Constraints
 
@@ -466,6 +471,22 @@ A Partition child needs no walk: one range covers its whole subtree.
 `directoryLayerMismatch`, `partitionBoundaryViolation`,
 `storageDomainMismatch`, `staleLease`, `invalidDirectoryAddress`. All have
 retry disposition `never`.
+
+Closing a binding is authoritative, so it can fail on its own. The dispositions
+are fixed:
+
+| Closing outcome | Result of the binding |
+|---|---|
+| body succeeded, cleanup succeeded | the body's value |
+| body succeeded, cleanup failed | `PartitionBindingCleanupError` with no operation error; the value is not returned, because a value produced over storage whose cleanup failed is not a result |
+| body failed, cleanup succeeded | the body's error unchanged |
+| body failed, cleanup failed | `PartitionBindingCleanupError` carrying both |
+
+The close reports only the cleanup failures it caused. A cursor the body itself
+drove to a terminal state has already completed, and its stored failure was
+delivered to the caller that drove it there; restating that failure at close
+would convert a failure the body deliberately handled into a binding failure.
+Closing therefore awaits such a cursor without reporting it again.
 
 `DirectoryLimits` (owned operational contract):
 
@@ -490,6 +511,7 @@ confirming edge keys stay within each backend's key bound.
 | D-13 on both write operations, under a plain and a Partition parent | `DirectoryConformanceCase.verifyStaleParentRejection` run by every adapter suite; FoundationDB passes it before the key-value catalog does, which is the evidence that the native layer already held the guarantee |
 | L-4, L-5 | the type declarations: `BoundReadAccess` declares no mutation member and `BoundWriteAccess` declares no lifecycle member, so a violation does not compile and no run can observe one |
 | L-6 escape, L-8 at the binding, and release and staleness as a holder observes them | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
+| L-6 cleanup authority: an escaped cursor is already finished, a close awaits an advance still in flight, a cleanup failure is reported through `PartitionBindingCleanupError`, and a cursor the body finished is not restated | `Tests/StorageKitTests/PartitionBindingScopeTests.swift` |
 
 Changing the catalog layout, the bootstrap witness of any backend, or any
 operation semantics requires updating this design first, then the StorageKit

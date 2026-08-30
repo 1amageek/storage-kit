@@ -158,6 +158,17 @@ public struct KeyValueCursor: Sendable {
         try await state.finish()
     }
 
+    /// Completes cleanup on behalf of the scope that issued this cursor.
+    ///
+    /// The issuing scope owns the cursor's completion, not its iteration. A
+    /// cursor already in a terminal state, or one whose finish another caller
+    /// started, is awaited without restating a failure that caller already
+    /// received; every other state is finished here and its cleanup failure
+    /// belongs to the closing scope.
+    package mutating func completeCleanup() async throws {
+        try await state.completeCleanup()
+    }
+
     private func finish(afterScopeFailure scopeError: any Error) async throws
         -> Element? {
         do {
@@ -254,6 +265,7 @@ private protocol KeyValueCursorState: Actor {
         postAdvanceValidation: (@Sendable () throws -> Void)?
     ) async throws -> KeyValueCursor.Element?
     func finish() async throws
+    func completeCleanup() async throws
 }
 
 private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
@@ -421,6 +433,28 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
             if let error {
                 throw error
             }
+        }
+    }
+
+    /// Reaches the terminal state on behalf of the owner that issued this
+    /// cursor, reporting only a failure this call caused.
+    ///
+    /// Every stored failure was already thrown to the caller that drove the
+    /// cursor into its terminal state, and a finish already in flight belongs
+    /// to whoever started it. The owner still has to wait for that cleanup, so
+    /// both states are awaited here and neither is reported again.
+    func completeCleanup() async throws {
+        switch state {
+        case .unopened, .ready, .advancing:
+            try await finish()
+        case .finishing(let boundary):
+            do {
+                try await boundary.wait()
+            } catch {
+                // Owned by the caller that started the finish.
+            }
+        case .finished:
+            lifetime.end()
         }
     }
 

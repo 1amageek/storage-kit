@@ -65,6 +65,10 @@ public struct BoundReadAccess: ~Copyable, Sendable {
     }
 
     /// Opens a cursor over a range that cannot resolve outside the Partition.
+    ///
+    /// The binding scope takes ownership of the returned cursor, so closing the
+    /// binding completes that cursor's backend cleanup even when the caller
+    /// kept it. The caller may still finish it earlier.
     public func rangeCursor(
         from begin: KeySelector,
         to end: KeySelector,
@@ -79,7 +83,7 @@ public struct BoundReadAccess: ~Copyable, Sendable {
         let registration = self.registration
         let scope = self.scope
         let backend = bounds.backend
-        return transaction.rangeCursor(
+        let cursor = transaction.rangeCursor(
             from: begin,
             to: end,
             limit: limit,
@@ -90,6 +94,8 @@ public struct BoundReadAccess: ~Copyable, Sendable {
             try registration.requireActive(operation: .rangeRead, backend: backend)
             try scope.requireOpen(operation: .rangeRead, backend: backend)
         }
+        try scope.adopt(cursor, operation: .rangeRead, backend: backend)
+        return cursor
     }
 
     func requireLive(operation: StorageOperation) throws {

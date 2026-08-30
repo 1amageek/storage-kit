@@ -8,9 +8,10 @@
 /// Partition in its own transaction and fails with `staleLease` when the live
 /// node is a different generation.
 ///
-/// Data access happens only inside `withReadAccess` or `withWriteAccess`; the
-/// bound access and every cursor it produced stop working when the closure
-/// returns or the lease is released.
+/// Data access happens only inside `withReadAccess` or `withWriteAccess`. The
+/// bound access is borrowed for the closure, and the binding owns every cursor
+/// it issued: closing it completes that cursor's backend cleanup, so a cursor
+/// the caller kept is already finished rather than merely refused.
 public struct PartitionLease: ~Copyable, Sendable {
     public let partition: Partition
     private let directoryAccess: any DirectoryAccess
@@ -39,13 +40,17 @@ public struct PartitionLease: ~Copyable, Sendable {
     }
 
     /// Binds read access to the Partition inside `transaction`.
+    ///
+    /// The binding closes on both paths, and closing completes the cleanup of
+    /// every cursor it issued. A cleanup failure is reported as
+    /// `PartitionBindingCleanupError`, which also carries the closure's failure
+    /// when there was one.
     public nonisolated(nonsending) func withReadAccess<R>(
         _ transaction: any TransactionReadAccess,
         _ body: (borrowing BoundReadAccess) async throws -> R
     ) async throws -> R {
         try await requireBinding(of: transaction, operation: .read)
         let scope = PartitionBindingScope()
-        defer { scope.close() }
         let access = BoundReadAccess(
             partition: partition,
             transaction: transaction,
@@ -53,7 +58,13 @@ public struct PartitionLease: ~Copyable, Sendable {
             registration: registration,
             scope: scope
         )
-        return try await body(access)
+        let outcome: Result<R, any Error>
+        do {
+            outcome = .success(try await body(access))
+        } catch {
+            outcome = .failure(error)
+        }
+        return try await Self.complete(outcome, closing: scope)
     }
 
     /// Binds read and write access to the Partition inside `transaction`.
@@ -73,7 +84,6 @@ public struct PartitionLease: ~Copyable, Sendable {
         try directoryAccess.admitMutation(.write)
         try await requireBinding(of: transaction, operation: .write)
         let scope = PartitionBindingScope()
-        defer { scope.close() }
         let access = BoundWriteAccess(
             reads: BoundReadAccess(
                 partition: partition,
@@ -84,7 +94,43 @@ public struct PartitionLease: ~Copyable, Sendable {
             ),
             transaction: transaction
         )
-        return try await body(access)
+        let outcome: Result<R, any Error>
+        do {
+            outcome = .success(try await body(access))
+        } catch {
+            outcome = .failure(error)
+        }
+        return try await Self.complete(outcome, closing: scope)
+    }
+
+    /// Closes `scope` and combines its cleanup failures with `outcome`.
+    ///
+    /// A value produced over storage whose cleanup failed is not a result, so a
+    /// cleanup failure replaces a successful value as well as accompanying a
+    /// failed one.
+    private static func complete<R>(
+        _ outcome: Result<R, any Error>,
+        closing scope: PartitionBindingScope
+    ) async throws -> R {
+        let cleanupErrors = await scope.close()
+        switch outcome {
+        case .success(let value):
+            guard cleanupErrors.isEmpty else {
+                throw PartitionBindingCleanupError(
+                    operationError: nil,
+                    cursorCleanupErrors: cleanupErrors
+                )
+            }
+            return value
+        case .failure(let error):
+            guard cleanupErrors.isEmpty else {
+                throw PartitionBindingCleanupError(
+                    operationError: error,
+                    cursorCleanupErrors: cleanupErrors
+                )
+            }
+            throw error
+        }
     }
 
     /// Validates the binding: same domain, lease still held, and the Partition
