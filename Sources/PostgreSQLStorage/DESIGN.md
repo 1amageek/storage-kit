@@ -23,7 +23,7 @@ SPEC §7.3.
 |---|---|
 | `PostgreSQLConfiguration`: client configuration, isolation level (default `.serializable`), validated bare `tableName`, schema policy `createIfNeeded` / `assumeExists`; `PostgreSQLConfiguration+Production` and `PostgreSQLConnectionBudget` for serverless connection budgeting | The PostgreSQL wire protocol and pool (`postgres-nio`) |
 | `PostgreSQLStorageEngine`: `PostgresClient` run task, schema bootstrap, transaction creation in eager, lazy, and nested modes, native error mapping, shutdown | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
-| `PostgreSQLStorageTransaction`: buffered writes, read-your-writes replay for point reads, buffer flush before range reads, advisory-lock atomics, `BEGIN ISOLATION LEVEL …` through `COMMIT`/`ROLLBACK`, exactly-once connection release | The catalog algorithm and layout marker (`KeyValueDirectoryCatalog`, StorageKit) |
+| `PostgreSQLStorageTransaction`: buffered writes, read-your-writes replay for point reads, buffer flush before range reads, advisory-lock atomics, `BEGIN ISOLATION LEVEL …` through `COMMIT`/`ROLLBACK`, exactly-once connection release | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
 | `PostgreSQLBindingBytes`: one copy of each bound key or value into independently owned `ByteBuffer` storage | `PartitionLeaseRegistry` and `PartitionLease` (StorageKit) |
 | `PostgreSQLResultBytesOwner` / `PostgreSQLResultBytesFactory` / `PostgreSQLResultBytesLifecycleObserver`: result byte ownership and lifecycle evidence | Framework binding of `#Directory` declarations |
 | Catalog placement and the READ COMMITTED mutation admission rule (PG-3) | Retry policy (owned by the caller's transaction runner) |
@@ -146,7 +146,7 @@ createTransaction() -> no connection yet
 
 | Contract | Evidence |
 |---|---|
-| D-1…D-12, operations 1–5, layout marker, L-1…L-3, L-7, L-8 | `Tests/PostgreSQLStorageTests/PostgreSQLDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps with a unique relation per test) |
+| D-1…D-12, operations 1–5, root bootstrap, L-1…L-3, L-7, L-8 | `Tests/PostgreSQLStorageTests/PostgreSQLDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps with a unique relation per test) |
 | PG-3 | `PostgreSQLDirectoryConformanceTests.readCommittedRejectsCatalogMutation` |
 | PG-1, PG-2, PG-4, PG-9, transaction semantics | `PostgreSQLStorageTests`, `DatabaseFrameworkTransactionContractTests` |
 | PG-5, PG-8 | `PostgreSQLClientLifecycleTests` (with `PostgreSQLClientLifecycleLogRecorder`) |

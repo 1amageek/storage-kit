@@ -105,37 +105,61 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
 
     // MARK: - Root
 
+    /// The root layer's allocator: the sole witness that this root is
+    /// initialized (SPEC §10.3).
+    ///
+    /// Every content prefix of the root layer is handed out by this key, so a
+    /// catalog that owns the root owns it, and nothing else writes it. Nothing
+    /// else records the same fact: a second witness can disagree with this one,
+    /// and a disagreement is a state neither `openRoot` nor
+    /// `openOrInitializeRoot` can resolve without either fabricating a root or
+    /// writing over data.
+    private var rootAllocatorKey: ByteString {
+        Layout.allocatorKey(layerRoot: ByteString())
+    }
+
     public func openRoot(
         transaction: any TransactionReadAccess
     ) async throws -> Directory? {
         try requireDomain(of: transaction, operation: .open)
-        switch try await StorageLayoutMarker.inspect(transaction: transaction) {
-        case .openV1:
-            return rootDirectory
-        case .uninitialized:
+        guard try await transaction.getValue(for: rootAllocatorKey) != nil else {
+            try await requireRootHoldsNoForeignData(transaction: transaction, operation: .open)
             return nil
-        case .rejected(let rejection):
-            throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
         }
+        return rootDirectory
     }
 
     public func openOrInitializeRoot(
         transaction: any TransactionAccess
     ) async throws -> Directory {
         try requireDomain(of: transaction, operation: .initialize)
-        switch try await StorageLayoutMarker.inspect(transaction: transaction) {
-        case .openV1:
+        if try await transaction.getValue(for: rootAllocatorKey) != nil {
             return rootDirectory
-        case .uninitialized:
-            try admitMutation(operation: .initialize)
-            try transaction.setValue(StorageLayoutMarker.v1, for: StorageLayoutMarker.key)
-            try transaction.setValue(
-                Tuple(Layout.firstNumber).pack(),
-                for: Layout.allocatorKey(layerRoot: ByteString())
+        }
+        try await requireRootHoldsNoForeignData(transaction: transaction, operation: .initialize)
+        try admitMutation(operation: .initialize)
+        try transaction.setValue(Tuple(Layout.firstNumber).pack(), for: rootAllocatorKey)
+        return rootDirectory
+    }
+
+    /// Rejects an uninitialized root that already holds data.
+    ///
+    /// The root layer allocates content prefixes from `Tuple(1)` upward inside
+    /// the same flat keyspace the store hands to whoever wrote first, so a
+    /// Directory created here could land on top of existing keys. The probe
+    /// has no upper bound: a key at or above `[0xFF]` is data exactly like any
+    /// other key, and a bounded probe would report such a root as empty and
+    /// adopt a foreign layout.
+    private func requireRootHoldsNoForeignData(
+        transaction: any TransactionReadAccess,
+        operation: StorageOperation
+    ) async throws {
+        guard try await transaction.getKey(selector: .firstGreaterOrEqual([])) == nil else {
+            throw StorageError.incompatibleStorageLayout(
+                "the storage root holds data that no Directory catalog wrote",
+                operation: operation,
+                backend: backend
             )
-            return rootDirectory
-        case .rejected(let rejection):
-            throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
         }
     }
 

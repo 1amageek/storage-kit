@@ -1,7 +1,7 @@
 import DatabaseTypes
 
 /// Storage placement authority of one engine: the five semantic Directory
-/// operations plus root bootstrap through the layout-marker state machine.
+/// operations plus root bootstrap from the root's own allocation authority.
 ///
 /// Read operations take `TransactionReadAccess` and never create; write
 /// operations are atomic with the caller's transaction. Every operation checks

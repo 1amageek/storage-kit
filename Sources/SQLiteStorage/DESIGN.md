@@ -22,7 +22,7 @@ required by SPEC §7.3.
 |---|---|
 | `SQLiteConnectionHandle`: one connection per engine, `kv_store` schema bootstrap, `PRAGMA journal_mode=WAL`, `auto_vacuum=INCREMENTAL`, `busy_timeout`, native error conversion | The SQLite library and its file locking model |
 | `SQLiteTransactionCoordinator` (actor): FIFO connection lease, `BEGIN IMMEDIATE`, the savepoint stack for nested transactions, terminal cleanup | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
-| `SQLiteStorageTransaction`: buffered synchronous mutations, lazy coordinator entry on the first asynchronous operation, commit-at-most-once, cancel, `StorageCompactionTransaction` | The catalog algorithm and layout marker (`KeyValueDirectoryCatalog`, StorageKit) |
+| `SQLiteStorageTransaction`: buffered synchronous mutations, lazy coordinator entry on the first asynchronous operation, commit-at-most-once, cancel, `StorageCompactionTransaction` | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
 | `SQLiteRangeResult`, `SQLiteRangeIteratorState`, `SQLiteRangeCursorLifetime`: statement-backed lazy cursors with explicit terminal finish | `PartitionLeaseRegistry` and `PartitionLease` (StorageKit) |
 | Catalog placement: the engine instantiates `KeyValueDirectoryCatalog(transactionDomain:backend: .sqlite)` bound to its domain | Framework binding of `#Directory` declarations |
 
@@ -37,7 +37,7 @@ P-4). The engine adds no SQLite-specific metadata table.
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to database-framework. |
 | [StorageKit module](../StorageKit/DESIGN.md) | depends on | `StorageEngine`, `TransactionReadAccess`, `TransactionAccess`, `Transaction`, `StorageCompactionTransaction`, `StorageEngineLifecycle`, `ActiveTransactionContext`, `StorageError` | Supplies the contracts this adapter realizes and the nested-transaction context. | `createTransaction()` consults `ActiveTransactionContext`; a child is created only for a parent of the same `StorageTransactionDomain`. |
 | [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `KeyValueDirectoryCatalog`, `StorageTransactionDomain`, `DirectoryLimits` | The catalog realization used unchanged by this module. | Catalog keys share `kv_store` with data (SQ-5); a catalog layout change is a data layout change for every SQLite database. |
-| [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `SQLiteDirectoryConformanceTests`. | The layout-marker step applies; it plants marker keys through the engine's own transactions. |
+| [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `SQLiteDirectoryConformanceTests`. | The foreign-root step applies; it plants foreign keys through the engine's own transactions. |
 
 ## Architecture
 
@@ -74,7 +74,7 @@ Dependency direction: `SQLiteStorage -> StorageKit`, `SQLiteStorage -> DatabaseT
 | Catalog | `KeyValueDirectoryCatalog(transactionDomain:backend: .sqlite)` |
 | Catalog keys | allocator `[0xFE, 0x61]`, node keys `[0xFE, 0x6E] + Tuple(parentPrefix, kind, name)`; stored in `kv_store` beside data |
 | Directory root prefix | catalog-allocated `Tuple(Int64).pack()`; root Directory uses number `0` |
-| Layout marker | the catalog's marker state machine (Directory component); no SQLite-specific marker |
+| Root bootstrap | the catalog's allocator witness and unbounded emptiness probe (Directory component); no SQLite-specific state |
 
 ### Invariants
 
@@ -135,7 +135,7 @@ KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog k
 
 | Contract | Evidence |
 |---|---|
-| D-1…D-12, operations 1–5, layout marker, L-1…L-3, L-7, L-8 | `Tests/SQLiteStorageTests/SQLiteDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps, including `layoutRejection`) |
+| D-1…D-12, operations 1–5, root bootstrap, L-1…L-3, L-7, L-8 | `Tests/SQLiteStorageTests/SQLiteDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps, including `foreignRootRejection`) |
 | SQ-2, SQ-3 | `SQLiteNestedTransactionTests`, `SQLiteStorageEngineTests` |
 | SQ-6 | `SQLiteBusyTimeoutTests` |
 | SQ-1, SQ-7 | `SQLiteConnectionOwnershipTests`, `SQLiteStorageEngineTests` |

@@ -13,10 +13,10 @@ import Testing
 /// custom layer types of the adapter's own.
 ///
 /// Every engine receives its own root path below a per-test base path, so each
-/// step starts from an absent root and an absent marker on a shared cluster;
-/// the base path and the markers of every root below it are removed after the
-/// step, leaving only the shared `storage-kit-conformance` parent node and the
-/// native allocator counters behind.
+/// step starts from an absent root on a shared cluster; the base path and every
+/// root below it are removed after the step, leaving only the shared
+/// `storage-kit-conformance` parent node and the native allocator counters
+/// behind.
 @Suite("FoundationDB Directory conformance", .serialized)
 struct FDBDirectoryConformanceTests {
     private final class RootPathAllocator: Sendable {
@@ -39,8 +39,8 @@ struct FDBDirectoryConformanceTests {
     /// Root path an engine was configured with.
     ///
     /// The adapter is the sole owner of the mapping from a configured root path
-    /// to native paths and to the root's layout marker key, so the probe reads
-    /// the path back from the adapter instead of restating it.
+    /// to native paths, so a test reads the path back from the adapter instead
+    /// of restating it.
     private static func rootPath(of engine: FDBStorageEngine) throws -> [String] {
         guard let access = engine.directoryAccess as? FDBDirectoryAccess else {
             throw StorageError(
@@ -53,40 +53,19 @@ struct FDBDirectoryConformanceTests {
         return access.rootPath
     }
 
-    /// Layout probe for a backend whose storage root is a node in a shared
-    /// cluster.
-    ///
-    /// A foreign layout leaves a native Directory node at the engine's root
-    /// path that StorageKit never marked, which is the V0 row of the layout
-    /// state machine. The marker of that root is one key of its own, so the
-    /// probe never touches another root's marker.
-    private static let layoutProbe = DirectoryConformanceCase<FDBStorageEngine>.LayoutProbe(
-        makeRootForeign: { engine in
-            let rootPath = try Self.rootPath(of: engine)
-            let layer = DirectoryLayer(database: try FDBClient.openDatabase())
-            _ = try await layer.createOrOpen(path: rootPath)
-        },
-        writeMarker: { engine, value in
-            let rootPath = try Self.rootPath(of: engine)
-            try await engine.withTransaction { transaction in
-                try transaction.setValue(
-                    value,
-                    for: StorageLayoutMarker.key(rootPath: rootPath)
-                )
-            }
-        }
-    )
-
     // MARK: - Shared conformance
+
+    // `verifyForeignRootRejection` is not run here, and the omission is a
+    // property of this backend rather than a gap in the fixture. A key-value
+    // root shares one flat keyspace with whatever wrote to it first, so
+    // initializing over existing keys would allocate a Directory on top of
+    // them. The native Directory Layer allocates every prefix and never
+    // returns one already in use, so no StorageKit write can reach foreign
+    // bytes and the state that step produces does not exist here.
 
     @Test("Root initialization", .timeLimit(.minutes(1)))
     func rootInitialization() async throws {
         try await Self.withConformance { try await $0.verifyRootInitialization() }
-    }
-
-    @Test("Layout rejection", .timeLimit(.minutes(1)))
-    func layoutRejection() async throws {
-        try await Self.withConformance { try await $0.verifyLayoutRejection() }
     }
 
     @Test("Create and open", .timeLimit(.minutes(1)))
@@ -137,12 +116,12 @@ struct FDBDirectoryConformanceTests {
     // MARK: - Root scoping
 
     /// The storage root of an engine is the node at its configured root path,
-    /// so the layout state machine of SPEC §10.3 reads that root's own marker
-    /// and that root's own emptiness.
+    /// so the bootstrap decision of SPEC §10.3 asks whether that node exists
+    /// and never whether the cluster is empty.
     ///
-    /// A cluster always holds data belonging to no single root: other roots,
-    /// their markers, and the native allocator counters. Counting that as this
-    /// root's data would reject every new root on a cluster already in use.
+    /// A cluster always holds data belonging to no single root: other roots and
+    /// the native allocator counters. Counting that as this root's data would
+    /// reject every new root on a cluster already in use.
     @Test("A root initializes on a cluster that already holds other data", .timeLimit(.minutes(1)))
     func rootInitializesOnANonemptyCluster() async throws {
         let roots = RootPathAllocator()
@@ -182,26 +161,37 @@ struct FDBDirectoryConformanceTests {
         }
     }
 
-    /// One root's rejected layout never rejects another root.
-    @Test("A rejected root leaves its sibling roots usable", .timeLimit(.minutes(1)))
-    func aRejectedRootLeavesItsSiblingsUsable() async throws {
+    /// One root's bootstrap state never decides another root's (FD-1).
+    ///
+    /// Existence is asked of the engine's own node at `rootPath`, so an
+    /// initialized root leaves its siblings uninitialized, and initializing a
+    /// sibling leaves the first one open.
+    @Test("Sibling roots are independent", .timeLimit(.minutes(1)))
+    func siblingRootsAreIndependent() async throws {
         let roots = RootPathAllocator()
-        let rejected = roots.next()
-        let healthy = roots.next()
-        try await Self.withEngine(rootPath: rejected, base: roots.base) { engine in
-            try await Self.layoutProbe.writeMarker(engine, [0x53, 0x4B, 0x4C, 0x02])
-            await Self.expectFailure(.incompatibleStorageLayout, "unknown marker on its own root") {
-                _ = try await engine.withTransaction { transaction in
-                    try await engine.directoryAccess.openRoot(transaction: transaction)
-                }
+        let first = roots.next()
+        let second = roots.next()
+        try await Self.withEngine(rootPath: first, base: roots.base) { engine in
+            let initialized = try await engine.withTransaction { transaction in
+                try await engine.directoryAccess.openOrInitializeRoot(transaction: transaction)
             }
+            #expect(initialized.address == .root)
 
-            let sibling = try await FDBStorageEngine(configuration: .init(rootPath: healthy))
+            let sibling = try await FDBStorageEngine(configuration: .init(rootPath: second))
             do {
-                let initialized = try await sibling.withTransaction { transaction in
+                let before = try await sibling.withTransaction { transaction in
+                    try await sibling.directoryAccess.openRoot(transaction: transaction)
+                }
+                #expect(before == nil, "an initialized root must not initialize its sibling")
+                let siblingRoot = try await sibling.withTransaction { transaction in
                     try await sibling.directoryAccess.openOrInitializeRoot(transaction: transaction)
                 }
-                #expect(initialized.address == .root)
+                #expect(siblingRoot.address == .root)
+                #expect(siblingRoot.keyspacePrefix != initialized.keyspacePrefix)
+                let reopened = try await engine.withTransaction { transaction in
+                    try await engine.directoryAccess.openRoot(transaction: transaction)
+                }
+                #expect(reopened == initialized, "a sibling root must not disturb this root")
             } catch {
                 await sibling.shutdown()
                 throw error
@@ -313,12 +303,9 @@ struct FDBDirectoryConformanceTests {
     /// A native node created outside StorageKit keeps its own layer value, so a
     /// typed open reports a mismatch instead of adopting the node.
     ///
-    /// The layout state machine runs before any layer-tag verification (FD-1),
-    /// so a root without a V1 marker is a layout rejection whatever its node
-    /// carries; `layoutRejection` and the root-scoping tests own that path.
-    /// This step therefore marks the root first and then replaces its native
-    /// node, which leaves the layer-tag verification of FD-2 as the only gate
-    /// the root open can fail.
+    /// The node at the root path is the only bootstrap witness (FD-1), so a
+    /// node found there is opened rather than adjudicated and the layer-tag
+    /// verification of FD-2 is the only gate the root open can fail.
     @Test("Foreign layer value is rejected", .timeLimit(.minutes(1)))
     func foreignLayerValueIsRejected() async throws {
         let roots = RootPathAllocator()
@@ -326,9 +313,8 @@ struct FDBDirectoryConformanceTests {
         let layer = DirectoryLayer(database: try FDBClient.openDatabase())
         try await Self.withEngine(rootPath: rootPath, base: roots.base) { engine in
             let catalog = engine.directoryAccess
-            // The marker lives outside the root node's content prefix, so it
-            // survives the removal below and the root stays layout-V1 while
-            // its native node carries a foreign layer value.
+            // Initializing first gives `remove` a node to remove; what the
+            // replacement node carries is what this step verifies.
             try await engine.withTransaction { transaction in
                 _ = try await catalog.openOrInitializeRoot(transaction: transaction)
             }
@@ -390,8 +376,8 @@ struct FDBDirectoryConformanceTests {
                 let root = try await first.directoryAccess.openOrInitializeRoot(transaction: transaction)
                 _ = try await first.directoryAccess.openOrCreateDirectory("shared", in: root, transaction: transaction)
             }
-            // Each root owns its own marker, so the second catalog observes an
-            // uninitialized layout rather than the first catalog's root.
+            // Each root is its own node, so the second catalog observes an
+            // uninitialized root rather than the first catalog's root.
             let seenBySecond = try await second.withTransaction { transaction in
                 try await second.directoryAccess.openRoot(transaction: transaction)
             }
@@ -438,8 +424,7 @@ struct FDBDirectoryConformanceTests {
         let conformance = DirectoryConformanceCase<FDBStorageEngine>(
             makeEngine: {
                 try await FDBStorageEngine(configuration: .init(rootPath: roots.next()))
-            },
-            layoutProbe: layoutProbe
+            }
         )
         var failure: (any Error)?
         do {
@@ -472,26 +457,12 @@ struct FDBDirectoryConformanceTests {
         }
     }
 
-    /// Removes the per-test base path and the layout markers of every root
-    /// below it through a bootstrapped client so cleanup never depends on the
-    /// engine under test.
+    /// Removes the per-test base path through a bootstrapped client so cleanup
+    /// never depends on the engine under test.
     ///
-    /// Every root path of a step extends `base`, so every marker key of the
-    /// step lies under the marker key of `base` itself.
+    /// Every root path of a step extends `base`, and this adapter owns no key
+    /// of its own, so removing that node removes the whole step's state.
     private static func cleanUp(_ base: [String]) async throws {
-        let bootstrap = try await FDBStorageEngine(configuration: .init(rootPath: base))
-        do {
-            let markers = try Subspace(
-                prefix: StorageLayoutMarker.key(rootPath: base)
-            ).prefixRange()
-            try await bootstrap.withTransaction { transaction in
-                try transaction.clearRange(beginKey: markers.begin, endKey: markers.end)
-            }
-        } catch {
-            await bootstrap.shutdown()
-            throw error
-        }
-        await bootstrap.shutdown()
         let layer = DirectoryLayer(database: try FDBClient.openDatabase())
         if try await layer.exists(path: base) {
             try await layer.remove(path: base)

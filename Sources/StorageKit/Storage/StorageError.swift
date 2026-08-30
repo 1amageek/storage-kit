@@ -53,7 +53,7 @@ public struct StorageError: Error, Sendable, CustomStringConvertible, Hashable {
         case backendContractViolation = "backend_contract_violation"
         case dataCorruption = "data_corruption"
         case resourceUnavailable = "resource_unavailable"
-        /// The keyspace carries no supported storage layout marker.
+        /// The storage root holds data that no Directory catalog wrote.
         case incompatibleStorageLayout = "incompatible_storage_layout"
         /// A stated layer tag does not match the stored node tag.
         case directoryLayerMismatch = "directory_layer_mismatch"

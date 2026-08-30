@@ -27,7 +27,7 @@ contracts are owned by their own `DESIGN.md` and are not duplicated here.
 | Transaction admission, commit-at-most-once, authoritative cancel, shutdown | Query meaning, schema, authorization, result publication (database-framework) |
 | Bounded point reads, bounded range reads, cursors, mutation byte metering | Declaration syntax and validation (database-kit) |
 | Tuple V1 encoding and `Subspace` derivation | Wire encodings (DatabaseWire in database-kit) |
-| Directory and Partition placement, catalog existence authority, layout marker | Reserved Directory names `system`, `database-framework`, `data` (Framework concern) |
+| Directory and Partition placement, catalog existence authority, root bootstrap | Reserved Directory names `system`, `database-framework`, `data` (Framework concern) |
 | `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` issuance | Which Partition a request may use (Framework authority) |
 | One backend adapter per module with typed failure conversion | Process lifecycle, listeners, hosting (database-server, Cloudflare host) |
 

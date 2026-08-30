@@ -23,15 +23,14 @@ SPEC §7.3.
 | FDB client startup and the retained database handle of one engine | The FoundationDB C client and its safe Swift ownership (`fdb-swift-bindings`) |
 | `FDBStorageTransaction`: read, write, range, atomic, commit-at-most-once, cancel, error conversion, and the exclusive Directory operation window | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
 | Borrowed result byte lifetime bound to the retained owner | Native Directory Layer algorithms: HCA prefix allocation, node metadata, nested partition layers, version keys |
-| `FDBDirectoryLayout`: native path composition below the root path and the one-to-one `LayerTag` ↔ `DirectoryType` mapping | `StorageLayoutMarker` bytes and its state machine, `PartitionLeaseRegistry`, `PartitionLease` (StorageKit) |
+| `FDBDirectoryLayout`: native path composition below the root path and the one-to-one `LayerTag` ↔ `DirectoryType` mapping | `PartitionLeaseRegistry`, `PartitionLease` (StorageKit) |
 | `FDBDirectoryAccess`: the five semantic Directory operations plus root open and initialize, layer-tag verification on every open, Partition boundary and own-subtree rejection, listing order and pagination, lease intent order, native error mapping | Framework binding of `#Directory` declarations |
 
 Authority: the native Directory Layer metadata below `Configuration.rootPath`
 is the sole existence authority for this backend (SPEC §12.3). A node's
 existence, its HCA-allocated prefix, and its layer tag are read only from that
-metadata; StorageKit stores no shadow catalog. The one StorageKit-owned key is
-the layout-version marker, which records the layout of the store and never the
-existence of a node.
+metadata; StorageKit stores no shadow catalog, and this adapter owns no key
+of its own below `rootPath`.
 
 ## Related Designs
 
@@ -39,8 +38,8 @@ existence of a node.
 |---|---|---|---|---|
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to database-framework. |
 | [StorageKit module](../StorageKit/DESIGN.md) | depends on | `StorageEngine`, `TransactionReadAccess`, `TransactionAccess`, `StorageError`, `Subspace`, `StorageTransactionDomain` | Supplies the contracts this adapter realizes. | `Subspace` here is `StorageKit.Subspace`; the bindings own a different `Subspace` type. |
-| [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `Directory`, `DirectoryEntry`, `LayerTag`, `Partition`, `StorageAddress`, `DirectoryLimits`, `StorageLayoutMarker`, `PartitionLeaseRegistry.registerIntent` | Defines the operations, failure codes, bounds, marker state machine, and intent rules this module must satisfy. | Intent registration happens after validation, before the native mutation (FD-7). |
-| [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `FDBDirectoryConformanceTests`. | Every step runs here, `verifyLayoutRejection` included; the fixture drives the layout probe of this adapter, which scopes every marker read and write to the engine's own root path. |
+| [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `Directory`, `DirectoryEntry`, `LayerTag`, `Partition`, `StorageAddress`, `DirectoryLimits`, `PartitionLeaseRegistry.registerIntent` | Defines the operations, failure codes, bounds, root bootstrap state machine, and intent rules this module must satisfy. | Intent registration happens after validation, before the native mutation (FD-7). |
+| [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `FDBDirectoryConformanceTests`. | Every step runs here except `verifyForeignRootRejection`, which has no FoundationDB state to produce: the native layer never allocates a prefix already in use, so a StorageKit write cannot land on foreign bytes. |
 | `fdb-swift-bindings` | depends on | `FDBClient`, `DatabaseProtocol`, `TransactionProtocol`, `DirectoryLayer`, `DirectorySubspace`, `DirectoryType`, `DirectoryError` | Native client, transactions, and Directory Layer. | `createOrOpen` creates missing ancestors as untyped nodes, so this adapter checks the parent itself (FD-10), and writes the layer version key when absent; `list` returns names in Swift `String` order and paginates nothing; `move` keeps the prefix; `remove` is recursive; a `partition` node roots a nested layer and partitions may nest. |
 
 ## Architecture
@@ -71,10 +70,10 @@ this package.
 |---|---|
 | `rootPath: [String]` | Native path that owns the engine's root Directory. Default `Configuration.defaultRootPath = ["storage-kit"]`. Must be non-empty with non-empty components; otherwise `StorageError(.invalidOperation, operation: .open)` before any client work. Engines with distinct root paths on one cluster never observe each other's Directories. |
 
-The layout marker is scoped by `rootPath`: one cluster holds one marker per
-root path (FD-1). Two engines with distinct root paths therefore never observe
-each other's marker, and neither is initialized, opened, or rejected because of
-the other's data.
+Root state is scoped by `rootPath`: the node at that path is the whole of
+this root's bootstrap state (FD-1). Two engines with distinct root paths
+therefore never observe each other's root, and neither is initialized, opened,
+or rejected because of the other's data.
 
 ### Layout V1
 
@@ -103,9 +102,9 @@ The mapping is one to one and adds no encoding of its own.
 
 | ID | Invariant |
 |---|---|
-| FD-1 | The native layer below `rootPath` is the sole existence authority. The only StorageKit-owned key is the layout marker `StorageLayoutMarker.key(rootPath:)`, one key per root path. Emptiness is asked of the native node at `rootPath` and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. `openRoot` and `openOrInitializeRoot` run the shared state machine before touching the native layer, and `openOrInitializeRoot` writes the marker in the caller's transaction together with the root node. |
+| FD-1 | The native layer below `rootPath` is the sole existence authority, and this adapter owns no key of its own. The root is initialized exactly when the node at `rootPath` exists: `openRoot` reports its absence as an uninitialized root and never writes, and `openOrInitializeRoot` creates it in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. No layout version is recorded, and a node found at `rootPath` is opened rather than adjudicated: the native layer never allocates a prefix already in use, so no StorageKit write can land on bytes written outside it, and which node `rootPath` names is an operator decision. `requireRoot` still refuses a node whose layer is not the default, so a native partition at the root path fails with `directoryLayerMismatch`. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
-| FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized cluster is observed without touching the layer version key. |
+| FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized root is observed without touching the layer version key. |
 | FD-4 | A move never resurrects a stale destination: a missing destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. Both are checked before any lease intent is registered. |
 | FD-5 | Listings sort native names by UTF-8 bytes, apply `after` exclusively, and honor `limit` in `1...DirectoryLimits.maximumListLimit`; each row resolves the child to read its stored tag, so a `DirectoryEntry` carries the node's real layer. A child that disappears between `list` and its resolution is skipped, and a listing below a stale parent is an empty page. |
 | FD-6 | Removal is recursive and has no emptiness precondition: the native layer clears every descendant node and the whole content range of the removed node, which for a Partition is one range. A missing node fails with `keyNotFound` before any mutation. |
@@ -131,7 +130,7 @@ The mapping is one to one and adds no encoding of its own.
 
 | Behavior | KV catalog | FDBStorage |
 |---|---|---|
-| Layout rejection source | marker key state machine over the engine's own keyspace | the same state machine over the engine's own root-scoped marker key and root node |
+| Bootstrap witness | the root layer's allocator key, plus an unbounded emptiness probe that rejects foreign data | the native node at `rootPath`; foreign data cannot collide, because the native layer never allocates a prefix in use, so there is nothing to reject |
 | Root prefix | `Tuple(0)` under the domain root layer | HCA-allocated native prefix below `rootPath` |
 | Creating a child under a removed parent | writes an edge under the removed parent's prefix, which no path reaches | fails with `keyNotFound` before any write (FD-10) |
 | Foreign nodes | cannot exist; the catalog owns every edge | a native node created outside StorageKit is listed and resolvable, and carries its own layer tag |
@@ -206,26 +205,25 @@ resolve tx -> require parent domain -> child address
   bounds that cost within the transaction's five-second budget.
 - `withDirectoryOperation` serializes Directory operations with the transaction's
   own reads and writes; two engines on one cluster are isolated only by distinct
-  root paths, not by the client, and each root path carries its own layout
-  marker (FD-1).
+  root paths, not by the client, and each root path carries its own root node
+  (FD-1).
 
 ## Verification and Change Impact
 
 | Contract | Evidence |
 |---|---|
-| D-1…D-12, operations 1–5, the marker state machine, L-1…L-3, L-7, L-8, FD-1, FD-3…FD-9 | `Tests/FDBStorageTests/FDBDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps) |
+| D-1…D-12, operations 1–5, the root bootstrap state machine, L-1…L-3, L-7, L-8, FD-1, FD-3…FD-9 | `Tests/FDBStorageTests/FDBDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps) |
 | Layout V1 names and layer values, nested Partition creation and containment | `FDBDirectoryConformanceTests.nativeNodesCarryStorageKitNamesAndLayers` |
 | FD-2 on foreign native nodes: typed root, child, and Partition mismatch, and the tag returned by a listing | `FDBDirectoryConformanceTests.foreignLayerValueIsRejected` |
 | A layer tag that is not valid UTF-8 stays application-opaque | `FDBDirectoryConformanceTests.layerTagThatIsNotUTF8RoundTrips` |
 | Root path isolation and configuration validation | `FDBDirectoryConformanceTests.distinctRootPathsIsolateCatalogs`, `rootPathConfigurationIsValidated` |
-| FD-1 root scoping: a fresh root initializes beside occupied roots, and a rejected root does not reject its siblings | `FDBDirectoryConformanceTests.rootInitializesOnANonemptyCluster`, `aRejectedRootLeavesItsSiblingsUsable` |
+| FD-1 root scoping: a fresh root initializes beside occupied roots, and one root's state never decides another's | `FDBDirectoryConformanceTests.rootInitializesOnANonemptyCluster`, `siblingRootsAreIndependent` |
 | Transaction semantics, error mapping, byte ownership, footprint | `FDBStorageEngineTests`, `FDBStorageErrorMappingTests`, `FoundationDBByteOwnershipTests`, `FDBStorageTransactionFootprintTests`, `TransactionActivityDrainTests` |
 
 The suite requires a reachable cluster through `FDB_CLUSTER_FILE` or the
 default cluster file; it creates and removes its own paths below
-`storage-kit-conformance` and clears the layout marker keys of the roots it
-used after each step.
+`storage-kit-conformance` after each step.
 
-Changing the path mapping, the layer-tag mapping, the marker bytes, or the
-root path default is a layout change: update this design, then the Directory
+Changing the path mapping, the layer-tag mapping, the bootstrap witness, or
+the root path default is a layout change: update this design, then the Directory
 component design's adapter notes, then database-framework binding.

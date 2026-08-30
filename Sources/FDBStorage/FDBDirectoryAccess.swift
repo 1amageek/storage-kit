@@ -14,10 +14,10 @@ import StorageKit
 /// siblings of the layer that owns it, which contiguity does not require.
 ///
 /// This type adds what the shared Directory contract requires on top of the
-/// native layer: the layout marker state machine, domain checks, address
-/// validation, layer-tag verification on every open, Partition boundary
-/// rejection, own-subtree rejection, and lease intents. Path and layer mapping
-/// is owned by `FDBDirectoryLayout`.
+/// native layer: root bootstrap, domain checks, address validation, layer-tag
+/// verification on every open, Partition boundary rejection, own-subtree
+/// rejection, and lease intents. Path and layer mapping is owned by
+/// `FDBDirectoryLayout`.
 ///
 /// Every native call runs inside `FDBStorageTransaction.withDirectoryOperation`,
 /// which keeps the Directory operation exclusive with the transaction's own
@@ -35,36 +35,26 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
 
     // MARK: - Root
 
-    /// Layout marker key of this engine's storage root.
+    /// The native node at `rootPath`: the sole witness that this root is
+    /// initialized (SPEC §10.3, FD-1).
     ///
-    /// One cluster hosts one storage root per root path, so each root carries
-    /// its own marker and is initialized, opened, and rejected on its own.
-    private var layoutMarkerKey: ByteString {
-        StorageLayoutMarker.key(rootPath: rootPath)
-    }
-
+    /// This adapter owns no key of its own and records no layout version. The
+    /// native Directory Layer never allocates a prefix that is already in use,
+    /// so no StorageKit write can land on bytes written outside it, and a node
+    /// found at `rootPath` is opened rather than adjudicated: what that path
+    /// names is an operator decision. `requireRoot` still refuses a node whose
+    /// layer is not the default, so a native partition there fails typed.
+    ///
+    /// One cluster hosts one storage root per root path, so existence is asked
+    /// of that node and never of the cluster. Another root's nodes and the
+    /// native allocator counters are not this root's data.
     func openRoot(transaction: any TransactionReadAccess) async throws -> Directory? {
         let operation = StorageOperation.open
         let storage = try resolve(transaction, operation: operation)
-        let marker = try await transaction.getValue(for: layoutMarkerKey)
         return try await withLayer(storage, writes: false, operation: operation) { layer, native in
-            // The storage root of this engine is the native node at `rootPath`,
-            // so emptiness is asked of that node and never of the cluster.
-            // Another root's nodes and the native allocator counters are not
-            // this root's data. `exists` resolves the path without touching the
-            // layer version key, so the observation needs no write.
-            let rootExists = try await layer.exists(path: rootPath, transaction: native)
-            switch StorageLayoutMarker.inspect(marker: marker, rootIsEmpty: !rootExists) {
-            case .openV1:
-                break
-            case .uninitialized:
-                return nil
-            case .rejected(let rejection):
-                throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
-            }
-            // A marked root whose node was removed outside StorageKit reads as
-            // absent rather than as a layout failure.
-            guard rootExists else {
+            // `exists` resolves the path without touching the layer version
+            // key, so an uninitialized root is observed without any write.
+            guard try await layer.exists(path: rootPath, transaction: native) else {
                 return nil
             }
             let node = try await layer.open(path: rootPath, transaction: native)
@@ -75,24 +65,6 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
     func openOrInitializeRoot(transaction: any TransactionAccess) async throws -> Directory {
         let operation = StorageOperation.initialize
         let storage = try resolve(transaction, operation: operation)
-        let markerKey = layoutMarkerKey
-        let marker = try await transaction.getValue(for: markerKey)
-        // A Directory operation is exclusive with the transaction's own reads
-        // and writes, so the root observation and the marker write are ordered
-        // around it rather than nested inside it.
-        let rootExists = try await withLayer(storage, writes: false, operation: operation) { layer, native in
-            try await layer.exists(path: rootPath, transaction: native)
-        }
-        switch StorageLayoutMarker.inspect(marker: marker, rootIsEmpty: !rootExists) {
-        case .openV1:
-            break
-        case .uninitialized:
-            // The marker and the root node commit in one transaction, so a
-            // reader never observes a marked root without its catalog.
-            try transaction.setValue(StorageLayoutMarker.v1, for: markerKey)
-        case .rejected(let rejection):
-            throw StorageError.incompatibleStorageLayout(rejection, backend: backend)
-        }
         return try await withLayer(storage, writes: true, operation: operation) { layer, native in
             let node = try await layer.createOrOpen(
                 path: rootPath,

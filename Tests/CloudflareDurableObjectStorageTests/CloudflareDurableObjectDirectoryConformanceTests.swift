@@ -22,9 +22,9 @@ struct CloudflareDurableObjectDirectoryConformanceTests {
         try await conformance.verifyRootInitialization()
     }
 
-    @Test("Layout rejection", .timeLimit(.minutes(1)))
-    func layoutRejection() async throws {
-        try await conformance.verifyLayoutRejection()
+    @Test("Foreign root rejection", .timeLimit(.minutes(1)))
+    func foreignRootRejection() async throws {
+        try await conformance.verifyForeignRootRejection()
     }
 
     @Test("Create and open", .timeLimit(.minutes(1)))

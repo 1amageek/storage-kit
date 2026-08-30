@@ -9,56 +9,45 @@ import StorageKit
 /// case never imports a test framework; it reports contract violations as
 /// `DirectoryConformanceFailure` and propagates adapter failures unchanged.
 public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
-    /// How a backend puts its storage root into a state the layout state
-    /// machine must reject, without going through `DirectoryAccess`.
+    /// How a backend puts data no Directory catalog wrote into the storage
+    /// root of one engine, without going through `DirectoryAccess`.
     ///
-    /// A backend whose whole store is one storage root writes a stray key and
-    /// records the marker at `StorageLayoutMarker.key`. A backend that hosts
-    /// its root below a path in a shared store leaves at that path what a
-    /// foreign layout would have left, and records the marker at that root's
-    /// own key, so the step observes its own root and not the shared store.
-    public struct LayoutProbe: Sendable {
-        /// Leaves data in the engine's storage root that no StorageKit layout
-        /// wrote, so the root is nonempty while its marker is absent.
+    /// This is the state a key-value root must refuse to initialize over:
+    /// content prefixes are allocated from `Tuple(1)` upward inside the same
+    /// flat keyspace, so a Directory created afterwards can land on top of
+    /// keys that were already there. `verifyForeignRootRejection` is therefore
+    /// a key-value step. FoundationDB allocates every prefix through the
+    /// native Directory Layer, which never returns a prefix already in use, so
+    /// no StorageKit write can reach foreign bytes and there is no such state
+    /// to produce.
+    public struct ForeignRootProbe: Sendable {
+        /// Leaves data in the engine's storage root that no Directory catalog
+        /// wrote, so the root is nonempty while it is uninitialized.
         public var makeRootForeign: @Sendable (Engine) async throws -> Void
 
-        /// Records `value` as the layout marker of the engine's storage root.
-        public var writeMarker: @Sendable (Engine, ByteString) async throws -> Void
-
-        public init(
-            makeRootForeign: @escaping @Sendable (Engine) async throws -> Void,
-            writeMarker: @escaping @Sendable (Engine, ByteString) async throws -> Void
-        ) {
+        public init(makeRootForeign: @escaping @Sendable (Engine) async throws -> Void) {
             self.makeRootForeign = makeRootForeign
-            self.writeMarker = writeMarker
         }
 
         /// Probe for a backend whose whole store is one storage root.
-        public static var wholeStore: LayoutProbe {
-            LayoutProbe(
-                makeRootForeign: { engine in
-                    try await engine.withTransaction { transaction in
-                        try transaction.setValue([0x01], for: [0x61])
-                    }
-                },
-                writeMarker: { engine, value in
-                    try await engine.withTransaction { transaction in
-                        try transaction.setValue(value, for: StorageLayoutMarker.key)
-                    }
+        public static var wholeStore: ForeignRootProbe {
+            ForeignRootProbe { engine in
+                try await engine.withTransaction { transaction in
+                    try transaction.setValue([0x01], for: [0x61])
                 }
-            )
+            }
         }
     }
 
     private let makeEngine: @Sendable () async throws -> Engine
-    private let layoutProbe: LayoutProbe
+    private let foreignRootProbe: ForeignRootProbe
 
     public init(
         makeEngine: @escaping @Sendable () async throws -> Engine,
-        layoutProbe: LayoutProbe = .wholeStore
+        foreignRootProbe: ForeignRootProbe = .wholeStore
     ) {
         self.makeEngine = makeEngine
-        self.layoutProbe = layoutProbe
+        self.foreignRootProbe = foreignRootProbe
     }
 
     private struct AbortTransaction: Error {}
@@ -92,29 +81,24 @@ public struct DirectoryConformanceCase<Engine: StorageEngine>: Sendable {
         }
     }
 
-    /// A storage root without a supported layout is rejected, never adopted.
-    public func verifyLayoutRejection() async throws {
-        let step = "layout rejection"
+    /// A storage root holding data no Directory catalog wrote is rejected,
+    /// never adopted.
+    ///
+    /// Key-value engines only. See `ForeignRootProbe` for why FoundationDB has
+    /// no such state.
+    public func verifyForeignRootRejection() async throws {
+        let step = "foreign root rejection"
         try await withEngine { engine in
             let catalog = engine.directoryAccess
-            try await layoutProbe.makeRootForeign(engine)
-            try await requireFailure(.incompatibleStorageLayout, step, "openRoot on a nonempty root without marker") {
+            try await foreignRootProbe.makeRootForeign(engine)
+            try await requireFailure(.incompatibleStorageLayout, step, "openRoot on an uninitialized nonempty root") {
                 _ = try await engine.withTransaction { transaction in
                     try await catalog.openRoot(transaction: transaction)
                 }
             }
-            try await requireFailure(.incompatibleStorageLayout, step, "openOrInitializeRoot on a nonempty root without marker") {
+            try await requireFailure(.incompatibleStorageLayout, step, "openOrInitializeRoot on an uninitialized nonempty root") {
                 _ = try await engine.withTransaction { transaction in
                     try await catalog.openOrInitializeRoot(transaction: transaction)
-                }
-            }
-        }
-        try await withEngine { engine in
-            let catalog = engine.directoryAccess
-            try await layoutProbe.writeMarker(engine, [0x53, 0x4B, 0x4C, 0x02])
-            try await requireFailure(.incompatibleStorageLayout, step, "openRoot with an unknown marker") {
-                _ = try await engine.withTransaction { transaction in
-                    try await catalog.openRoot(transaction: transaction)
                 }
             }
         }

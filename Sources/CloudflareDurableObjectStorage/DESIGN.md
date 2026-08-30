@@ -29,7 +29,7 @@ them.
 | `CloudflareDurableObjectStorageEngine`: readiness gate (`schemaVersion == 1`, `metadataInitialized`), transaction admission, shutdown | HTTP and WASI host transports (`…HTTP`, `…HostTransport`) and the TypeScript host |
 | `CloudflareDurableObjectStorageTransaction` and `CloudflareDurableObjectTransactionState`: buffered wire mutations, read and write conflict ranges, observed read version, deadline, phase state machine, single-commit request, unknown-outcome preservation | Durable Object routing and lifecycle (application-owned) |
 | `CloudflareDurableObjectStorageClient` protocol, `…WireClient`, `…StorageTransport`, transport failure types, timed calls | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
-| `CloudflareDurableObjectLimits` and `…LimitsError`: bounded keys, boundaries, values, mutations, conflict ranges, page size, split points, selector steps | The catalog algorithm and layout marker (`KeyValueDirectoryCatalog`, StorageKit) |
+| `CloudflareDurableObjectLimits` and `…LimitsError`: bounded keys, boundaries, values, mutations, conflict ranges, page size, split points, selector steps | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
 | Range scanning (`…RangeScan`, `…RangeScanning`, `…RangeResult`, `…ByteOrdering`) | `PartitionLeaseRegistry` and `PartitionLease` (StorageKit) |
 | Catalog placement: the engine instantiates `KeyValueDirectoryCatalog(transactionDomain:backend: .cloudflareDurableObject)` | Framework binding of `#Directory` declarations |
 
@@ -90,7 +90,7 @@ modules depend on this module; nothing else inside the package does.
 | Catalog | `KeyValueDirectoryCatalog(transactionDomain:backend: .cloudflareDurableObject)` |
 | Catalog keys | allocator `[0xFE, 0x61]`, node keys `[0xFE, 0x6E] + Tuple(parentPrefix, kind, name)`; stored in the partition's key-value table beside data |
 | Directory root prefix | catalog-allocated `Tuple(Int64).pack()`; root Directory uses number `0` |
-| Layout marker | the catalog's marker state machine (Directory component); no host-specific marker |
+| Root bootstrap | the catalog's allocator witness and unbounded emptiness probe (Directory component); no host-specific state |
 
 ### Invariants
 
@@ -152,7 +152,7 @@ KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog k
 
 | Contract | Evidence |
 |---|---|
-| D-1…D-12, operations 1–5, layout marker, L-1…L-3, L-7, L-8 | `Tests/CloudflareDurableObjectStorageTests/CloudflareDurableObjectDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps over `InMemoryCloudflareDurableObjectStorageTransport`) |
+| D-1…D-12, operations 1–5, root bootstrap, L-1…L-3, L-7, L-8 | `Tests/CloudflareDurableObjectStorageTests/CloudflareDurableObjectDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps over `InMemoryCloudflareDurableObjectStorageTransport`) |
 | DO-2, DO-3, DO-4 | `CloudflareDurableObjectStorageTransactionTests`, `CloudflareDurableObjectStorageSemanticsTests`, `CloudflareDurableObjectStorageValueSemanticsTests` |
 | DO-5, DO-6 | `CloudflareDurableObjectStorageWireClientTests` with the `ConfiguredFailure…`, `MismatchedOperation…`, `TruncatedResponse…`, `Suspending…`, and `BorrowedResponse…` transport fixtures |
 | Deadlines | `CloudflareDurableObjectStorageTimeoutTests` |

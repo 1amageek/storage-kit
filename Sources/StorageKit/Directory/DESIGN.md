@@ -5,9 +5,9 @@
 The Directory component owns storage placement: hierarchical Directories,
 Partitions that root a nested Directory Layer over one contiguous keyspace, the
 transactional catalog that is the sole existence authority in key-value
-backends, the layout-version marker and its bootstrap state machine, and the
-noncopyable lease and bound-access types that confine active work to one
-Partition.
+backends, the bootstrap state machine that decides whether a storage root is
+initialized, and the noncopyable lease and bound-access types that confine
+active work to one Partition.
 
 | Field | Value |
 |---|---|
@@ -23,7 +23,7 @@ Partition.
 | `DirectoryPath`, `LayerTag`, `StorageAddress`, `Directory`, `DirectoryEntry`, `Partition` values and their bounds | Reserved names (`system`, `database-framework`, `data`) and Framework Subspace layout |
 | `DirectoryAccess` contract and the five semantic operations | Authorization of any operation |
 | `KeyValueDirectoryCatalog`: the catalog realization for InMemory, SQLite, PostgreSQL, Cloudflare DO | The FDB realization (owned by `FDBStorage`, which must satisfy the same contract) |
-| `StorageLayoutMarker` and the InspectRoot → OpenV1 / InitializeV1 / Reject state machine | Deleting or rewriting roots (never in production) |
+| The InspectRoot → Open / Initialize / Reject bootstrap decision, read from the root's own allocation authority | Deleting or rewriting roots (never in production) |
 | `PartitionLeaseRegistry`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Deciding which Partition a request may lease |
 
 ## Related Designs
@@ -42,7 +42,7 @@ Partition.
    |
    +-- KeyValueDirectoryCatalog (StorageKit)      +-- FDBDirectoryAccess (FDBStorage)
    |     per-layer node subspace 0xFE              |     native DirectoryLayer
-   |     marker / allocator / child edges          |     native `partition` layer bytes
+   |     allocator / child edges                   |     native `partition` layer bytes
    v                                               v
  TransactionReadAccess / TransactionAccess (caller's transaction)
 
@@ -168,14 +168,12 @@ whose type codes never reach `0xFD`.
 
 | Key | Value | Meaning |
 |---|---|---|
-| `FE 6C` | `53 4B 4C 01` | layout marker: `"SKL"` + version 1 (domain root layer only) |
 | `L ‖ FE 61` | `Tuple(Int64(next)).pack()` | next content number of the layer with base `L` (read-modify-write in the caller's transaction) |
 | `L ‖ FE ‖ Tuple(parentPrefix: bytes, 0, name: String).pack()` | `Tuple(childPrefix: bytes, layerTag: bytes).pack()` | child edge of a node in the layer with base `L` |
 
-- The domain root layer has `L` empty, so its node subspace is `FE`, its
-  allocator key is `FE 61`, and its marker key is `FE 6C`. A child edge begins
-  with a Tuple type code, which is never `0x61` or `0x6C`, so edges never
-  collide with the allocator or the marker.
+- The domain root layer has `L` empty, so its node subspace is `FE` and its
+  allocator key is `FE 61`. A child edge begins with a Tuple type code, which
+  is never `0x61`, so edges never collide with the allocator.
 - Root Directory = content number 0, prefix `Tuple(Int64(0)).pack()` = `14`.
   The root does not use the empty prefix, so root-level data can never collide
   with child roots or the catalog.
@@ -196,10 +194,8 @@ whose type codes never reach `0xFD`.
   upper bound, so a key at or above `[0xFF]` counts as data exactly like any
   other key. A bounded probe would report a root that holds only such keys as
   empty and adopt a foreign layout, so the probe is deliberately unbounded.
-
-Version 1 is the layout defined by the current SPEC. The interim catalog that
-allocated every prefix from the domain root allocator was never released, so
-the marker bytes stay `SKL` + 1.
+  This probe, not any recorded version, is what keeps a Directory off data the
+  catalog did not write.
 
 Concurrent creation of the same child races on the layer allocator key; the
 backend's conflict detection (FDB, InMemory, PostgreSQL repeatable-read or
@@ -207,29 +203,49 @@ serializable, SQLite serialization) makes one transaction fail typed. This is
 why the allocator is a read-modify-write and not an atomic add, and why every
 catalog write first passes the backend's `MutationAdmission`.
 
-### Layout marker state machine (§10.3)
+### Root bootstrap state machine (§10.3)
+
+A storage root is initialized exactly when the authority that allocates
+prefixes inside it holds state for that root. Nothing else records that fact:
+a second witness can disagree with the first, and that disagreement is a state
+no operation resolves without either fabricating a root or destroying data.
 
 ```text
-InspectRoot
-  marker == V1 bytes                 -> OpenV1        (content number 0)
-  marker absent, keyspace empty      -> read:  nil
-                                        write: InitializeV1 (marker + root allocator = 1, same transaction)
-  marker absent, keyspace nonempty   -> Reject  incompatibleStorageLayout
-  marker present, other bytes        -> Reject  incompatibleStorageLayout
+KeyValueDirectoryCatalog                    -- witness: the root layer allocator `FE 61`
+  allocator present                  -> Open      (root = content number 0)
+  allocator absent, root empty       -> read:  nil
+                                        write: Initialize (allocator = Tuple(1))
+  allocator absent, root nonempty    -> Reject    incompatibleStorageLayout
+
+FDBDirectoryAccess                          -- witness: the native node at the root path
+  node exists                        -> Open      (requireRoot rejects a `partition` node)
+  node absent                        -> read:  nil
+                                        write: Initialize (createOrOpen at the root path)
 ```
 
 No dual read/write of two layouts; production never deletes or rewrites a
-root. A V0 deterministic-prefix store is "marker absent, nonempty" and is
-rejected.
+root. A V0 deterministic-prefix key-value store is "allocator absent,
+nonempty" and is rejected.
 
-"Root" here is one storage root, never a whole physical store. A backend whose
-store is its own storage root reads and writes the marker at
-`StorageLayoutMarker.key` and answers emptiness for the store. A backend that
+The two backends reject different things because they own different
+allocation authorities, and the contract states each one rather than averaging
+them:
+
+- A key-value root shares one flat keyspace with whatever wrote to it first,
+  and content prefixes start at `Tuple(1)`, so foreign data can occupy a
+  prefix the catalog would later hand out. Emptiness is therefore a
+  precondition of initialization, and the probe covers the whole root.
+- FoundationDB allocates every prefix through the native Directory Layer,
+  which never returns a prefix already in use, so no StorageKit write can land
+  on foreign bytes. What the configured root path names is an operator
+  decision; StorageKit verifies only that the node there is a plain Directory
+  and not a native partition.
+
+"Root" is one storage root, never a whole physical store. A backend whose
+store is its own storage root answers emptiness for the store. A backend that
 hosts several storage roots in one store, as FoundationDB does below a
-configured root path, records one marker per root at
-`StorageLayoutMarker.key(rootPath:)` and answers emptiness for that root alone,
-so a root is never initialized, opened, or rejected because of another root's
-data.
+configured root path, answers existence for that root's node alone, so a root
+is never initialized, opened, or rejected because of another root's data.
 
 ### Leases (L-1…L-8)
 
@@ -326,7 +342,7 @@ A Partition child needs no walk: one range covers its whole subtree.
 
 | State | Owner | Lifetime |
 |---|---|---|
-| Catalog edges, per-layer allocators, marker | backend keyspace, mutated only through the caller's transaction | durable |
+| Catalog edges and per-layer allocators | backend keyspace, mutated only through the caller's transaction | durable |
 | Lease registrations and intents | `PartitionLeaseRegistry` (`Mutex`) | registration: until `release()` or `PartitionLease` deinit; intent: until owner completion or transaction deallocation |
 | Binding scope | `PartitionLease.withReadAccess` / `withWriteAccess` | one closure |
 
@@ -354,10 +370,11 @@ confirming edge keys stay within each backend's key bound.
 | Contract | Evidence |
 |---|---|
 | Values and bounds | `Tests/StorageKitTests/DirectoryValueTests.swift` |
-| D-1…D-12, state machine, operations 1–5, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests` (every step, the marker state machine included; on FoundationDB the marker is one key per root path) |
+| D-1…D-12, state machine, operations 1–5, L-1…L-3, L-7, L-8 | `StorageKitConformance` `DirectoryConformanceCase` run by `InMemoryDirectoryConformanceTests`, `SQLiteDirectoryConformanceTests`, `PostgreSQLDirectoryConformanceTests`, `CloudflareDurableObjectDirectoryConformanceTests`, and `FDBDirectoryConformanceTests`. `verifyForeignRootRejection` is key-value only: FoundationDB has no such state, and `FDBDirectoryConformanceTests.siblingRootsAreIndependent` carries the per-root isolation it used to prove |
 | L-2 subtree intersection in both directions, intent release at commit and cancel | `DirectoryConformanceCase.verifyLeaseSubtreeExclusion` run by every adapter suite |
 | L-4, L-5 (compile-level), L-6 escape, registry intersection relation | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 
-Changing the catalog layout, the marker bytes, or any operation semantics
-requires updating this design first, then the StorageKit module design, then
-every adapter module, then database-framework binding (F-15 in `PROGRESS.md`).
+Changing the catalog layout, the bootstrap witness of any backend, or any
+operation semantics requires updating this design first, then the StorageKit
+module design, then every adapter module, then database-framework binding
+(F-15 in `PROGRESS.md`).

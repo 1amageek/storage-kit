@@ -1,13 +1,14 @@
 extension StorageError {
     public static func incompatibleStorageLayout(
-        _ rejection: StorageLayoutMarker.Rejection,
+        _ reason: String,
+        operation: StorageOperation = .open,
         backend: StorageBackend = .unknown
     ) -> StorageError {
         StorageError(
             code: .incompatibleStorageLayout,
-            operation: .open,
+            operation: operation,
             backend: backend,
-            message: "Incompatible storage layout: \(rejection.description)"
+            message: "Incompatible storage layout: \(reason)"
         )
     }
 

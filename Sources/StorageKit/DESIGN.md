@@ -30,7 +30,7 @@ transaction lifecycle owner, and the InMemory reference engine.
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
 | [storage-kit package](../../DESIGN.md) | parent | package invariants P-1…P-7 | Module graph and package-wide invariants. | Public contract changes propagate to every adapter and to database-framework. |
-| [Directory component](Directory/DESIGN.md) | child | `DirectoryAccess`, `Directory`, `Partition`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess`, `KeyValueDirectoryCatalog` | Placement, catalog authority, layout marker, leases. | Read operations accept only `TransactionReadAccess`; catalog reads never create. |
+| [Directory component](Directory/DESIGN.md) | child | `DirectoryAccess`, `Directory`, `Partition`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess`, `KeyValueDirectoryCatalog` | Placement, catalog authority, root bootstrap, leases. | Read operations accept only `TransactionReadAccess`; catalog reads never create. |
 | [Storage component](Storage/DESIGN.md) | child | `StorageEngine`, `Transaction`, cursors, `StorageError`, `StorageEngineLifecycle`, `StorageTransactionDomain` | Transaction and bound contracts; the cursor state owns advance ordering, post-advance validation, and terminal cleanup. | `StorageTransactionDomain` now also owns the lease registry. Cursor scope validation belongs to the cursor state, not to a caller wrapper. |
 | [Tuple component](Tuple/DESIGN.md) | child | `Tuple`, `Subspace`, `TupleElement`, `strinc`, admission-aware `pack(admitting:)` | Tuple V1 encoding frozen by golden vectors; admission measures the exact packed byte count before the single result allocation. | Any byte-layout change is a layout version change. The admission callback is a caller resource boundary, never a backend limit. |
 | `InMemory/` sources | child (no component design yet) | `InMemoryEngine`, `InMemoryTransaction` | Reference engine with conflict detection and versionstamps. | Reference only; must pass every shared fixture. |
@@ -59,7 +59,7 @@ Layering inside the module:
 |---|---|---|
 | Values | `ByteString` (database-types), `Tuple`, `Subspace`, `DirectoryPath`, `LayerTag`, `DirectoryEntry`, `StorageAddress`, `Directory`, `Partition` | database-types |
 | Access contracts | `TransactionReadAccess`, `TransactionAccess`, `Transaction`, `KeySelector`, `KeyValueCursor`, `StreamingMode` | Values |
-| Placement | `DirectoryAccess`, `KeyValueDirectoryCatalog`, `StorageLayoutMarker`, `DirectoryLimits` | Access contracts |
+| Placement | `DirectoryAccess`, `KeyValueDirectoryCatalog`, `DirectoryLimits` | Access contracts |
 | Leases | `PartitionLeaseRegistry`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Placement |
 | Lifecycle | `StorageEngine`, `StorageEngineLifecycle`, `StorageTransactionDomain`, `TransactionLifecycleOwner`, `StorageTransactionExecutor` | Leases |
 | Reference | `InMemoryEngine`, `InMemoryTransaction` | all above |
@@ -82,7 +82,7 @@ Removed in this revision: `namespaceResolver`, `namespaceCatalog`,
 `removeNamespace`, `namespaceExists`, `NamespaceResolver`, `NamespaceCatalog`,
 `DeterministicNamespaceResolver`, and the FDB `NamespaceRegistry`. Deterministic
 path-derived prefixes are a rejected V0 layout (see the Directory component
-design, layout marker state machine).
+design, root bootstrap state machine).
 
 ### Transaction invariants (M-1…M-7)
 
@@ -138,7 +138,7 @@ design, layout marker state machine).
 | Tuple V1 frozen bytes | `Tests/StorageKitTests/TupleV1GoldenVectorTests.swift` |
 | Admission-aware packing traversal and typed rejection | `Tests/StorageKitTests/TupleTests.swift` |
 | Cursor advance ordering, post-advance validation, finish coordination | `Tests/StorageKitTests/TransactionRangeCleanupTests.swift` |
-| Directory, Partition, layout marker, lease contracts on the reference engine | `Tests/StorageKitTests/InMemoryDirectoryConformanceTests.swift` driving `StorageKitConformance` |
+| Directory, Partition, root bootstrap, lease contracts on the reference engine | `Tests/StorageKitTests/InMemoryDirectoryConformanceTests.swift` driving `StorageKitConformance` |
 | Reference-only escape and compile-level attenuation | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 
 Changing any public contract here requires re-verifying every adapter module

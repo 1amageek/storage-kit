@@ -35,8 +35,8 @@ struct PostgreSQLDirectoryConformanceTests {
         try await conformance.verifyRootInitialization()
     }
 
-    @Test(.timeLimit(.minutes(1))) func layoutRejection() async throws {
-        try await conformance.verifyLayoutRejection()
+    @Test(.timeLimit(.minutes(1))) func foreignRootRejection() async throws {
+        try await conformance.verifyForeignRootRejection()
     }
 
     @Test(.timeLimit(.minutes(1))) func createAndOpen() async throws {

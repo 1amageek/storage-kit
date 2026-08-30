@@ -82,65 +82,62 @@ struct DirectoryValueTests {
         await engine.shutdown()
     }
 
-    @Test func layoutMarkerStateMachine() async throws {
+    /// The root layer allocator is the only witness that the root exists, and
+    /// initialization records nothing else. A second witness of the same fact
+    /// could disagree with this one, and neither root operation could then
+    /// decide without fabricating a root or writing over data.
+    @Test func theRootAllocatorIsTheOnlyBootstrapWitness() async throws {
+        typealias Layout = KeyValueDirectoryCatalog.Layout
+        let allocatorKey = Layout.allocatorKey(layerRoot: ByteString())
         let engine = InMemoryEngine()
-        func inspect() async throws -> StorageLayoutMarker.Inspection {
-            try await engine.withTransaction { transaction in
-                try await StorageLayoutMarker.inspect(transaction: transaction)
-            }
+        let catalog = engine.directoryAccess
+
+        let fresh = try await engine.withTransaction { transaction -> (Directory?, ByteString?) in
+            let root = try await catalog.openRoot(transaction: transaction)
+            return (root, try await transaction.getValue(for: allocatorKey))
         }
-        let fresh = try await inspect()
-        #expect(fresh == .uninitialized)
+        #expect(fresh.0 == nil)
+        #expect(fresh.1 == nil)
 
-        try await engine.withTransaction { transaction in try transaction.setValue([0x01], for: [0x61]) }
-        let strayKey = try await inspect()
-        #expect(strayKey == .rejected(.markerAbsentKeyspaceNonempty))
-
-        try await engine.withTransaction { transaction in try transaction.setValue([0xAA], for: StorageLayoutMarker.key) }
-        let unknown = try await inspect()
-        #expect(unknown == .rejected(.unknownMarker([0xAA])))
-
-        try await engine.withTransaction { transaction in try transaction.setValue(StorageLayoutMarker.v1, for: StorageLayoutMarker.key) }
-        let open = try await inspect()
-        #expect(open == .openV1)
+        try await engine.withTransaction { transaction in
+            _ = try await catalog.openOrInitializeRoot(transaction: transaction)
+        }
+        let written = try await engine.withTransaction { transaction in
+            try await transaction.collectRange(begin: [], end: [0xFF, 0xFF])
+        }
+        #expect(written.count == 1)
+        #expect(written.first?.0 == allocatorKey)
+        #expect(written.first?.1 == Tuple(Layout.firstNumber).pack())
         await engine.shutdown()
     }
 
     /// A key at or above `[0xFF]` is data exactly like any other key, so the
-    /// absent-marker probe has no upper bound.
-    @Test func layoutMarkerProbeHasNoUpperBound() async throws {
+    /// foreign-data probe of an uninitialized root has no upper bound. A
+    /// bounded probe would report such a root as empty and adopt it.
+    @Test func theForeignDataProbeHasNoUpperBound() async throws {
         let engine = InMemoryEngine()
+        let catalog = engine.directoryAccess
         try await engine.withTransaction { transaction in
             try transaction.setValue([0x01], for: [0xFF, 0x01])
         }
-        let inspection = try await engine.withTransaction { transaction in
-            try await StorageLayoutMarker.inspect(transaction: transaction)
+        await expectStorageError(.incompatibleStorageLayout) {
+            _ = try await engine.withTransaction { transaction in
+                try await catalog.openRoot(transaction: transaction)
+            }
         }
-        #expect(inspection == .rejected(.markerAbsentKeyspaceNonempty))
+        await expectStorageError(.incompatibleStorageLayout) {
+            _ = try await engine.withTransaction { transaction in
+                try await catalog.openOrInitializeRoot(transaction: transaction)
+            }
+        }
         await engine.shutdown()
-    }
-
-    /// Each storage root carries its own marker key, and a store that is its
-    /// own root keeps the key its V1 data already uses.
-    @Test func layoutMarkerKeyIsScopedToItsRoot() async throws {
-        #expect(StorageLayoutMarker.key(rootPath: []) == StorageLayoutMarker.key)
-        let one = StorageLayoutMarker.key(rootPath: ["a"])
-        let two = StorageLayoutMarker.key(rootPath: ["b"])
-        let nested = StorageLayoutMarker.key(rootPath: ["a", "b"])
-        #expect(one != two)
-        #expect(one != nested)
-        #expect(one == StorageLayoutMarker.key.appending(contentsOf: Tuple("a").pack()))
-        #expect(nested == StorageLayoutMarker.key.appending(contentsOf: Tuple("a", "b").pack()))
-        for key in [StorageLayoutMarker.key, one, two, nested] {
-            #expect(key.starts(with: StorageLayoutMarker.reservedPrefix))
-        }
     }
 
     /// No content prefix a layer allocates starts with the reserved catalog
     /// byte, so catalog metadata and node content can never overlap.
     @Test func allocatedContentPrefixesStayOutsideTheReservedRegion() async throws {
         typealias Layout = KeyValueDirectoryCatalog.Layout
-        #expect(StorageLayoutMarker.reservedPrefix == [Layout.reservedByte])
+        let reservedPrefix: ByteString = [Layout.reservedByte]
         let numbers: [Int64] = [
             Layout.rootNumber,
             Layout.firstNumber,
@@ -152,7 +149,7 @@ struct DirectoryValueTests {
         ]
         for number in numbers {
             let prefix = Layout.contentPrefix(layerRoot: ByteString(), number: number)
-            #expect(!prefix.starts(with: StorageLayoutMarker.reservedPrefix))
+            #expect(!prefix.starts(with: reservedPrefix))
         }
     }
 
@@ -161,7 +158,6 @@ struct DirectoryValueTests {
         let domainRoot = ByteString()
         #expect(Layout.nodeSubspacePrefix(layerRoot: domainRoot) == [0xFE])
         #expect(Layout.allocatorKey(layerRoot: domainRoot) == [0xFE, 0x61])
-        #expect(StorageLayoutMarker.key == [0xFE, 0x6C])
         #expect(Layout.contentPrefix(layerRoot: domainRoot, number: Layout.rootNumber) == [0x14])
         #expect(Layout.contentPrefix(layerRoot: domainRoot, number: 1) == [0x15, 0x01])
         #expect(Layout.contentPrefix(layerRoot: [0x15, 0x02], number: 1) == [0x15, 0x02, 0x15, 0x01])
@@ -207,7 +203,6 @@ struct DirectoryValueTests {
 
         let stored = try await engine.withTransaction { transaction -> [ByteString?] in
             var values: [ByteString?] = []
-            values.append(try await transaction.getValue(for: StorageLayoutMarker.key))
             values.append(
                 try await transaction.getValue(for: Layout.allocatorKey(layerRoot: domainRoot))
             )
@@ -245,14 +240,13 @@ struct DirectoryValueTests {
             )
             return values
         }
-        #expect(stored[0] == StorageLayoutMarker.v1)
         // Root layer allocated 1 and 2; the next number is 3.
-        #expect(stored[1] == Tuple(Int64(3)).pack())
+        #expect(stored[0] == Tuple(Int64(3)).pack())
         // The nested layer allocated 1; the next number is 2.
-        #expect(stored[2] == Tuple(Int64(2)).pack())
-        #expect(stored[3] == Tuple([0x15, 0x01] as ByteString, ByteString()).pack())
-        #expect(stored[4] == Tuple([0x15, 0x02] as ByteString, ByteString(utf8: "partition")).pack())
-        #expect(stored[5] == Tuple([0x15, 0x02, 0x15, 0x01] as ByteString, ByteString()).pack())
+        #expect(stored[1] == Tuple(Int64(2)).pack())
+        #expect(stored[2] == Tuple([0x15, 0x01] as ByteString, ByteString()).pack())
+        #expect(stored[3] == Tuple([0x15, 0x02] as ByteString, ByteString(utf8: "partition")).pack())
+        #expect(stored[4] == Tuple([0x15, 0x02, 0x15, 0x01] as ByteString, ByteString()).pack())
         await engine.shutdown()
     }
 }
