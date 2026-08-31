@@ -375,15 +375,13 @@ struct FDBDirectoryConformanceTests {
     /// The witness this adapter records on, and looks for on, its own root
     /// node.
     private static func storageRootWitness() throws -> DirectoryNodeWitness {
-        try DirectoryNodeWitness(
-            identifier: Array(FDBDirectoryLayout.rootWitnessIdentifier)
-        )
+        try DirectoryNodeWitness(identifier: FDBDirectoryLayout.rootWitnessIdentifier)
     }
 
     /// The witness of a foreign owner, which is the only way another writer
     /// legitimately reaches a node's slot.
     private static func foreignWitness() throws -> DirectoryNodeWitness {
-        try DirectoryNodeWitness(identifier: FoundationDB.Tuple("other-owner").pack())
+        try DirectoryNodeWitness(identifier: ByteString(FoundationDB.Tuple("other-owner").pack()))
     }
 
     /// The witness is adjudicated by what it holds, so a node another owner

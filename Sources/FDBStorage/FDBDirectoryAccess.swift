@@ -560,9 +560,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
     /// contract rather than a fact about the store, and `convert` reports it as
     /// `backendContractViolation`.
     private static func rootWitness() throws -> DirectoryNodeWitness {
-        try DirectoryNodeWitness(
-            identifier: Array(FDBDirectoryLayout.rootWitnessIdentifier)
-        )
+        try DirectoryNodeWitness(identifier: FDBDirectoryLayout.rootWitnessIdentifier)
     }
 
     /// Refuses a root path that lies inside another storage root (FD-1a).
