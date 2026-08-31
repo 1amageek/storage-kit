@@ -148,7 +148,7 @@ createTransaction() -> no connection yet
 | Contract | Evidence |
 |---|---|
 | D-1…D-12, operations 1–5, root bootstrap, L-1…L-3, L-7, L-8 | `Tests/PostgreSQLStorageTests/PostgreSQLDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps with a unique relation per test) |
-| PG-3 | `PostgreSQLDirectoryConformanceTests.readCommittedRejectsCatalogMutation`, `repeatableReadRejectsCatalogMutation`, `repeatableReadRejectsPartitionWriteBinding` (which also asserts that lease issuance and `withReadAccess` still work) |
+| PG-3 | `PostgreSQLDirectoryConformanceTests.readCommittedRejectsCatalogMutation`, `repeatableReadRejectsCatalogMutation`, `repeatableReadRejectsPartitionWriteBinding` (which also asserts that lease issuance and `withReadAccess` still work), and `readCommittedRejectsPartitionReadBinding`, which is the level that narrows the read binding as well |
 | PG-1, PG-2, PG-4, PG-9, transaction semantics | `PostgreSQLStorageTests`, `DatabaseFrameworkTransactionContractTests` |
 | PG-5, PG-8 | `PostgreSQLClientLifecycleTests` (with `PostgreSQLClientLifecycleLogRecorder`) |
 | PG-6 | `PostgreSQLBindingBytesTests` |

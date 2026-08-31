@@ -1,5 +1,6 @@
 import DatabaseTypes
 @testable import StorageKit
+import Synchronization
 import Testing
 
 @Suite("Partition lease")
@@ -210,5 +211,186 @@ struct PartitionLeaseTests {
         }
         try await admitted.cancel()
         await engine.shutdown()
+    }
+
+    /// A binding reports a caller error the engine already knows about before
+    /// it asks the backend whether the binding is admissible at all.
+    ///
+    /// The double refuses every admission, so reaching admission is visible as
+    /// its own failure code and as a non-zero `admitCalls`.
+    @Test(.timeLimit(.minutes(1)))
+    func bindingRejectsAForeignTransactionBeforeAdmissionAndGenerationIO() async throws {
+        let engine = InMemoryEngine()
+        let partition = try await makePartition(engine)
+        let access = RejectingDirectoryAccess(transactionDomain: engine.transactionDomain)
+        let other = InMemoryEngine()
+        try await other.withTransaction { foreign in
+            let lease = PartitionLease(
+                partition: partition,
+                directoryAccess: access,
+                registration: LeaseRegistration(address: partition.root.address),
+                bounds: PartitionKeyBounds(partition: partition, backend: .inMemory)
+            )
+            await expectStorageError(.storageDomainMismatch) {
+                try await lease.withReadAccess(foreign) { _ in }
+            }
+            await expectStorageError(.storageDomainMismatch) {
+                try await lease.withWriteAccess(foreign) { _ in }
+            }
+            lease.release()
+        }
+        #expect(access.admitCalls == 0)
+        #expect(access.openRootCalls == 0)
+        await other.shutdown()
+        await engine.shutdown()
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func bindingRejectsAReleasedLeaseBeforeAdmissionAndGenerationIO() async throws {
+        let engine = InMemoryEngine()
+        let partition = try await makePartition(engine)
+        let access = RejectingDirectoryAccess(transactionDomain: engine.transactionDomain)
+        try await engine.withTransaction { transaction in
+            let registration = LeaseRegistration(address: partition.root.address)
+            let lease = PartitionLease(
+                partition: partition,
+                directoryAccess: access,
+                registration: registration,
+                bounds: PartitionKeyBounds(partition: partition, backend: .inMemory)
+            )
+            // Released out of band: `release()` consumes the lease, and a
+            // consumed lease could not be bound again to observe the order.
+            #expect(registration.release())
+            await expectStorageError(.staleLease) {
+                try await lease.withReadAccess(transaction) { _ in }
+            }
+            await expectStorageError(.staleLease) {
+                try await lease.withWriteAccess(transaction) { _ in }
+            }
+        }
+        #expect(access.admitCalls == 0)
+        #expect(access.openRootCalls == 0)
+        await engine.shutdown()
+    }
+
+    /// The control for the two tests above: with the same double and no caller
+    /// error, admission is reached, its refusal is what the caller sees, and
+    /// the generation walk still costs no round trip.
+    @Test(.timeLimit(.minutes(1)))
+    func bindingReportsBackendRefusalBeforeAnyGenerationIO() async throws {
+        let engine = InMemoryEngine()
+        let partition = try await makePartition(engine)
+        let access = RejectingDirectoryAccess(transactionDomain: engine.transactionDomain)
+        try await engine.withTransaction { transaction in
+            let lease = PartitionLease(
+                partition: partition,
+                directoryAccess: access,
+                registration: LeaseRegistration(address: partition.root.address),
+                bounds: PartitionKeyBounds(partition: partition, backend: .inMemory)
+            )
+            let read = await expectStorageError(.unsupportedOperation) {
+                try await lease.withReadAccess(transaction) { _ in }
+            }
+            #expect(read?.operation == .read)
+            #expect(access.admitCalls == 1)
+            #expect(access.openRootCalls == 0)
+
+            let write = await expectStorageError(.unsupportedOperation) {
+                try await lease.withWriteAccess(transaction) { _ in }
+            }
+            #expect(write?.operation == .write)
+            #expect(access.admitCalls == 2)
+            #expect(access.openRootCalls == 0)
+            lease.release()
+        }
+        await engine.shutdown()
+    }
+}
+
+/// A `DirectoryAccess` that refuses every admission and performs no I/O.
+///
+/// It makes the binding order observable from outside `PartitionLease`:
+/// `admit` is the first member a binding may reach after the checks this
+/// process settles alone, and `openRoot` is the first read of the generation
+/// walk that follows. Every other member fails instead of returning a value,
+/// so a binding that reached one is reported rather than absorbed.
+private final class RejectingDirectoryAccess: DirectoryAccess {
+    let transactionDomain: StorageTransactionDomain
+    let backend: StorageBackend = .inMemory
+    private let admitted = Mutex(0)
+    private let rootReads = Mutex(0)
+
+    init(transactionDomain: StorageTransactionDomain) {
+        self.transactionDomain = transactionDomain
+    }
+
+    var admitCalls: Int { admitted.withLock { $0 } }
+    var openRootCalls: Int { rootReads.withLock { $0 } }
+
+    func admit(_ operation: StorageOperation) throws {
+        admitted.withLock { $0 += 1 }
+        throw StorageError.unsupportedOperation(
+            "Refused by RejectingDirectoryAccess",
+            operation: operation,
+            backend: backend
+        )
+    }
+
+    func openRoot(transaction: any TransactionReadAccess) async throws -> Directory? {
+        rootReads.withLock { $0 += 1 }
+        throw Self.unreachable("openRoot")
+    }
+
+    func openOrInitializeRoot(transaction: any TransactionAccess) async throws -> Directory {
+        throw Self.unreachable("openOrInitializeRoot")
+    }
+
+    func open(
+        _ name: String,
+        expecting expected: LayerTag?,
+        in parent: Directory,
+        transaction: any TransactionReadAccess
+    ) async throws -> Directory? {
+        throw Self.unreachable("open")
+    }
+
+    func openOrCreate(
+        _ name: String,
+        layer: LayerTag,
+        in parent: Directory,
+        transaction: any TransactionAccess
+    ) async throws -> Directory {
+        throw Self.unreachable("openOrCreate")
+    }
+
+    func listChildren(
+        in parent: Directory,
+        after: String?,
+        limit: Int,
+        transaction: any TransactionReadAccess
+    ) async throws -> [DirectoryEntry] {
+        throw Self.unreachable("listChildren")
+    }
+
+    func move(
+        _ name: String,
+        in source: Directory,
+        to newName: String,
+        in destination: Directory,
+        transaction: any TransactionAccess
+    ) async throws -> Directory {
+        throw Self.unreachable("move")
+    }
+
+    func remove(
+        _ name: String,
+        in parent: Directory,
+        transaction: any TransactionAccess
+    ) async throws {
+        throw Self.unreachable("remove")
+    }
+
+    private static func unreachable(_ member: String) -> StorageError {
+        StorageError.invalidOperation("RejectingDirectoryAccess.\(member) must not be reached")
     }
 }

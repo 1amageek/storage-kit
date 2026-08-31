@@ -567,6 +567,7 @@ confirming edge keys stay within each backend's key bound.
 | L-4, L-5 | the type declarations: `BoundReadAccess` declares no mutation member and `BoundWriteAccess` declares no lifecycle member, so a violation does not compile and no run can observe one |
 | L-6 escape, L-8 at the binding, and release and staleness as a holder observes them | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 | L-6 cleanup authority: an escaped cursor is already finished, a close awaits an advance still in flight, a cleanup failure is reported through `PartitionBindingCleanupError`, and a cursor the body finished is not restated | `Tests/StorageKitTests/PartitionBindingScopeTests.swift` |
+| Binding order: a caller error this process settles alone is reported as itself before the backend is asked whether it admits the binding, and a binding the backend refuses spends no generation round trip | `Tests/StorageKitTests/PartitionLeaseTests.swift` binds read and write access through a `DirectoryAccess` that refuses every admission and counts what it was asked. A foreign transaction and a released lease fail with their own codes at zero admissions and zero root reads; the same double with no caller error fails with `unsupportedOperation` at one admission per binding and still zero root reads |
 
 Changing the catalog layout, the bootstrap witness of any backend, or any
 operation semantics requires updating this design first, then the StorageKit
