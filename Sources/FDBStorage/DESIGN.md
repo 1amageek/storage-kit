@@ -40,7 +40,8 @@ of its own below `rootPath`.
 | [StorageKit module](../StorageKit/DESIGN.md) | depends on | `StorageEngine`, `TransactionReadAccess`, `TransactionAccess`, `StorageError`, `Subspace`, `StorageTransactionDomain` | Supplies the contracts this adapter realizes. | `Subspace` here is `StorageKit.Subspace`; the bindings own a different `Subspace` type. |
 | [Directory component](../StorageKit/Directory/DESIGN.md) | depends on | `DirectoryAccess`, `Directory`, `DirectoryEntry`, `LayerTag`, `Partition`, `StorageAddress`, `DirectoryLimits` | Defines the operations, failure codes, bounds, and root bootstrap state machine this module must satisfy. | Removal and move have no lease precondition; a lease detects a superseded Partition when it is bound (L-2). |
 | [StorageKitConformance](../StorageKitConformance/DESIGN.md) | used by | `DirectoryConformanceCase` | Shared fixture executed by `FDBDirectoryConformanceTests`. | Every step runs here except `verifyForeignRootRejection`, which has no FoundationDB state to produce: the native layer never allocates a prefix already in use, so a StorageKit write cannot land on foreign bytes. |
-| `fdb-swift-bindings` | depends on | `FDBClient`, `DatabaseProtocol`, `TransactionProtocol`, `DirectoryLayer`, `DirectorySubspace`, `DirectoryType`, `DirectoryError` | Native client, transactions, and Directory Layer. | `createOrOpen` creates missing ancestors as untyped nodes, so this adapter checks the parent itself (FD-10), and writes the layer version key when absent; `list` returns names in Swift `String` order and paginates nothing; `move` keeps the prefix; `remove` is recursive; a `partition` node roots a nested layer and partitions may nest. |
+| [fdb-swift-bindings](../../../fdb-swift-bindings/DESIGN.md) | depends on | `FDBClient`, `DatabaseProtocol`, `TransactionProtocol`, `DirectoryLayer`, `DirectorySubspace`, `DirectoryType`, `DirectoryError` | Native client, transactions, and Directory Layer. | `createOrOpen` creates missing ancestors as untyped nodes, so this adapter checks the parent itself (FD-10), and writes the layer version key when absent; `list` returns names in Swift `String` order and paginates nothing; `move` keeps the prefix; `remove` is recursive; a `partition` node roots a nested layer and partitions may nest. |
+| [Directory component of `fdb-swift-bindings`](../../../fdb-swift-bindings/Sources/FoundationDB/Directory/DESIGN.md) | depends on | `DirectoryNodeWitness`, `DirectoryNodeObservation`, `inspectWitness`, `create(recording:)` | Owns the one witness slot per node, its path- and Partition-aware resolution, and its transactional read and strict create. | It exposes no metadata key or subspace and assigns no meaning to the identifier; this module supplies the identifier and every typed `StorageError`. `inspectWitness` performs no version check, so it never writes. |
 
 ## Architecture
 
@@ -70,8 +71,8 @@ this package.
 |---|---|
 | `rootPath: [String]` | Native path that owns the engine's root Directory. Default `Configuration.defaultRootPath = ["storage-kit"]`. Must be non-empty with non-empty components; otherwise `StorageError(.invalidOperation, operation: .open)` before any client work. Engines with distinct root paths on one cluster never observe each other's Directories, because a root path that nests inside another initialized root is rejected at bootstrap rather than opened. |
 
-Root state is scoped by `rootPath`: the node at that path and the record
-inside its own content prefix are the whole of this root's bootstrap state
+Root state is scoped by `rootPath`: the node at that path and the witness slot
+in its own native metadata are the whole of this root's bootstrap state
 (FD-1). Two engines with distinct root paths
 therefore never observe each other's root, and neither is initialized, opened,
 or rejected because of the other's data.
@@ -82,7 +83,7 @@ The mapping is one to one and adds no encoding of its own.
 
 | StorageKit node | Native path | Native layer type |
 |---|---|---|
-| root | `rootPath` | none (plain node); the root record of FD-1 lives in the node's content prefix, not its layer value |
+| root | `rootPath` | none (plain node); the witness of FD-1 lives in the node's native metadata slot, not its layer value |
 | child named `name`, `LayerTag.default` | parent path + `name` | none (plain node) |
 | child named `name`, `LayerTag.partition` | parent path + `name` | `.partition` |
 | child named `name`, other tag `t` | parent path + `name` | `.custom(t)` |
@@ -90,12 +91,14 @@ The mapping is one to one and adds no encoding of its own.
 - The mapping reserves no tag value. SPEC §8.7 keeps the bootstrap witness out
   of the layer-tag value space entirely, so every tag other than `partition`
   round-trips unchanged on this backend exactly as on a key-value backend.
-  The root record instead occupies `rootPrefix ‖ FE ‖ 72`: the native layer
-  hands the root node's prefix to nobody else, `FE` is the byte the Directory
-  component reserves above every Tuple type code, and every key a caller
-  derives from a `Subspace` is Tuple-encoded, so no address can name it. It is
-  nonetheless adjudicated by its value, not its presence, because a raw
-  Layer 0 transaction can still write anywhere.
+  The witness lives instead in the one slot `fdb-swift-bindings` reserves in
+  each node's native metadata. That slot's coordinate belongs to the bindings
+  and is never reconstructed here; what this design relies on is its
+  disjointness from every content key and range derivable from a Directory,
+  Subspace, Partition, or bound access, which the
+  [bindings Directory design](../../../fdb-swift-bindings/Sources/FoundationDB/Directory/DESIGN.md)
+  proves. It is nonetheless adjudicated by its exact identifier, not its
+  presence, because a raw Layer 0 transaction can still write anywhere.
 
 - `Directory.keyspacePrefix` is the native HCA-allocated prefix of the node.
   `Directory.root.prefix` is that prefix for a plain Directory and
@@ -113,10 +116,10 @@ The mapping is one to one and adds no encoding of its own.
 
 | ID | Invariant |
 |---|---|
-| FD-1 | The native layer below `rootPath` is the sole existence authority for nodes, and this adapter owns exactly one key: the root record at `FDBDirectoryLayout.rootRecordKey(rootPrefix:)`, inside the root node's own content prefix. The root is initialized exactly when that key holds `FDBDirectoryLayout.rootRecordValue`: `openRoot` reports an absent node as an uninitialized root and never writes, and `openOrInitializeRoot` creates an untyped node at `rootPath` and writes the record in the caller's transaction. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. Existence of the node is not the witness, because the native layer creates the ancestors of a path as ordinary untyped Directories: a node at `rootPath` whose record is absent, or holds bytes this adapter did not write, is foreign and fails `incompatibleStorageLayout` instead of being adopted. A node carrying any layer value fails at the root path — `directoryLayerMismatch` for a native partition, `incompatibleStorageLayout` for any other type — so a caller's own tag can neither be mistaken for a root nor be refused for carrying one. The root `Directory` this adapter returns carries `LayerTag.default`. |
-| FD-1a | Storage roots do not nest. Bootstrap reads each proper ancestor of `rootPath` in the caller's transaction and fails `incompatibleStorageLayout` when one holds the root record; the reverse order is already refused by FD-1, because the outer path's node then exists without a record. The default root path has no proper ancestor, so the walk reads nothing there; otherwise it costs one node resolution and one record read per proper ancestor. Without FD-1a an outer root would list an inner root among its own children and remove it recursively. |
+| FD-1 | The native layer below `rootPath` is the sole existence authority for nodes, and this adapter owns no key of its own: the root witness is the identifier `FDBDirectoryLayout.rootWitnessIdentifier` recorded in the one slot `fdb-swift-bindings` reserves in the root node's native metadata. The bindings own that slot's physical coordinate and resolve it from `rootPath`, Partition layers included; this adapter never computes or reads a metadata key. The root is initialized exactly when the slot holds that exact identifier: `openRoot` reports an absent node as an uninitialized root and never writes, and `openOrInitializeRoot` creates the node and records the witness in one bindings call inside the caller's transaction, so the two commit or roll back together. Existence is asked of that node and never of the cluster, so another root's nodes and the native allocator counters are not this root's data. Existence of the node is not the witness, because the native layer creates the ancestors of a path as ordinary untyped Directories: a node at `rootPath` whose witness is absent, or holds different bytes, is corruption and fails `incompatibleStorageLayout` instead of being adopted or overwritten — strict creation never rewrites a slot even when it matches. A node carrying any layer value fails at the root path before its witness is considered — `directoryLayerMismatch` for a native partition, `incompatibleStorageLayout` for any other type — so a caller's own tag can neither be mistaken for a root nor be refused for carrying one. The root `Directory` this adapter returns carries `LayerTag.default`. The slot is disjoint from every content key and range this adapter can derive, so a caller's `clearRange` over the root's own content prefix leaves the root openable; a raw Layer 0 write can still reach the bytes, which is why the identifier is checked exactly rather than by presence. |
+| FD-1a | Storage roots do not nest. Bootstrap inspects the witness of each proper ancestor of `rootPath` in the caller's transaction and fails `incompatibleStorageLayout` when one is matching (a nested storage root) or conflicting (a corrupted reserved slot); the reverse order is already refused by FD-1, because the outer path's node then exists without a witness. An ancestor's layer tag does not exempt it from inspection, because a tag is the application's value (SPEC §4) and says nothing about whether that node is a storage root. The default root path has no proper ancestor, so the walk reads nothing there; otherwise it costs one node resolution and one slot read per proper ancestor. Without FD-1a an outer root would list an inner root among its own children and remove it recursively. |
 | FD-2 | Every open of a node (root, child, listing row, move source) reads the node's stored layer tag and returns it on the resolved `Directory`; a stated expectation that differs fails with `directoryLayerMismatch` and the node is never adopted. `expecting: nil` verifies nothing, matching the native empty-layer open. |
-| FD-3 | Read operations never write: `openRoot` checks `exists` before `open`, so an uninitialized root is observed without touching the layer version key. |
+| FD-3 | Read operations never write: `openRoot` and the ancestor walk observe through `inspectWitness`, which resolves paths the way `exists` does and performs no version check, so an uninitialized root is observed without touching the layer version key. |
 | FD-4 | A move never resurrects a stale destination: both endpoints are re-resolved from the root in the caller's transaction before the native mutation, so a missing source or destination Directory fails with `keyNotFound` instead of being created as an untyped native node, and an occupied target name fails with `invalidOperation`. |
 | FD-5 | Listings sort native names by UTF-8 bytes, apply `after` exclusively, and honor `limit` in `1...DirectoryLimits.maximumListLimit`; each row resolves the child to read its stored tag, so a `DirectoryEntry` carries the node's real layer. A child that disappears between `list` and its resolution is skipped. Operation 3 positions by path and does not re-resolve (D-13), so a listing below an address whose node was removed is an empty page, and one below an address recreated since the handle was taken lists the live node's children. |
 | FD-6 | Removal is recursive and has no emptiness precondition: the native layer clears every descendant node and the whole content range of the removed node, which for a Partition is one range. A missing node fails with `keyNotFound` before any mutation. |
@@ -133,6 +136,7 @@ The mapping is one to one and adds no encoding of its own.
 | `invalidPath` | `invalidDirectoryAddress` |
 | `layerMismatch(expected:actual:)` | `directoryLayerMismatch` |
 | `incompatibleVersion`, `invalidVersion`, `invalidMetadata`, `directoryLayerNotInitialized` | `incompatibleStorageLayout` |
+| `invalidWitness` | `backendContractViolation`; the identifier is this adapter's own constant, so a rejection is this adapter breaking the bindings' contract, not a layout fact about the store |
 | `cannotMoveAcrossPartitions` | `partitionBoundaryViolation` |
 | `cannotCreatePartitionInPartition` | `invalidOperation`; nested Partition creation is permitted, so the native layer no longer raises this case and the mapping is defensive |
 | `FDBError` | `FDBStorageTransaction.convertFDBError` (existing transaction mapping) |
@@ -141,7 +145,7 @@ The mapping is one to one and adds no encoding of its own.
 
 | Behavior | KV catalog | FDBStorage |
 |---|---|---|
-| Bootstrap witness | the root layer's allocator key, plus an unbounded emptiness probe that rejects foreign data | the root record inside the content prefix of the native node at `rootPath`, plus an ancestor scan that refuses a nested root; data below the node cannot collide, because the native layer never allocates a prefix in use |
+| Bootstrap witness | the root layer's allocator key, plus an unbounded emptiness probe that rejects foreign data | the identifier in the bindings-owned witness slot of the native node at `rootPath`, plus an ancestor scan that refuses a nested or corrupted root; data below the node cannot collide, because the native layer never allocates a prefix in use, and the slot lies outside every derivable content range |
 | Root prefix | `Tuple(0)` under the domain root layer | HCA-allocated native prefix below `rootPath` |
 | Foreign nodes | cannot exist; the catalog owns every edge | a native node created outside StorageKit is listed and resolvable, and carries its own layer tag |
 
@@ -248,7 +252,10 @@ resolve tx -> require parent domain -> child address
 | D-1…D-12, operations 1–5, the root bootstrap state machine, L-1…L-3, L-7, L-8, FD-1, FD-3…FD-9 | `Tests/FDBStorageTests/FDBDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps) |
 | Layout names and layer values, nested Partition creation and containment | `FDBDirectoryConformanceTests.nativeNodesCarryStorageKitNamesAndLayers` |
 | FD-2 on foreign native nodes: typed root, child, and Partition mismatch, and the tag returned by a listing | `FDBDirectoryConformanceTests.foreignLayerValueIsRejected` |
-| FD-1 root record: a node at `rootPath` whose record is absent, whose record holds foreign bytes, or which carries any layer value is refused instead of adopted, and an ancestor walk through the path does not initialize a root there | `FDBDirectoryConformanceTests.unrecordedRootNodeIsRejected`, `foreignRootRecordIsRejected` |
+| FD-1 root witness: a node at `rootPath` whose witness is absent, whose witness holds different bytes, or which carries any layer value is refused instead of adopted, and an ancestor walk through the path does not initialize a root there | `FDBDirectoryConformanceTests.unwitnessedRootNodeIsRejected`, `conflictingRootWitnessIsRejected` |
+| FD-1 witness disjointness: a range clear over the root's own content prefix leaves the root openable, and the superseded record coordinate is neither read nor migrated | `FDBDirectoryConformanceTests.clearingRootContentPreservesBootstrap`, `supersededRootRecordIsNotAdopted` |
+| FD-1 atomicity: a transaction that creates the root and then fails leaves neither the node nor the witness | `FDBDirectoryConformanceTests.abortedInitializationLeavesNoRoot` |
+| FD-1a conflicting ancestor: a proper ancestor whose reserved slot holds different bytes refuses bootstrap | `FDBDirectoryConformanceTests.conflictingAncestorWitnessIsRejected` |
 | FD-1 tag parity: no layer tag is reserved, so a caller tag equal to the adapter's own name round-trips like any other | `FDBDirectoryConformanceTests.noLayerTagIsReservedAgainstCallerTags` |
 | FD-1a nesting, both orders of creation | `FDBDirectoryConformanceTests.storageRootsDoNotNest` |
 | A layer tag that is not valid UTF-8 stays application-opaque | `FDBDirectoryConformanceTests.layerTagThatIsNotUTF8RoundTrips` |
@@ -259,6 +266,12 @@ resolve tx -> require parent domain -> child address
 The suite requires a reachable cluster through `FDB_CLUSTER_FILE` or the
 default cluster file; it creates and removes its own paths below
 `storage-kit-conformance` after each step.
+
+The witness slot supersedes a record this adapter previously wrote inside the
+root node's own content prefix. That record is not read, migrated, or
+dual-written, so a root created by the superseded layout is refused as
+uninitialized and must be recreated. The project is pre-release, so no
+migration path is provided.
 
 Changing the path mapping, the layer-tag mapping, the bootstrap witness, or
 the root path default is a layout change: update this design, then the Directory

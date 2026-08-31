@@ -23,7 +23,7 @@ active work to one Partition.
 | `LayerTag`, `StorageAddress`, `Directory`, `DirectoryEntry`, `Partition` values and their bounds | Reserved names (`system`, `database-framework`, `data`) and Framework Subspace layout |
 | `DirectoryAccess` contract and the five semantic operations | Authorization of any operation |
 | `KeyValueDirectoryCatalog`: the catalog realization for InMemory, SQLite, PostgreSQL, Cloudflare DO | The FDB realization (owned by `FDBStorage`, which must satisfy the same contract) |
-| The InspectRoot → Open / Initialize / Reject bootstrap decision, read from the root's own allocation authority | Deleting or rewriting roots (never in production) |
+| The InspectRoot → Open / Initialize / Reject bootstrap decision, read from each backend's root witness authority | The physical witness coordinate, deleting or rewriting roots (never in production) |
 | `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess` | Deciding which Partition a request may lease, and whether a removal that would invalidate one is admissible |
 
 ## Related Designs
@@ -31,7 +31,7 @@ active work to one Partition.
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
 | [StorageKit module](../DESIGN.md) | parent | `TransactionReadAccess`, `TransactionAccess`, `StorageEngine.transactionDomain`, `StorageError`, `Subspace`, `Tuple` | Supplies the transaction and encoding contracts the catalog is built on. | Catalog keys use the Tuple encoding; a Tuple change is a layout change. |
-| [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess` | Realizes the same node model over the native FoundationDB Directory Layer. | A Partition is a native node whose layer bytes are `partition`; native partitions nest, so no custom layer type is used. |
+| [FDBStorage module](../../FDBStorage/DESIGN.md) | coordinates with | `DirectoryAccess`, root witness state mapping | Realizes the same node model over the native FoundationDB Directory Layer and supplies the StorageKit root identifier. | The bindings own the fixed per-node metadata slot and path/Partition-aware resolution; this design does not reproduce its physical coordinate. |
 | [SQLiteStorage module](../../SQLiteStorage/DESIGN.md), [PostgreSQLStorage module](../../PostgreSQLStorage/DESIGN.md), [CloudflareDurableObjectStorage module](../../CloudflareDurableObjectStorage/DESIGN.md) | used by | `KeyValueDirectoryCatalog` | Each engine instantiates one catalog bound to its domain. | PostgreSQL admits catalog mutation and a Partition write binding only under `serializable`, and a Partition read binding only under an isolation level that holds a stable snapshot, through `admit` backed by `OperationAdmission` (the rule is owned by PostgreSQLStorage). |
 | database-framework | used by | every public type here | Binds `#Directory` declarations and the kernel to leases. | A Partition removal is recursive and unconditional here; the Framework decides admissibility, including whether one of its own leases is active (SPEC §12.3), before it calls. |
 
@@ -42,7 +42,8 @@ active work to one Partition.
    |
    +-- KeyValueDirectoryCatalog (StorageKit)      +-- FDBDirectoryAccess (FDBStorage)
    |     per-layer node subspace 0xFE              |     native DirectoryLayer
-   |     allocator / child edges                   |     native `partition` layer bytes
+   |     allocator / child edges                   |     bindings-owned node witness slot
+   |                                               |     native `partition` layer bytes
    v                                               v
  TransactionReadAccess / TransactionAccess (caller's transaction)
 
@@ -310,14 +311,22 @@ KeyValueDirectoryCatalog                    -- witness: the root layer allocator
                                         write: Initialize (allocator = Tuple(1))
   allocator absent, root nonempty    -> Reject    incompatibleStorageLayout
 
-FDBDirectoryAccess                          -- witness: the root record inside the root node's content prefix
-  node exists, record present        -> Open      (requireRoot rejects a typed node)
-  node exists, record absent         -> Reject    incompatibleStorageLayout
-  node exists, record foreign        -> Reject    incompatibleStorageLayout
-  node absent, an ancestor is a root -> Reject    incompatibleStorageLayout
-  node absent                        -> read:  nil
-                                        write: Initialize (createOrOpen, then the record)
+FDBDirectoryAccess                          -- witness: the bindings-owned witness slot in the node's native metadata
+  plain node, witness matching       -> Open
+  plain node, witness absent         -> Reject    incompatibleStorageLayout
+  plain node, witness conflicting    -> Reject    incompatibleStorageLayout
+  `partition` node                   -> Reject    directoryLayerMismatch
+  any other typed node               -> Reject    incompatibleStorageLayout
+  node absent, ancestor matching     -> Reject    incompatibleStorageLayout
+  node absent, ancestor conflicting  -> Reject    incompatibleStorageLayout
+  node absent, ancestors clean       -> read:  nil
+                                        write: Initialize (node and witness together)
 ```
+
+A layer tag does not exempt an ancestor from witness inspection. The walk asks
+every proper ancestor for its slot whatever type it carries, because a tag is
+the application's value (SPEC §4) and says nothing about whether that node is a
+storage root.
 
 No dual read/write of two layouts; production never deletes or rewrites a
 root. A key-value store holding deterministic path-derived prefixes is
@@ -346,27 +355,40 @@ them:
   layer creates the ancestors of a path as ordinary untyped Directories, so
   opening a root at `["a", "b"]` brings `["a"]` into existence as a side
   effect. The witness is therefore the record this catalog writes inside that
-  content prefix, which only initialization writes and which implicit ancestor
-  creation never sets. A raw Layer 0 transaction can still write anywhere, so
-  the record is adjudicated by the value it holds rather than by its presence.
+  one witness slot `fdb-swift-bindings` reserves per node, which only
+  initialization writes and which implicit ancestor creation never sets. That
+  slot lies in the node's native metadata space, disjoint from every content
+  key and range this catalog can derive from a Directory, Subspace, Partition,
+  or bound access, so no range clear a caller can express reaches it. A raw
+  Layer 0 transaction can still address those bytes, so the slot is adjudicated
+  by the exact identifier it holds: absent or conflicting on a node that exists
+  is corruption, rejected rather than adopted or overwritten.
 
-The root record lives inside the root node's own content prefix, above every
-Tuple type code, so no `StorageAddress` resolves onto it. It is not a
-`LayerTag` a caller observes, and no layer value is reserved: a caller tag
-round-trips on FoundationDB exactly as it does on a key-value backend
-(SPEC §4). `requireRoot` verifies the record and returns the root `Directory`
-with `.default`, so both backend classes expose the same root value and no
-caller learns the record.
+The witness slot is resolved by `fdb-swift-bindings` from the root path,
+including any nested Partition layer, and this design never reproduces its
+physical coordinate. It is not a `LayerTag` a caller observes, and no layer
+value is reserved: a caller tag round-trips on FoundationDB exactly as it does
+on a key-value backend (SPEC §4). The node and its witness are created in the
+caller's transaction and commit or roll back together, so a root is never
+observed created but unrecorded. `requireRoot` verifies the witness and returns
+the root `Directory` with `.default`, so both backend classes expose the same
+root value and no caller learns the identifier. No superseded root record
+layout is read, migrated, or dual-written.
 
-Storage roots do not nest, and the record closes both orders of creation:
+Storage roots do not nest, and the witness closes both orders of creation:
 
 | Created first | Created second | Outcome for the second |
 |---|---|---|
-| `["a", "b"]` | `["a"]` | the node exists carrying no root record → `incompatibleStorageLayout` |
-| `["a"]` | `["a", "b"]` | a proper ancestor carries a root record → `incompatibleStorageLayout` |
+| `["a", "b"]` | `["a"]` | the node exists with no witness → `incompatibleStorageLayout` |
+| `["a"]` | `["a", "b"]` | a proper ancestor carries a matching witness → `incompatibleStorageLayout` |
 
 The ancestor check reads one node per proper ancestor of the configured root
-path, in the caller's transaction. The default root path has no proper
+path, in the caller's transaction, and adjudicates each slot by the same rule
+as the target node: a matching ancestor is a nested storage root and a
+conflicting one is corruption in a node this catalog would otherwise write
+straight through, so both refuse the path. An ancestor's layer tag does not
+exempt it, because a tag is the application's value (SPEC §4) and says nothing
+about whether that node is a storage root. The default root path has no proper
 ancestor, so the check costs nothing there. Without it, the outer root would
 list the inner root among its own children and `remove` would destroy it
 recursively — a whole storage root deleted through an operation that names one

@@ -210,16 +210,16 @@ struct FDBDirectoryConformanceTests {
         }
     }
 
-    /// A node at the configured root path is a storage root only when it holds
-    /// this catalog's root record (FD-1).
+    /// A node at the configured root path is a storage root only when its
+    /// reserved slot holds this catalog's witness (FD-1).
     ///
     /// The native layer creates the ancestors of a path as ordinary
     /// empty-layer Directories, so an engine configured below this path brings
     /// the node into existence on its way down. A bootstrap that asked only
     /// whether the node exists would adopt that node, and the two engines
     /// would then allocate inside one another.
-    @Test("An unrecorded node at the root path is not a storage root", .timeLimit(.minutes(1)))
-    func unrecordedRootNodeIsRejected() async throws {
+    @Test("An unwitnessed node at the root path is not a storage root", .timeLimit(.minutes(1)))
+    func unwitnessedRootNodeIsRejected() async throws {
         let roots = RootPathAllocator()
         let rootPath = roots.next()
         let layer = DirectoryLayer(database: try FDBClient.openDatabase())
@@ -229,14 +229,14 @@ struct FDBDirectoryConformanceTests {
             let exists = try await layer.exists(path: rootPath)
             #expect(exists, "the ancestor walk must have created the node at the root path")
 
-            await Self.expectFailure(.incompatibleStorageLayout, "openRoot on an unrecorded node") {
+            await Self.expectFailure(.incompatibleStorageLayout, "openRoot on an unwitnessed node") {
                 try await engine.withTransaction { transaction in
                     _ = try await catalog.openRoot(transaction: transaction)
                 }
             }
             await Self.expectFailure(
                 .incompatibleStorageLayout,
-                "openOrInitializeRoot on an unrecorded node"
+                "openOrInitializeRoot on an unwitnessed node"
             ) {
                 try await engine.withTransaction { transaction in
                     _ = try await catalog.openOrInitializeRoot(transaction: transaction)
@@ -259,7 +259,7 @@ struct FDBDirectoryConformanceTests {
             try await engine.withTransaction { transaction in
                 _ = try await engine.directoryAccess.openOrInitializeRoot(transaction: transaction)
             }
-            // The inner root's own creation left an unrecorded node on the
+            // The inner root's own creation left an unwitnessed node on the
             // outer path, which FD-1 refuses.
             let outer = try await FDBStorageEngine(configuration: .init(rootPath: outerPath))
             await Self.expectFailure(.incompatibleStorageLayout, "openRoot above an inner root") {
@@ -317,15 +317,17 @@ struct FDBDirectoryConformanceTests {
     /// No layer value is reserved, so a caller tag that happens to spell this
     /// catalog's own name round-trips like any other tag (FD-1).
     ///
-    /// The witness of an initialized root is a record inside the root node's
-    /// content prefix, not a layer value, so SPEC §4 holds unchanged here:
-    /// every tag other than `partition` is application-opaque, is stored and
-    /// read back exactly, and names a child rather than a storage root.
+    /// The witness of an initialized root lives in the slot the native layer
+    /// reserves in that node's own metadata, not in a layer value, so SPEC §4
+    /// holds unchanged here: every tag other than `partition` is
+    /// application-opaque, is stored and read back exactly, and names a child
+    /// rather than a storage root.
     @Test("No layer tag is reserved against caller tags", .timeLimit(.minutes(1)))
     func noLayerTagIsReservedAgainstCallerTags() async throws {
         let roots = RootPathAllocator()
         let rootPath = roots.next()
-        let layer = DirectoryLayer(database: try FDBClient.openDatabase())
+        let database = try FDBClient.openDatabase()
+        let layer = DirectoryLayer(database: database)
         try await Self.withEngine(rootPath: rootPath, base: roots.base) { engine in
             let catalog = engine.directoryAccess
             let tag = try LayerTag(utf8: "storage-kit")
@@ -356,68 +358,237 @@ struct FDBDirectoryConformanceTests {
             }
 
             // The tag reaches the native layer verbatim, and the node carrying
-            // it is a child: it holds no root record of its own.
+            // it is a child: it holds no witness of its own.
             let child = try await layer.open(path: rootPath + ["child"])
             #expect(child.type == .custom("storage-kit"))
-            let record = try await engine.withTransaction { transaction -> ByteString? in
-                try await transaction.getValue(
-                    for: FDBDirectoryLayout.rootRecordKey(rootPrefix: ByteString(child.prefix))
+            let observation = try await database.withTransaction { transaction in
+                try await layer.inspectWitness(
+                    try Self.storageRootWitness(),
+                    at: rootPath + ["child"],
+                    transaction: transaction
                 )
             }
-            #expect(record == nil)
+            #expect(observation.witness == .absent)
         }
     }
 
-    /// The root record is adjudicated by what it holds, so a key holding
-    /// anything else is foreign data in the root rather than an initialized
-    /// root (FD-1).
+    /// The witness this adapter records on, and looks for on, its own root
+    /// node.
+    private static func storageRootWitness() throws -> DirectoryNodeWitness {
+        try DirectoryNodeWitness(
+            identifier: Array(FDBDirectoryLayout.rootWitnessIdentifier)
+        )
+    }
+
+    /// The witness of a foreign owner, which is the only way another writer
+    /// legitimately reaches a node's slot.
+    private static func foreignWitness() throws -> DirectoryNodeWitness {
+        try DirectoryNodeWitness(identifier: FoundationDB.Tuple("other-owner").pack())
+    }
+
+    /// The witness is adjudicated by what it holds, so a node another owner
+    /// witnessed is corruption in this catalog's root rather than an
+    /// initialized root (FD-1).
     ///
     /// The native layer never hands out a prefix already in use, so no
-    /// StorageKit write reaches this key on a node someone else owns. A raw
-    /// Layer 0 transaction can still write anywhere, and adopting whatever it
-    /// left would allocate this catalog's nodes on top of another writer's
-    /// keys.
-    @Test("A foreign root record is rejected", .timeLimit(.minutes(1)))
-    func foreignRootRecordIsRejected() async throws {
-        let foreignValues: [ByteString] = [
-            // Not a Tuple at all.
-            ByteString([0x01, 0x02, 0x03]),
-            // A Tuple naming something else.
-            StorageKit.Tuple("storage").pack(),
-            // A Tuple of another shape.
-            StorageKit.Tuple(Int64(0)).pack()
-        ]
-        for (index, foreign) in foreignValues.enumerated() {
-            let roots = RootPathAllocator()
-            try await Self.withEngine(rootPath: roots.next(), base: roots.base) { engine in
-                let catalog = engine.directoryAccess
-                let prefix = try await engine.withTransaction { transaction -> ByteString in
-                    try await catalog.openOrInitializeRoot(transaction: transaction).keyspacePrefix
-                }
-                try await engine.withTransaction { transaction in
-                    try transaction.setValue(
-                        foreign,
-                        for: FDBDirectoryLayout.rootRecordKey(rootPrefix: prefix)
-                    )
-                }
+    /// StorageKit write reaches a node someone else owns. Adopting whatever a
+    /// different owner left would allocate this catalog's nodes inside a
+    /// subtree it does not own.
+    @Test("A conflicting root witness is rejected", .timeLimit(.minutes(1)))
+    func conflictingRootWitnessIsRejected() async throws {
+        let roots = RootPathAllocator()
+        let rootPath = roots.next()
+        let database = try FDBClient.openDatabase()
+        let layer = DirectoryLayer(database: database)
+        try await Self.withEngine(rootPath: rootPath, base: roots.base) { engine in
+            let catalog = engine.directoryAccess
+            try await database.withTransaction { transaction in
+                _ = try await layer.create(
+                    path: rootPath,
+                    type: nil,
+                    recording: try Self.foreignWitness(),
+                    transaction: transaction
+                )
+            }
 
-                await Self.expectFailure(
-                    .incompatibleStorageLayout,
-                    "openRoot over foreign record \(index)"
-                ) {
-                    try await engine.withTransaction { transaction in
-                        _ = try await catalog.openRoot(transaction: transaction)
-                    }
-                }
-                await Self.expectFailure(
-                    .incompatibleStorageLayout,
-                    "openOrInitializeRoot over foreign record \(index)"
-                ) {
-                    try await engine.withTransaction { transaction in
-                        _ = try await catalog.openOrInitializeRoot(transaction: transaction)
-                    }
+            await Self.expectFailure(
+                .incompatibleStorageLayout,
+                "openRoot over a conflicting witness"
+            ) {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openRoot(transaction: transaction)
                 }
             }
+            await Self.expectFailure(
+                .incompatibleStorageLayout,
+                "openOrInitializeRoot over a conflicting witness"
+            ) {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openOrInitializeRoot(transaction: transaction)
+                }
+            }
+        }
+    }
+
+    /// A proper ancestor of the configured root path carrying a witness this
+    /// catalog did not write is corruption in a node this adapter would
+    /// otherwise write straight through, so the path is refused rather than
+    /// adopted around it (FD-1a).
+    @Test("A conflicting ancestor witness is rejected", .timeLimit(.minutes(1)))
+    func conflictingAncestorWitnessIsRejected() async throws {
+        let roots = RootPathAllocator()
+        let rootPath = roots.next()
+        let ancestor = Array(rootPath.dropLast())
+        let database = try FDBClient.openDatabase()
+        let layer = DirectoryLayer(database: database)
+        try await Self.withEngine(rootPath: rootPath, base: roots.base) { engine in
+            let catalog = engine.directoryAccess
+            try await database.withTransaction { transaction in
+                _ = try await layer.create(
+                    path: ancestor,
+                    type: nil,
+                    recording: try Self.foreignWitness(),
+                    transaction: transaction
+                )
+            }
+
+            await Self.expectFailure(
+                .incompatibleStorageLayout,
+                "openRoot below a conflicting ancestor witness"
+            ) {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openRoot(transaction: transaction)
+                }
+            }
+            await Self.expectFailure(
+                .incompatibleStorageLayout,
+                "openOrInitializeRoot below a conflicting ancestor witness"
+            ) {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openOrInitializeRoot(transaction: transaction)
+                }
+            }
+        }
+    }
+
+    /// Clearing the root's whole content range leaves the root openable
+    /// (SPEC §8.7).
+    ///
+    /// The witness lives in the node's own metadata, so it is disjoint from
+    /// every key and range a caller can derive from `Directory.root`, a
+    /// `Subspace`, a `StorageAddress`, a `Partition`, or a bound access. The
+    /// range cleared here is the strongest legitimate erasure available
+    /// through this adapter's own keyspace: everything sharing the root's
+    /// content prefix.
+    @Test("Clearing the root content preserves bootstrap", .timeLimit(.minutes(1)))
+    func clearingRootContentPreservesBootstrap() async throws {
+        let roots = RootPathAllocator()
+        try await Self.withEngine(rootPath: roots.next(), base: roots.base) { engine in
+            let catalog = engine.directoryAccess
+            let prefix = try await engine.withTransaction { transaction -> ByteString in
+                try await catalog.openOrInitializeRoot(transaction: transaction).keyspacePrefix
+            }
+            let dataKey = prefix.appending(0x6B)
+            try await engine.withTransaction { transaction in
+                try transaction.setValue(ByteString([0x01]), for: dataKey)
+            }
+
+            try await engine.withTransaction { transaction in
+                try transaction.clearRange(beginKey: prefix, endKey: try strinc(prefix))
+            }
+
+            let survivors = try await engine.withTransaction { transaction -> ByteString? in
+                try await transaction.getValue(for: dataKey)
+            }
+            #expect(survivors == nil, "the caller's own data must be gone")
+
+            let reopened = try await engine.withTransaction { transaction -> Directory? in
+                try await catalog.openRoot(transaction: transaction)
+            }
+            #expect(reopened?.keyspacePrefix == prefix)
+        }
+    }
+
+    /// The record this adapter used to write inside the root node's own
+    /// content prefix has no meaning any more: bootstrap reads the node's
+    /// witness slot and nothing else, so a store still holding the old bytes
+    /// is refused rather than migrated (FD-1).
+    ///
+    /// The superseded coordinate is spelled out here rather than derived from
+    /// production code, because production code no longer knows it.
+    @Test("A superseded root record is not adopted", .timeLimit(.minutes(1)))
+    func supersededRootRecordIsNotAdopted() async throws {
+        let roots = RootPathAllocator()
+        let rootPath = roots.next()
+        let layer = DirectoryLayer(database: try FDBClient.openDatabase())
+        try await Self.withEngine(rootPath: rootPath, base: roots.base) { engine in
+            let catalog = engine.directoryAccess
+            let node = try await layer.createOrOpen(path: rootPath, type: nil)
+            // The superseded shape: an untyped node at the root path carrying
+            // the old record at `rootPrefix + 0xFE + 0x72`.
+            let superseded = ByteString(node.prefix).appending(0xFE).appending(0x72)
+            try await engine.withTransaction { transaction in
+                try transaction.setValue(
+                    StorageKit.Tuple("storage-kit").pack(),
+                    for: superseded
+                )
+            }
+
+            await Self.expectFailure(
+                .incompatibleStorageLayout,
+                "openRoot over a superseded record"
+            ) {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openRoot(transaction: transaction)
+                }
+            }
+            await Self.expectFailure(
+                .incompatibleStorageLayout,
+                "openOrInitializeRoot over a superseded record"
+            ) {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openOrInitializeRoot(transaction: transaction)
+                }
+            }
+        }
+    }
+
+    /// The node and its witness commit or roll back together, so an aborted
+    /// initialization leaves neither behind (FD-1).
+    @Test("An aborted initialization leaves no root", .timeLimit(.minutes(1)))
+    func abortedInitializationLeavesNoRoot() async throws {
+        struct Abort: Error {}
+
+        let roots = RootPathAllocator()
+        let rootPath = roots.next()
+        let database = try FDBClient.openDatabase()
+        let layer = DirectoryLayer(database: database)
+        try await Self.withEngine(rootPath: rootPath, base: roots.base) { engine in
+            let catalog = engine.directoryAccess
+            do {
+                try await engine.withTransaction { transaction in
+                    _ = try await catalog.openOrInitializeRoot(transaction: transaction)
+                    throw Abort()
+                }
+                Issue.record("the aborted transaction must not commit")
+            } catch is Abort {
+                // Expected.
+            }
+
+            let root = try await engine.withTransaction { transaction -> Directory? in
+                try await catalog.openRoot(transaction: transaction)
+            }
+            #expect(root == nil, "the rolled-back root must not be observable")
+
+            let exists = try await layer.exists(path: rootPath)
+            #expect(!exists, "the rolled-back node must not exist natively")
+
+            // Initialization succeeds afterwards, so the abort left nothing
+            // that would refuse the path.
+            let initialized = try await engine.withTransaction { transaction -> Directory in
+                try await catalog.openOrInitializeRoot(transaction: transaction)
+            }
+            #expect(initialized.address == .root)
         }
     }
 
@@ -685,9 +856,9 @@ struct FDBDirectoryConformanceTests {
     /// Removes the per-test base path through a bootstrapped client so cleanup
     /// never depends on the engine under test.
     ///
-    /// Every root path of a step extends `base`, and the only key this adapter
-    /// owns is the root record inside a root node's own content prefix, so
-    /// removing that node removes the whole step's state.
+    /// Every root path of a step extends `base`, and this adapter owns no key
+    /// of its own outside the native layer's metadata, so removing that node
+    /// removes the whole step's state.
     private static func cleanUp(_ base: [String]) async throws {
         let layer = DirectoryLayer(database: try FDBClient.openDatabase())
         if try await layer.exists(path: base) {

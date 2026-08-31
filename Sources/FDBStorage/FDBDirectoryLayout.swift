@@ -17,60 +17,29 @@ import StorageKit
 /// cluster can hold unrelated native directories beside them and two catalogs
 /// with distinct root paths never observe each other's nodes.
 enum FDBDirectoryLayout {
-    /// Byte, inside the root node's own content prefix, that separates this
-    /// adapter's root record from everything a caller can address (FD-1).
+    /// Identifier this catalog records in the witness slot of its root node
+    /// (SPEC 8.7, FD-1).
     ///
-    /// `Directory.nodeSubspaceByte` is the byte the Directory component
-    /// reserves above every Tuple type code, and every key a caller derives
-    /// from a `Subspace` is Tuple-encoded, so no `StorageAddress` resolves into
-    /// this region.
-    private static let rootRecordByte: UInt8 = 0x72
-
-    /// Key of the record that witnesses an initialized storage root.
+    /// The slot itself belongs to the native Directory Layer: the bindings own
+    /// its physical coordinate and resolve it from a path, so this adapter
+    /// contributes only the value's meaning. Existence of the node is not the
+    /// witness, because the native layer creates the ancestors of a path as
+    /// ordinary untyped Directories, so a node at the configured root path can
+    /// exist because an unrelated engine opened a path through it.
     ///
-    /// The native layer never hands out a prefix already in use, so the root
-    /// node's content prefix belongs to this catalog alone. Existence of the
-    /// node itself is not the witness: the native layer creates the ancestors
-    /// of a path as ordinary untyped Directories, so a node at the configured
-    /// root path can exist because an unrelated engine opened a path through
-    /// it. Only root initialization writes this key.
-    static func rootRecordKey(rootPrefix: ByteString) -> ByteString {
-        rootPrefix
-            .appending(Directory.nodeSubspaceByte)
-            .appending(rootRecordByte)
-    }
-
-    /// Value this catalog writes at `rootRecordKey(rootPrefix:)`.
-    ///
-    /// The record is adjudicated by what it holds rather than by its presence,
-    /// because a raw Layer 0 transaction can write anywhere. A key holding
-    /// anything else is foreign data in the root, not an initialized root.
+    /// The slot is adjudicated by what it holds rather than by its presence,
+    /// because a raw Layer 0 transaction can write anywhere. No legitimate
+    /// content key or range reaches the slot, so a caller's `clearRange` over
+    /// the root's own content prefix leaves it intact; bytes that are not this
+    /// exact identifier are corruption, not an initialized root.
     ///
     /// The encoding is the StorageKit Tuple, the same one the key-value
     /// catalogs witness their roots with, and not the native layer's own.
-    static var rootRecordValue: ByteString {
-        StorageKit.Tuple(rootRecordName).pack()
+    static var rootWitnessIdentifier: ByteString {
+        StorageKit.Tuple(rootWitnessName).pack()
     }
 
-    private static let rootRecordName = "storage-kit"
-
-    /// Whether `value` is the record this catalog writes for a storage root.
-    ///
-    /// Bytes that are not a Tuple, a Tuple of another shape, or a Tuple naming
-    /// anything else are all foreign: the caller reports
-    /// `incompatibleStorageLayout` rather than adopting or overwriting them.
-    static func isRootRecord(_ value: ByteString) -> Bool {
-        let elements: [any StorageKit.TupleElement]
-        do {
-            elements = try StorageKit.Tuple.unpack(from: value)
-        } catch {
-            return false
-        }
-        guard elements.count == 1, let name = elements[0] as? String else {
-            return false
-        }
-        return name == rootRecordName
-    }
+    private static let rootWitnessName = "storage-kit"
 
     /// Native path of `address` below `rootPath`.
     static func nativePath(rootPath: [String], address: StorageAddress) -> [String] {
@@ -82,9 +51,10 @@ enum FDBDirectoryLayout {
     /// `nil` types a plain Directory: the native layer stores no layer value
     /// for such a node, and `LayerTag.default` is the empty tag. Every other
     /// tag is application-opaque bytes (SPEC §4) and the native layer stores it
-    /// verbatim. No value is reserved: the root record of FD-1 lives in the
-    /// root node's content prefix, not in any node's layer value, so a caller
-    /// tag round-trips here exactly as it does on a key-value backend.
+    /// verbatim. No value is reserved: the root witness of FD-1 lives in the
+    /// slot the native layer reserves in a node's own metadata, not in any
+    /// node's layer value, so a caller tag round-trips here exactly as it does
+    /// on a key-value backend.
     static func nativeType(for layer: LayerTag) -> DirectoryType? {
         if layer.isDefault {
             return nil
