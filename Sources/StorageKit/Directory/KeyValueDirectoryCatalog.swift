@@ -198,7 +198,10 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         transaction: any TransactionReadAccess,
         operation: StorageOperation
     ) async throws {
-        guard try await transaction.getKey(selector: .firstGreaterOrEqual([])) == nil else {
+        guard try await transaction.getKey(
+            selector: .firstGreaterOrEqual([]),
+            snapshot: false
+        ) == nil else {
             throw StorageError.incompatibleStorageLayout(
                 "the storage root holds data that no Directory catalog wrote",
                 operation: operation,
@@ -313,7 +316,12 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             begin = .firstGreaterOrEqual(listPrefix)
         }
         let end = KeySelector.firstGreaterOrEqual(try increment(listPrefix))
-        let rows = try await transaction.collectRange(from: begin, to: end, limit: limit)
+        let rows = try await TransactionRangeCollection.collect(
+            using: transaction,
+            from: begin,
+            to: end,
+            limit: limit
+        )
         return try rows.map { row in
             let name = try decodeName(from: row.0, listPrefix: listPrefix)
             let edge = try decodeEdge(row.1)
@@ -415,7 +423,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         transaction: any TransactionAccess
     ) async throws {
         try requireDomain(of: transaction, parent: parent, operation: .delete)
-        let address = try childAddress(of: parent, name, operation: .delete)
+        _ = try childAddress(of: parent, name, operation: .delete)
         let layerRoot = parent.childLayerRoot
         guard let edge = try await readEdge(
             layerRoot: layerRoot,
@@ -468,9 +476,10 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
             // Read-your-writes hides the edges cleared in this transaction, so
             // repeatedly draining the first page terminates.
             while true {
-                let rows = try await transaction.collectRange(
-                    begin: listPrefix,
-                    end: listEnd,
+                let rows = try await TransactionRangeCollection.collect(
+                    using: transaction,
+                    from: .firstGreaterOrEqual(listPrefix),
+                    to: .firstGreaterOrEqual(listEnd),
                     limit: DirectoryLimits.maximumListLimit
                 )
                 if rows.isEmpty {
@@ -566,7 +575,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         do {
             elements = try Tuple.unpack(from: value)
         } catch {
-            throw dataCorruption("Directory edge value is not a Tuple: \(error)")
+            throw dataCorruption("Directory edge value is not a Tuple")
         }
         guard elements.count == 2,
               let prefix = elements[0] as? ByteString,
@@ -578,7 +587,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         do {
             return Edge(prefix: prefix, layer: try LayerTag(tag))
         } catch {
-            throw dataCorruption("Directory node layer tag is invalid: \(error)")
+            throw dataCorruption("Directory node layer tag is invalid")
         }
     }
 
@@ -590,7 +599,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         do {
             elements = try Tuple.unpack(from: value)
         } catch {
-            throw dataCorruption("\(context) value is not a Tuple: \(error)")
+            throw dataCorruption("\(context) value is not a Tuple")
         }
         guard elements.count == 1,
               let number = elements[0] as? Int64,
@@ -613,7 +622,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         do {
             elements = try Tuple.unpack(from: suffix)
         } catch {
-            throw dataCorruption("Directory node name is not a Tuple: \(error)")
+            throw dataCorruption("Directory node name is not a Tuple")
         }
         guard elements.count == 1, let name = elements[0] as? String else {
             throw dataCorruption("Directory node name has an unexpected Tuple shape")
@@ -723,7 +732,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         do {
             return try strinc(prefix)
         } catch {
-            throw contractViolation("Catalog key prefix cannot be incremented: \(error)")
+            throw contractViolation("Catalog key prefix cannot be incremented")
         }
     }
 

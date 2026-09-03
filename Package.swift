@@ -34,7 +34,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/1amageek/fdb-swift-bindings.git",
-            from: "0.4.0"
+            from: "0.4.1"
         ),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
     ],
