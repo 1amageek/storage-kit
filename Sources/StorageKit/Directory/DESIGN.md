@@ -155,9 +155,46 @@ The root is a Directory with the empty address and tag `.default`.
 `openRoot(transaction:)` is operation 1 applied to the root (absence =
 uninitialized empty store, returned as `nil`), and
 `openOrInitializeRoot(transaction:)` is operation 2 applied to the root. Both
-run the layout state machine below. `openPartition`, `openOrCreatePartition`,
-`openDirectory(at path:)`, and `openDirectory(at address:)` are protocol
-extensions over operations 1–2 and add no semantics.
+run the layout state machine below. The five layer-restricted forms —
+`openDirectory(_:in:transaction:)`, `openOrCreateDirectory(_:in:transaction:)`,
+`openPartition(_:in:transaction:)`, `openOrCreatePartition(_:in:transaction:)`,
+and `openDirectory(at:transaction:)` — add no semantics over operations 1–2
+beyond rejecting the wrong layer. Each is a protocol requirement whose
+derivation is supplied as the default implementation, for the dispatch reason
+below.
+
+#### Dispatch through `any DirectoryAccess`
+
+`PartitionLease` and the Framework's authority types hold `any DirectoryAccess`,
+never a concrete backend. An existential in Embedded Swift carries no runtime
+metadata, so the only members callable on one are the protocol requirements
+present in its witness table. A member that exists solely in a protocol
+extension has to be specialized for the dynamic type at the call site, and an
+existential cannot supply a dynamic type.
+
+Every member of this protocol therefore follows one of two rules:
+
+| Shape | Rule | Members |
+|---|---|---|
+| Reachable through an existential, and a conformance may legitimately reach the same guarantee a cheaper way | protocol requirement; the derivation stays in the extension as the default | `admit`, `openDirectory(_:in:transaction:)`, `openOrCreateDirectory(_:in:transaction:)`, `openPartition`, `openOrCreatePartition`, `openDirectory(at:transaction:)` |
+| Reachable through an existential, and the derivation is a correctness invariant no conformance may weaken | `package` function over `DirectoryAccess`, taking the existential as a parameter | `requirePartitionGeneration` |
+
+The second rule is not a weaker form of the first. A requirement is an override
+point, and the L-3 staleness test must not have one: a conformance that relaxed
+it would let a lease bind into a Partition that no longer exists. Receiving the
+existential as a parameter also keeps the function `package`, where a
+requirement cannot be narrower than the protocol and would have widened public
+API.
+
+Embedded rejects this shape at compile time only when the protocol is not
+class-bound: the call site then fails with `cannot specialize generic function
+or default protocol method in this context [#EmbeddedRestrictions]`. This
+protocol is class-bound, so the same call compiles and links, and the compiler
+emits a null async function pointer in its place; the failure appears only at
+run time as `RuntimeError: null function or function signature mismatch`. A
+build that links is therefore not evidence of portability. Adding an async
+member to this protocol, or to `StorageEngine`, requires re-running the
+Embedded runtime verification owned by `database-framework-cloudflare`.
 
 Every operation checks `transaction.transactionDomain === parent.domain ===
 catalog.domain`; a mismatch fails `storageDomainMismatch` before any I/O.
@@ -406,7 +443,7 @@ is never initialized, opened, or rejected because of another root's data.
 |---|---|---|
 | L-1 | Lease, transaction, and Partition domains match | `storageDomainMismatch` at issuance and at every bind |
 | L-2 | A lease is validated against the store at issuance and again at every access binding | the address walk runs in the issuing or binding transaction, so the resolution enters that transaction's read set |
-| L-3 | A stale generation fails; work is never redirected | an absent node, a non-Partition layer, or a different `keyspacePrefix` → `staleLease` |
+| L-3 | A stale generation fails; work is never redirected | `requirePartitionGeneration`: an absent node, a non-Partition layer, or a different `keyspacePrefix` → `staleLease`. It is one function over `DirectoryAccess`, not a member, so no conformance can replace it |
 | L-4 | Read binding cannot mutate | `BoundReadAccess` has no mutation members |
 | L-5 | Write binding cannot commit or cancel | `BoundWriteAccess` has no lifecycle members |
 | L-6 | Bound access and cursors cannot escape the closure | noncopyable, borrowed; cursors validate the binding scope on both sides of every advance → `staleLease`, so an advance already in flight when the binding closes does not deliver its row either, and the binding scope owns every cursor it issued and completes that cursor's backend cleanup as part of closing, so no capability of an escaped cursor — cleanup included — is still outstanding when the binding closes |
@@ -569,7 +606,14 @@ confirming edge keys stay within each backend's key bound.
 | L-6 cleanup authority: an escaped cursor is already finished, a close awaits an advance still in flight, a cleanup failure is reported through `PartitionBindingCleanupError`, and a cursor the body finished is not restated | `Tests/StorageKitTests/PartitionBindingScopeTests.swift` |
 | Binding order: a caller error this process settles alone is reported as itself before the backend is asked whether it admits the binding, and a binding the backend refuses spends no generation round trip | `Tests/StorageKitTests/PartitionLeaseTests.swift` binds read and write access through a `DirectoryAccess` that refuses every admission and counts what it was asked. A foreign transaction and a released lease fail with their own codes at zero admissions and zero root reads; the same double with no caller error fails with `unsupportedOperation` at one admission per binding and still zero root reads |
 
+| Dispatch through an existential | `CloudflareDatabaseRuntimeVerification` built for `wasm32-unknown-wasip1` with Embedded Swift and run by `Workers/CloudflareDatabaseRuntime/scripts/verify-reactor-instantiation.ts`. It is the only lane that executes these calls through `any DirectoryAccess` on a target without runtime metadata; every other suite holds a concrete engine and so cannot observe the defect |
+
 Changing the catalog layout, the bootstrap witness of any backend, or any
 operation semantics requires updating this design first, then the StorageKit
 module design, then every adapter module, then database-framework binding
 (F-15 in `PROGRESS.md`).
+
+Adding, removing, or re-shaping a member of `DirectoryAccess` additionally
+requires classifying it under the dispatch rules above and re-running the
+Embedded runtime verification. Compile and link success does not carry that
+contract.

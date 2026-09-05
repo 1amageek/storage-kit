@@ -74,8 +74,17 @@ Layering inside the module:
 | `directoryAccess` | Exactly one `DirectoryAccess` realization; no protocol default. |
 | `createTransaction()` | Admission through `StorageEngineLifecycle`; rejected with `invalidOperation` after `requestShutdown()`. |
 | `executeTransaction(_:)` | Runs the operation under `TransactionLifecycleOwner`: commit on success, cancel on failure, operation and cleanup failures preserved as `StorageTransactionCleanupError`, and a commit whose outcome is unknown rethrown unwrapped without cancellation. A backend overrides this member only to construct its own transaction and to convert its native body failures; the owner still completes it. |
-| `leasePartition(_:transaction:)` | Extension; issues `PartitionLease` after a domain check, a shutdown check, and generation validation in the caller's transaction. Every later binding of that lease revalidates in its own transaction (details in the Directory component design). |
+| `leasePartition(_:transaction:)` | Requirement with an authoritative default; issues `PartitionLease` after a domain check, a shutdown check, and generation validation in the caller's transaction. Every later binding of that lease revalidates in its own transaction (details in the Directory component design). It is a requirement rather than an extension because `DatabasePartitionAuthority` calls it on `any StorageEngine`, and an existential dispatches only through the witness table (Directory component design, dispatch through an existential). A backend overrides it only to reach the same domain and generation guarantees by a cheaper route, never to weaken them. |
 | `requestShutdown()` / `waitUntilShutdown()` | Shutdown rejects new transactions and new lease issuance, then completes admitted backend cleanup. It does not wait for outstanding leases: a lease after shutdown cannot perform I/O because transaction admission is closed, and waiting would let a leaked lease hang shutdown. |
+
+`shutdown()` and `withTransaction(_:)` stay protocol extensions and are not
+callable on `any StorageEngine`. `executeTransaction(_:)` is the requirement a
+caller holding an existential uses instead, and shutdown is driven through
+`requestShutdown()` / `waitUntilShutdown()`, which are requirements.
+`withTransaction` is generic, so promoting it would not make it callable on an
+existential either. Production has no existential call site for either member;
+introducing one is a portability defect that links cleanly and traps at run
+time.
 
 Removed in this revision: `namespaceResolver`, `namespaceCatalog`,
 `resolveOrCreateNamespace`, `resolveExistingNamespace`, `listNamespaces`,
@@ -150,6 +159,11 @@ holding deterministic path-derived prefixes is foreign data and is rejected
 | Reference-only escape and compile-level attenuation | `Tests/StorageKitTests/PartitionLeaseTests.swift` |
 | Sole commit authority: an unknown commit outcome reaches the caller unwrapped and uncancelled | `Tests/CloudflareDurableObjectStorageTests/CloudflareDurableObjectStorageWireClientTests.swift` |
 
+| Existential dispatch of `StorageEngine` members on a target without runtime metadata | `CloudflareDatabaseRuntimeVerification` (Embedded Swift, `wasm32-unknown-wasip1`) in `database-framework-cloudflare` |
+
 Changing any public contract here requires re-verifying every adapter module
 through the shared `StorageKitConformance` fixture and the database-framework
-binding.
+binding. Adding an async member to `StorageEngine` or `DirectoryAccess`
+additionally requires the Embedded runtime verification: the compiler does not
+diagnose an extension-only member reached through an existential on a
+class-bound protocol.

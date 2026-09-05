@@ -74,6 +74,22 @@ public protocol StorageEngine: AnyObject, Sendable {
     func executeTransaction(
         _ operation: @escaping @Sendable (any TransactionAccess) async throws -> Void
     ) async throws
+
+    /// Issues a lease for `partition` after resolving it in `transaction`.
+    ///
+    /// This is a requirement rather than an extension-only member so that a
+    /// caller holding `any StorageEngine` dispatches through the witness table.
+    /// A default implementation reached only from a protocol extension has to
+    /// be specialized for the dynamic type at the call site, which an
+    /// existential cannot supply.
+    ///
+    /// The default implementation below is authoritative. A conformance
+    /// overrides it only to reach the same domain and generation guarantees by
+    /// a cheaper backend-specific route, never to weaken them.
+    func leasePartition(
+        _ partition: Partition,
+        transaction: any TransactionReadAccess
+    ) async throws -> PartitionLease
 }
 
 extension StorageEngine {
@@ -135,9 +151,10 @@ extension StorageEngine {
             )
         }
         try transactionDomain.requireLeaseIssuance(backend: backend)
-        try await directoryAccess.requirePartitionGeneration(
+        try await requirePartitionGeneration(
             partition,
             operation: .open,
+            access: directoryAccess,
             transaction: transaction
         )
         return PartitionLease(

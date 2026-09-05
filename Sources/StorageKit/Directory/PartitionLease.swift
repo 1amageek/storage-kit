@@ -165,9 +165,10 @@ public struct PartitionLease: ~Copyable, Sendable {
     ) async throws {
         try requireLocalAuthority(of: transaction, operation: operation)
         try directoryAccess.admit(operation)
-        try await directoryAccess.requirePartitionGeneration(
+        try await requirePartitionGeneration(
             partition,
             operation: operation,
+            access: directoryAccess,
             transaction: transaction
         )
     }

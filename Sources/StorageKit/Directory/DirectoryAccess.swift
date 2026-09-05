@@ -100,6 +100,49 @@ public protocol DirectoryAccess: AnyObject, Sendable {
     /// itself, so they stay available at every isolation level. The default
     /// admits every operation.
     func admit(_ operation: StorageOperation) throws
+
+    // The five layer-restricted operations below are requirements rather than
+    // extension-only members so that a call through `any DirectoryAccess`
+    // dispatches through the witness table. A default implementation reached
+    // only from a protocol extension has to be specialized for the dynamic
+    // type at the call site, which an existential cannot supply; the witness a
+    // conformance emits is specialized where the concrete type is known.
+    // Their behavior is unchanged: the extension below still supplies every
+    // default implementation.
+
+    /// Operation 1 restricted to plain Directories.
+    func openDirectory(
+        _ name: String,
+        in parent: Directory,
+        transaction: any TransactionReadAccess
+    ) async throws -> Directory?
+
+    /// Operation 2 restricted to plain Directories.
+    func openOrCreateDirectory(
+        _ name: String,
+        in parent: Directory,
+        transaction: any TransactionAccess
+    ) async throws -> Directory
+
+    /// Operation 1 restricted to Partitions.
+    func openPartition(
+        _ name: String,
+        in parent: Directory,
+        transaction: any TransactionReadAccess
+    ) async throws -> Partition?
+
+    /// Operation 2 restricted to Partitions.
+    func openOrCreatePartition(
+        _ name: String,
+        in parent: Directory,
+        transaction: any TransactionAccess
+    ) async throws -> Partition
+
+    /// Resolves an absolute address from the root with read operations only.
+    func openDirectory(
+        at address: StorageAddress,
+        transaction: any TransactionReadAccess
+    ) async throws -> Directory?
 }
 
 extension DirectoryAccess {
@@ -192,38 +235,44 @@ extension DirectoryAccess {
     }
 }
 
-extension DirectoryAccess {
-    /// Resolves `partition` in `transaction` and fails when the live node is a
-    /// different generation than the one the caller holds.
-    ///
-    /// This is the single staleness test behind every Partition lease. The
-    /// prefix allocator never reuses a number, so a Partition removed and
-    /// recreated at the same address always carries a different
-    /// `keyspacePrefix`; comparing prefixes therefore separates the two
-    /// generations without any record of what else is running.
-    ///
-    /// The walk runs in `transaction`, which puts the resolution into that
-    /// transaction's read set. A removal committing concurrently then makes
-    /// `transaction` conflict rather than letting it write into a Partition
-    /// that no longer exists.
-    package func requirePartitionGeneration(
-        _ partition: Partition,
-        operation: StorageOperation,
-        transaction: any TransactionReadAccess
-    ) async throws {
-        let current = try await openDirectory(
-            at: partition.root.address,
-            transaction: transaction
+/// Resolves `partition` in `transaction` and fails when the live node is a
+/// different generation than the one the caller holds.
+///
+/// This is the single staleness test behind every Partition lease. The prefix
+/// allocator never reuses a number, so a Partition removed and recreated at the
+/// same address always carries a different `keyspacePrefix`; comparing prefixes
+/// therefore separates the two generations without any record of what else is
+/// running.
+///
+/// The walk runs in `transaction`, which puts the resolution into that
+/// transaction's read set. A removal committing concurrently then makes
+/// `transaction` conflict rather than letting it write into a Partition that no
+/// longer exists.
+///
+/// This is a function over `DirectoryAccess` rather than a member of it. The
+/// test is identical for every conformer and is the correctness invariant a
+/// lease rests on, so no conformance may replace it. Receiving `access` as a
+/// parameter also keeps the call dispatchable from a caller holding
+/// `any DirectoryAccess`: an existential can only invoke witness-table
+/// requirements, never protocol-extension members.
+package func requirePartitionGeneration(
+    _ partition: Partition,
+    operation: StorageOperation,
+    access: any DirectoryAccess,
+    transaction: any TransactionReadAccess
+) async throws {
+    let current = try await access.openDirectory(
+        at: partition.root.address,
+        transaction: transaction
+    )
+    guard let current,
+          current.layer.isPartition,
+          current.keyspacePrefix == partition.keyspacePrefix
+    else {
+        throw StorageError.staleLease(
+            "Partition no longer exists at its address with the same keyspace",
+            operation: operation,
+            backend: access.backend
         )
-        guard let current,
-              current.layer.isPartition,
-              current.keyspacePrefix == partition.keyspacePrefix
-        else {
-            throw StorageError.staleLease(
-                "Partition no longer exists at its address with the same keyspace",
-                operation: operation,
-                backend: backend
-            )
-        }
     }
 }
