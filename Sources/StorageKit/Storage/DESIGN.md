@@ -45,11 +45,19 @@ state; no second cursor state is introduced at the caller boundary.
 
   ```text
   pre-validation
+      -> publish the advancing boundary
+      -> cooperative executor handoff
+      -> cancellation recheck
       -> one backend advance
       -> cancellation check
       -> post-validation
       -> publish ready/exhaustion or resolve finish boundary
   ```
+
+  The handoff is common to every target and occurs only after the advancing
+  boundary is visible. It bounds immediate actor-hop stack growth without
+  changing advance exclusivity; cancellation observed after the handoff enters
+  the existing terminal cleanup path before backend advance.
 
 - Post-validation is completed before a row becomes observable, before the
   ready state is published, and before a concurrent finish boundary resolves.
@@ -101,21 +109,25 @@ by their result values.
 
 ## Failure, Concurrency, and Constraints
 
-Actor isolation orders suspendable backend I/O and finish coordination; no
-mutex is held across `await`. Cancellation and scope revocation are terminal
-for iteration and await backend cleanup before escaping. Cleanup failures retain
-the `StorageRangeCleanupError` and `StorageRangeTerminalCleanupError` contracts.
-The state has one backend advance per returned row and no ambient authority or
-module-level registry.
+Actor isolation orders the cooperative executor handoff, suspendable backend
+I/O, and finish coordination; no mutex is held across `await`. A concurrent
+advance or finish during the handoff observes the existing advancing boundary.
+Cancellation and scope revocation are terminal for iteration and await backend
+cleanup before escaping. Cleanup failures retain the `StorageRangeCleanupError`
+and `StorageRangeTerminalCleanupError` contracts. The state has one backend
+advance per returned row and no ambient authority or module-level registry.
 
 ## Verification and Change Impact
 
 `StorageKitTests/TransactionRangeCleanupTests` owns the behavioral proof for
 pre/post ordering, one backend advance per row, cancellation and revocation,
 admission before backend open, finish coordination, typed cleanup composition,
-exactly-once cleanup, and zero-copy byte ownership. The deterministic finish
+exactly-once cleanup, and zero-copy byte ownership. It also proves cancellation
+and finish behavior across the cooperative handoff. The deterministic finish
 test observes the actor's advancing state before resuming backend advance and
-proves that backend finish and owner release occur after post-validation.
+proves that backend finish and owner release occur after post-validation. A
+WASM immediate-completion range probe on the default runtime stack proves that
+repeated advances do not accumulate actor-hop stack frames.
 
 Changes to this component require its focused tests and a dependent
 database-framework cursor check. Backend adapter tests are required when a

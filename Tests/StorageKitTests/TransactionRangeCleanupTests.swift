@@ -5,6 +5,27 @@ import Testing
 
 @Suite("Transaction Range Cleanup Tests")
 struct TransactionRangeCleanupTests {
+    @Test func bufferedCursorAdvancesPreserveRowsAndFinishExactlyOnce() async throws {
+        let recorder = RangeIterationRecorder()
+        let rows: [(ByteString, ByteString)] = (0..<1_024).map { index in
+            ([UInt8(index >> 8), UInt8(index & 255)], [0x11])
+        }
+        var cursor = KeyValueCursor(consuming: FinishRecordingRows(
+            rows: rows,
+            iterationRecorder: recorder
+        ))
+        for expected in rows {
+            let actual = try await cursor.next()
+            #expect(actual?.0 == expected.0)
+            #expect(actual?.1 == expected.1)
+        }
+        let exhausted = try await cursor.next()
+        #expect(exhausted == nil)
+        try await cursor.finish()
+        #expect(recorder.nextCount == rows.count + 1)
+        #expect(recorder.finishCount == 1)
+    }
+
     @Test func successfulConsumptionFinishesExactlyOnce() async throws {
         let iterationRecorder = RangeIterationRecorder()
         let rows = FinishRecordingRows(

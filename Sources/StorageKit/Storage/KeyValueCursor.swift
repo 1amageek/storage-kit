@@ -337,6 +337,10 @@ private actor TypedKeyValueCursorState<Result: TransactionRangeResult>:
 
         let element: KeyValueCursor.Element?
         do {
+            // Bound uninterrupted advances even when backend rows are buffered.
+            // The advancing boundary remains authoritative across this yield.
+            await Task.yield()
+            try ensureStorageTaskIsActive()
             element = try await cursor.next()
             try ensureStorageTaskIsActive()
             try postAdvanceValidation?()
