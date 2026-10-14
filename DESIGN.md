@@ -42,7 +42,7 @@ allowed to use it.
 | [workspace DESIGN.md](../DESIGN.md) | parent | system context, global invariants | Indexes this package as the foundational storage dependency. | Package boundary changes must be reflected in the workspace index and `Ecosystem.json`. |
 | [SPEC.md](../SPEC.md) | product architecture authority | §7 capability list, §8 values, operations, and root bootstrap, §9 leases, §24 verification | Defines what this package must guarantee. | Any deviation is recorded in the owning module design, not silently absorbed. |
 | [StorageKit module](Sources/StorageKit/DESIGN.md) | child | `StorageEngine`, `Transaction`, `TransactionReadAccess`, `TransactionAccess`, `DirectoryAccess`, lease types, Tuple, Subspace | Platform-neutral contracts and the InMemory reference engine. | Adapters depend on these contracts only; they never reach into InMemory internals. |
-| `database-types` | depends on | `ByteString`, `UUID`, bounded byte owners | Foundation-free primitives used by keys, values, and Tuple elements. | `ByteString` ownership rules apply to every byte path; no `Data` or `[UInt8]` re-materialization on repeated paths. |
+| [database-types](../database-types/DESIGN.md) | depends on | `ByteString`, `UUID`, bounded byte owners | Foundation-free primitives used by keys, values, and Tuple elements. | `ByteString` ownership rules apply to every byte path; no `Data` or `[UInt8]` re-materialization on repeated paths. |
 | `fdb-swift-bindings` | depends on (FDBStorage only) | `Database`, `Transaction`, `DirectoryLayer`, `DirectoryType` | Safe FoundationDB C client ownership. | A StorageKit Partition on FDB is a native `partition` node, so partitions nest and the adapter defines no custom layer type of its own (owned by the FDBStorage module design). |
 | `postgres-nio` | depends on (PostgreSQLStorage only) | connection and query execution | PostgreSQL wire client. | Isolation level selection is a StorageKit configuration contract, not a driver default. |
 | database-framework | used by | every public contract of the StorageKit module | Composes containers, kernels, and features on top of Directories and leases. | Framework never holds a raw Partition address as authority; it holds leases. |
@@ -87,6 +87,7 @@ Package-wide invariants (each is owned in detail by the module design):
 | P-5 | Tuple V1 byte layout is frozen by `Tests/StorageKitTests/TupleV1GoldenVectorTests.swift`. | Tuple component |
 | P-6 | Shutdown rejects new transactions and new lease issuance and completes admitted backend cleanup. | StorageKit module, each adapter |
 | P-7 | Every production adapter passes the same `StorageKitConformance` fixture that the InMemory reference engine passes. | AGENTS.md test procedure |
+| P-8 (planned S12) | Checkpointable deferred-write transactions preserve one ordered data/Directory view and rollback boundary in every adapter; currently no portable checkpoint API exists. | [Storage component](Sources/StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12) |
 
 ## Failure, Concurrency, and Constraints
 
@@ -102,6 +103,7 @@ Package-wide invariants (each is owned in detail by the module design):
 
 | Change | Re-verify |
 |---|---|
+| Portable transaction checkpoints (planned S12) | [Storage component contract](Sources/StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12), all concrete transactions and Directory pathways, shared conformance, Framework logical-state rollback |
 | Any public StorageKit contract | this design, the module design, all adapter modules, database-framework binding |
 | Adapter-internal change | that adapter's module design and its test target plus the shared conformance fixture |
 | Tuple encoding | golden vectors; any byte-layout change is a layout change |

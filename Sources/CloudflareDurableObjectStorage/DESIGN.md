@@ -165,3 +165,26 @@ Changing limits, the readiness gate, the commit request composition, or the
 catalog placement is a protocol or persisted-layout change: update the protocol
 document, this design, the Directory component's adapter notes, and the package
 design before implementation.
+
+## Planned Checkpoint Integration (S12)
+
+Status: planned, not current support. The common semantics and proof obligations
+are owned by the [Storage component](../StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
+This section owns only the adapter-specific integration path.
+
+Current path: one mutex-protected transaction state retains mutations,
+read/write conflict ranges, and the pinned observed read version, then sends
+one host commit request. Existing mutation buffering is not a portable
+checkpoint capability.
+
+S12 integrates the shared journal and overlay before converting surviving
+operations into that one commit frame. `KeyValueDirectoryCatalog` shares this
+state; checkpoint rollback removes staged metadata and data without resetting
+the pinned snapshot or claiming a host rollback happened. No wire operation is
+needed merely to name or roll back a local checkpoint; if a frame shape must
+change, the wire/host design owns that change. Host limits still apply to the
+final frame, in addition to journal/overlay bounds enforced before dispatch.
+Verification includes real Durable Object host persistence/restart, snapshot
+conflicts, negative readback of rolled-back Directory/data, cancellation,
+commit-unknown outcomes, and Native/WASM/Embedded transport ownership. The
+in-memory transport fixture remains local evidence only.

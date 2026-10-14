@@ -12,7 +12,7 @@ transaction lifecycle owner, and the InMemory reference engine.
 |---|---|
 | Design level | module |
 | Parent | [storage-kit package](../../DESIGN.md) |
-| Children | [Directory component](Directory/DESIGN.md); `Storage/` (transaction, cursor, bounds, lifecycle), `Tuple/` (Tuple V1, Subspace, Versionstamp), `InMemory/` (reference engine) — the latter three predate this design and are owned by their source files and tests until a component design is added |
+| Children | [Directory component](Directory/DESIGN.md); [Storage component](Storage/DESIGN.md); [Tuple component](Tuple/DESIGN.md); `InMemory/` (reference engine, owned by its source files and tests until a component design is added) |
 
 ## Responsibilities and Boundaries
 
@@ -167,3 +167,13 @@ binding. Adding an async member to `StorageEngine` or `DirectoryAccess`
 additionally requires the Embedded runtime verification: the compiler does not
 diagnose an extension-only member reached through an existential on a
 class-bound protocol.
+
+## Planned Checkpoint Composition
+
+S12 adds the storage-semantic checkpoint capability described only in the
+[Storage component contract](Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
+The module composes that contract with Directory access and the InMemory
+reference without interpreting SQL savepoint names or restoring Framework
+schema/runtime state. Every adapter's concrete transaction and Directory path
+must share the same journal view; the package contract does not permit replacing
+FoundationDB's native Directory Layer with `KeyValueDirectoryCatalog`.

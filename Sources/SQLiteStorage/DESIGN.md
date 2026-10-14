@@ -145,3 +145,23 @@ KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog k
 Changing the PRAGMA set, the `kv_store` schema, or the catalog placement is a
 persisted-layout change: update this design, the Directory component's adapter
 notes, and the package design's change-impact table before implementation.
+
+## Planned Checkpoint Integration (S12)
+
+Status: planned, not current support. The common semantics and proof obligations
+are owned by the [Storage component](../StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
+This section owns only the adapter-specific integration path.
+
+Current path: `SQLiteStorageTransaction` buffers synchronous writes and
+flushes them before asynchronous database work; nested transactions use native
+SQLite savepoints coordinated in strict LIFO order. That implementation is not
+a portable checkpoint capability.
+
+S12 integrates the shared journal into the concrete transaction before the
+first write and stops read-triggered flushes on the deferred-write path. The
+existing `KeyValueDirectoryCatalog` uses the same transaction and overlay;
+native nested-savepoint composition must neither bypass nor double-replay the
+journal. File persistence, busy/locking behavior, native rollback, cursors,
+connection ownership, and shutdown continue to obey the existing contracts.
+Verification includes file-backed data and Directory rollback, commit/reopen,
+checkpoint composition with nested calls, and native failure/cleanup paths.

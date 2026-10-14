@@ -277,3 +277,32 @@ migration path is provided.
 Changing the path mapping, the layer-tag mapping, the bootstrap witness, or
 the root path default is a layout change: update this design, then the Directory
 component design's adapter notes, then database-framework binding.
+
+## Planned Checkpoint Integration (S12)
+
+Status: planned, not current support. The common semantics and proof obligations
+are owned by the [Storage component](../StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
+This section owns only the adapter-specific integration path.
+
+Current path: `FDBDirectoryAccess.resolve` requires the concrete
+`FDBStorageTransaction`; `withLayer` enters its exclusive Directory operation
+window and supplies `fdbTransaction: any TransactionProtocol` to the bindings.
+A wrapper around `TransactionAccess` alone is rejected by that concrete cast
+and cannot intercept native Directory mutations.
+
+S12 must integrate the shared journal inside `FDBStorageTransaction` and pass a
+journal-aware bindings `TransactionProtocol` implementation inside the same
+exclusive window. The native `DirectoryLayer` and its HCA allocator remain the
+sole existence/allocation authority; no shadow catalog or reconstructed native
+metadata keys are permitted. HCA uses atomic add followed by a non-snapshot
+read, `setNextWriteNoWriteConflictRange` before set/clear-range, and explicit
+write conflicts. The adapter must retain those options with their exact next
+write and route `getKey`/`readRangeBatch` through the same ordered overlay as
+ordinary data reads. Generic C-byte inputs are retained as immutable owners at
+the bindings boundary; scoped pointers never enter the journal.
+
+Verification must mix native root/Partition creation, HCA allocation,
+move/removal, data/index writes, and rollback before one real FoundationDB
+commit, then reopen through the native layer in a fresh transaction. Conflicts,
+retry, versionstamps, cancellation, exclusivity, and commit-unknown behavior
+remain required native-client tests.

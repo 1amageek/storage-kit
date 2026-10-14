@@ -162,3 +162,25 @@ The suite requires a reachable server configured through `POSTGRES_TEST_HOST`,
 Changing the relation schema, the isolation admission rule, or the catalog
 placement is a persisted-layout or capability change: update this design, the
 Directory component's adapter notes, and the package design before implementation.
+
+## Planned Checkpoint Integration (S12)
+
+Status: planned, not current support. The common semantics and proof obligations
+are owned by the [Storage component](../StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
+This section owns only the adapter-specific integration path.
+
+Current path: the concrete transaction owns eager, lazy, and nested
+connection modes; point reads replay the buffer while ranges can flush it, and
+nested child commit merges its write buffer. Those behaviors alone do not
+satisfy the portable checkpoint contract.
+
+S12 integrates one ordered journal/overlay with connection admission and
+prevents read-triggered buffer flush on the deferred-write path. Nested child
+composition preserves the parent's journal view and checkpoint ownership.
+`KeyValueDirectoryCatalog` reads and writes the same journal; its existing
+SERIALIZABLE admission rules remain unchanged. No database-query SQL is
+forwarded to the PostgreSQL backend as an execution shortcut.
+Verification requires the isolated real PostgreSQL service, mixed catalog/data
+rollback, reverse/limited ranges after atomics and clear-range, nested calls,
+conflicts, authoritative commit, pool release, and shutdown. The backend's
+native isolation and connection-budget rules are not weakened by checkpoints.

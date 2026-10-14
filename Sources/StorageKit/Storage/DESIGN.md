@@ -5,7 +5,7 @@
 The Storage component owns the platform-neutral engine, transaction, key/value,
 range, mutation, cancellation, and lifecycle contracts implemented by the
 StorageKit module. It is a child of [`../DESIGN.md`](../DESIGN.md) and the
-package design at [`../../DESIGN.md`](../../DESIGN.md).
+package design at [`../../../DESIGN.md`](../../../DESIGN.md).
 
 ## Responsibilities and Boundaries
 
@@ -19,7 +19,7 @@ meaning, authorization policy, backend deployment, or caller resource policy.
 | Design | Relationship | Contract Used | Summary | Cautions |
 |---|---|---|---|---|
 | [`StorageKit module`](../DESIGN.md) | parent | Module composition and child boundary | Composes this component with Tuple | Keep cursor details here rather than in the module index. |
-| [`StorageKit package`](../../DESIGN.md) | ancestor | Package storage ownership | Defines the package boundary | Backend adapters must preserve this component's behavior. |
+| [`StorageKit package`](../../../DESIGN.md) | ancestor | Package storage ownership | Defines the package boundary | Backend adapters must preserve this component's behavior. |
 | Database framework Read consumer (`Sources/DatabaseEngine/Read/DESIGN.md`) | dependent consumer | Scoped range access uses `KeyValueCursor.validatingScope` | The framework consumer supplies the read-scope validation callback and lifetime owner | Recheck the consumer pin and cursor integration when this contract changes. |
 
 ## Architecture
@@ -132,3 +132,73 @@ repeated advances do not accumulate actor-hop stack frames.
 Changes to this component require its focused tests and a dependent
 database-framework cursor check. Backend adapter tests are required when a
 storage protocol or backend implementation changes.
+
+## Planned Transaction Checkpoints (SQL Compatibility S12)
+
+Status: design contract only. `TransactionAccess` and
+`TransactionCapabilities` currently expose no portable checkpoint capability.
+Existing SQLite nested savepoints and PostgreSQL nested write buffers are
+backend-specific behavior, not proof of this contract. Implementation belongs
+to S12 of the [workspace task](../../../../PROGRESS.md).
+
+The storage abstraction is a checkpointable, deferred-write transaction, not a
+SQL execution mode. The lifecycle owner selects it before exposing access or
+accepting mutations; ordinary transaction paths retain their current behavior.
+Checkpoint authority is an attenuated transaction capability: it neither commits
+nor cancels the owning transaction. The Framework maps SQL names to opaque
+checkpoint tokens and restores its own logical schema, constraint, mutation,
+and runtime-generation state; StorageKit owns only byte operations and storage
+view state.
+
+```text
+concrete transaction
+  -> one ordered mutation journal + read overlay
+       ├─ data / index / catalog operations
+       ├─ Directory metadata and allocation operations
+       └─ opaque checkpoint offsets
+  -> commit: replay surviving operations -> one authoritative backend commit
+```
+
+| Contract | Guarantee |
+|---|---|
+| Admission | Checkpoint support must be declared only after full adapter semantics exist. Unsupported admission fails typed before any write; no native-only fallback. |
+| Tokens | Tokens belong to one transaction attempt and generation. Foreign, released, terminal, and superseded tokens fail typed. Rollback retains the target checkpoint and invalidates later ones; release discards that checkpoint and later markers without discarding their mutations. |
+| Journal | Preserve accepted order for set, clear, clear-range, and atomic operations, including operation-specific options and write-conflict suppression. Do not coalesce operations unless byte values, conflict semantics, versionstamps, and ordering are equivalent. |
+| Read overlay | Point reads, bounded reads, selectors, forward/reverse and limited ranges, pagination, size metrics, and split-point reads observe precisely the surviving ordered operations over the same backend snapshot. Overlay rows participate before selectors and limits are resolved. |
+| Atomic operations | Overlay application uses the same storage atomic algebra as commit, including missing values and byte widths. Versionstamped mutations retain their unresolved commit semantics and backend-specific limitations; rollback cannot manufacture a resolved versionstamp. |
+| Rollback | Discard mutations after the marker and restore the view before it. No discarded data, catalog, Directory node, allocator update, or explicit write conflict is replayed at commit. Read conflicts already observed remain conservatively retained, and the backend read version never rewinds. |
+| Stable boundary | Checkpoint operations drain admitted operations and finish active range cursors before changing the journal view. Closed cursors cannot continue against a new view. Issued Directory/lease values must be revalidated through the existing existence/generation checks after rollback. |
+| Commit and retry | Replay only after checkpoint access is sealed. Each backend sees one commit, with no earlier journal flush caused by a read. A retry starts a fresh attempt, journal, and tokens; unknown commit outcome remains unknown and must not be replayed automatically. |
+| Cleanup | Cancel/shutdown await authoritative backend closure and release retained journal/overlay owners exactly once. Operation and cleanup failures remain separately observable. |
+
+The journal retains immutable `ByteString` owners and bounded views, never
+borrowed pointers. Journal entry count, checkpoint depth, overlay work, and
+retained backing bytes are bounded before allocation. Mutation work admission
+remains cumulative across rollback; retained-memory charges are released with
+discarded owners. Limits are configured and validated by the storage owner and
+caller budget, not inferred from SQL syntax. Overlay output materializes bytes
+only when atomic evaluation or an external ownership boundary requires it;
+large-copy claims require measurements.
+
+Native, WASM, and Embedded use the same stored state, `Sendable` capability,
+mutex/actor boundaries, and mutation entry points. Short non-suspending journal
+admission uses a mutex; suspended backend reads and checkpoint/commit barriers
+use the transaction's ordered state machine without holding a mutex over I/O.
+Every adapter must prevent concurrent native and journal paths from bypassing
+that state machine.
+
+### Checkpoint Verification and Change Impact
+
+S12 introduces one shared conformance fixture consumed by all adapter targets
+and the InMemory reference. It must prove nested rollback/release, point and
+selector reads, reverse/limited/paged ranges, repeated clear-range and atomics,
+Directory create/move/remove with nested Partitions, root bootstrap, mixed
+metadata/data rollback, conflicts, retries, stale tokens, admission limits,
+cancel/commit races, owner retention, and cleanup. Failure cases verify committed
+state from a new transaction, not only journal shape. Existing cursor and
+transaction lifecycle tests remain valid only where their assumptions persist.
+FoundationDB evidence must execute the real native Directory Layer; Durable
+Object evidence must include real host commit/rollback and restart. Native,
+WASM, and Embedded compile/link and executable target behavior are separate
+proofs. Checkpoint implementation is incomplete until all production adapters
+and the Framework logical-state integration pass their owned behavior tests.
