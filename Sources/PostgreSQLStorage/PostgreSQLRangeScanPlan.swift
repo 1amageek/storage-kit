@@ -10,10 +10,10 @@ import StorageKit
 struct RangeScanPlan: Sendable {
 
     /// Resolved lower boundary (derived from the begin `KeySelector`).
-    let begin: SQLRangeBoundary
+    let begin: SQLRangeBoundary?
 
     /// Resolved upper boundary (derived from the end `KeySelector`, exclusive).
-    let end: SQLRangeBoundary
+    let end: SQLRangeBoundary?
 
     /// Maximum number of rows to return across the whole scan (0 = unlimited).
     let limit: Int
@@ -26,4 +26,5 @@ struct RangeScanPlan: Sendable {
 
     /// Name of the KV table (a validated bare SQL identifier).
     let tableName: String
+    var maximumByteCount: Int? = nil
 }

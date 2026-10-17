@@ -13,6 +13,12 @@ public struct CloudflareDurableObjectRangeResult: TransactionRangeResult {
         }
     }
 
+    init(cursor: @escaping @Sendable () -> KeyValueCursor) {
+        self.makeCursorBody = {
+            Cursor(scan: CloudflareDurableObjectJournalRangeScan(cursor: cursor()))
+        }
+    }
+
     public func makeCursor() -> Cursor {
         makeCursorBody()
     }

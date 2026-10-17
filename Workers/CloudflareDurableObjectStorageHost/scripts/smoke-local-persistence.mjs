@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { isAbsolute } from "node:path";
 import { StorageKitWire } from "../src/StorageKitWire.js";
 import {
   operation,
@@ -16,8 +17,9 @@ const endpoint = `http://${host}:${port}`;
 const readyTimeoutMilliseconds = 30_000;
 const packageDirectory = fileURLToPath(new URL("..", import.meta.url));
 const devVarsPath = fileURLToPath(new URL("../.dev.vars", import.meta.url));
-const statePath = fileURLToPath(new URL("../.wrangler/storagekit-persistence-smoke", import.meta.url));
+const statePath = fileURLToPath(new URL(`../.wrangler/storagekit-persistence-smoke-${process.pid}-${Date.now()}`, import.meta.url));
 const accessToken = "local-storage-kit-persistence-token";
+const checkpointProbe = process.env.STORAGEKIT_CHECKPOINT_PROBE ?? null;
 const token = randomBytes(16);
 const testPartitionIdentity = {
   databaseID: `storagekit-local-persistence-${process.pid}-${Date.now()}`,
@@ -35,12 +37,14 @@ try {
   worker = startWorker();
   await waitForWorker(worker);
   await writeToken();
+  await runCheckpointProbe("write");
   await stopWorker(worker);
   worker = null;
 
   worker = startWorker();
   await waitForWorker(worker);
   await readToken();
+  await runCheckpointProbe("read");
   console.log("Cloudflare Durable Object Storage local persistence smoke passed");
 } finally {
   if (worker !== null) {
@@ -115,6 +119,34 @@ async function readToken() {
     expectedReadVersion: null,
   }));
   assert.deepEqual([...response.value], [...token]);
+}
+
+async function runCheckpointProbe(stage) {
+  if (checkpointProbe === null) {
+    return;
+  }
+  assert.equal(isAbsolute(checkpointProbe), true,
+    "STORAGEKIT_CHECKPOINT_PROBE must be an absolute executable path");
+  assert.equal(existsSync(checkpointProbe), true,
+    "STORAGEKIT_CHECKPOINT_PROBE must name an existing executable");
+  const child = spawn(checkpointProbe,
+    [stage, endpoint, `${testPartitionIdentity.databaseID}-checkpoint`], {
+      cwd: packageDirectory,
+      env: {
+        ...process.env,
+        STORAGEKIT_CHECKPOINT_PROBE_TOKEN: accessToken,
+        STORAGEKIT_CHECKPOINT_PROBE_TENANT_ID: testPartitionIdentity.tenantID,
+        STORAGEKIT_CHECKPOINT_PROBE_WORKSPACE_ID: testPartitionIdentity.workspaceID,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60_000,
+      killSignal: "SIGTERM",
+    });
+  child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+  child.stderr.on("data", (chunk) => process.stderr.write(chunk));
+  const [code, signal] = await once(child, "exit");
+  assert.equal(signal, null, `Checkpoint probe ${stage} terminated by ${signal}`);
+  assert.equal(code, 0, `Checkpoint probe ${stage} failed with exit code ${code}`);
 }
 
 async function send(request) {

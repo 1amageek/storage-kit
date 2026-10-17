@@ -4,6 +4,7 @@
 /// must only be `true` when the corresponding operation has complete backend
 /// semantics; accepting a call without enforcing it is not support.
 public struct TransactionCapabilities: Sendable, Hashable {
+    public let transactionCheckpoints: Bool
     public let transactionTimeout: Bool
     public let schedulingPriority: Bool
     public let readPriority: Bool
@@ -17,6 +18,7 @@ public struct TransactionCapabilities: Sendable, Hashable {
     public let versionstampedMutations: Bool
 
     public init(
+        transactionCheckpoints: Bool = false,
         transactionTimeout: Bool = false,
         schedulingPriority: Bool = false,
         readPriority: Bool = false,
@@ -29,6 +31,7 @@ public struct TransactionCapabilities: Sendable, Hashable {
         committedVersionstamp: Bool = false,
         versionstampedMutations: Bool = false
     ) {
+        self.transactionCheckpoints = transactionCheckpoints
         self.transactionTimeout = transactionTimeout
         self.schedulingPriority = schedulingPriority
         self.readPriority = readPriority

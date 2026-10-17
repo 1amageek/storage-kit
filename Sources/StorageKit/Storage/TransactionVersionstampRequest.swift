@@ -18,7 +18,7 @@ public struct TransactionVersionstampRequest:
     }
 
     package init(
-        failure: StorageError
+        failure: any Error
     ) {
         self.source = .completion(
             TransactionVersionstampCompletion(failure: failure)

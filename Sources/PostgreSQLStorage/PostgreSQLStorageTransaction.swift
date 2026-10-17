@@ -41,6 +41,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     public typealias RangeResult = PostgreSQLRangeResult
 
     public static let declaredCapabilities = TransactionCapabilities(
+            transactionCheckpoints: true,
             readVersion: true,
             committedVersion: true,
             committedVersionstamp: true
@@ -54,7 +55,9 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     public var storageFailure: StorageError? {
         state.withLock { state in
             switch state.lifecycle {
-            case .failed(let error, _), .commitUnknown(let error):
+            case .failed(let error, _):
+                return error as? StorageError
+            case .commitUnknown(let error):
                 return error
             case .open, .committing, .committed, .cancelling, .cancelled:
                 return nil
@@ -76,7 +79,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     /// BEGIN statement issued after lazy acquisition (set only for the lazy path).
     private let beginStatement: String?
 
-    private let state: Mutex<MutableState>
+    private let state: NativeState
+    private let connectionOwner: ConnectionOwner
+    private let checkpointState = Mutex(CheckpointState())
+    private let checkpointIsolationAllowed: Bool
     private let mutationByteMeter: TransactionMutationByteMeter
     private let versionstampCompletion: TransactionVersionstampCompletion
     private let resultBytesFactory: PostgreSQLResultBytesFactory
@@ -85,17 +91,17 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     /// parameters, so 1000 rows stays well under PostgreSQL's 65535 limit.
     static let maxBindRows = 1000
 
-    private enum Lifecycle: Sendable {
+    fileprivate enum Lifecycle: Sendable {
         case open
         case committing(TransactionOperationCompletion)
         case committed
         case cancelling(TransactionOperationCompletion)
         case cancelled
-        case failed(StorageError, cleanupRequired: Bool)
+        case failed(any Error, cleanupRequired: Bool)
         case commitUnknown(StorageError)
     }
 
-    private struct MutableState {
+    fileprivate struct MutableState {
         var writeBuffer: [WriteOp] = []
         var lifecycle: Lifecycle = .open
         var connection: PostgresConnection? = nil
@@ -109,14 +115,14 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    private enum WriteOp: Sendable {
+    fileprivate enum WriteOp: Sendable {
         case set(key: ByteString, value: ByteString)
         case clear(key: ByteString)
         case clearRange(begin: ByteString, end: ByteString)
         case atomic(key: ByteString, param: ByteString, mutationType: MutationType)
     }
 
-    private enum ConnectionOutcome {
+    fileprivate enum ConnectionOutcome {
         case existing(PostgresConnection)
         case pending(Task<PostgresConnection, any Error>)
     }
@@ -127,7 +133,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         case waitForCancellation(TransactionOperationCompletion)
         case committed
         case cancelled
-        case failed(StorageError)
+        case failed(any Error)
     }
 
     // MARK: - Initializers
@@ -138,7 +144,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         tableName: String,
         logger: Logger,
         transactionDomain: StorageTransactionDomain,
-        resultBytesFactory: PostgreSQLResultBytesFactory = .production
+        resultBytesFactory: PostgreSQLResultBytesFactory = .production,
+        checkpointIsolationAllowed: Bool = true
     ) {
         self.isNested = false
         self.tableName = tableName
@@ -148,9 +155,16 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         self.client = nil
         self.beginStatement = nil
         self.transactionDomain = transactionDomain
-        self.state = Mutex(MutableState(connection: connection))
+        let state = NativeState(connection: connection)
+        let completion = TransactionVersionstampCompletion()
+        self.state = state
         self.mutationByteMeter = TransactionMutationByteMeter()
-        self.versionstampCompletion = TransactionVersionstampCompletion()
+        self.versionstampCompletion = completion
+        self.connectionOwner = ConnectionOwner(
+            state: state, client: nil, beginStatement: nil,
+            logger: logger, versionstampCompletion: completion
+        )
+        self.checkpointIsolationAllowed = checkpointIsolationAllowed
         self.resultBytesFactory = resultBytesFactory
     }
 
@@ -168,9 +182,11 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         self.client = nil
         self.beginStatement = nil
         self.transactionDomain = parent.transactionDomain
-        self.state = Mutex(MutableState())
+        self.state = NativeState()
         self.mutationByteMeter = parent.mutationByteMeter
         self.versionstampCompletion = parent.versionstampCompletion
+        self.connectionOwner = parent.connectionOwner
+        self.checkpointIsolationAllowed = false
         self.resultBytesFactory = parent.resultBytesFactory
     }
 
@@ -181,7 +197,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         tableName: String,
         logger: Logger,
         transactionDomain: StorageTransactionDomain,
-        resultBytesFactory: PostgreSQLResultBytesFactory = .production
+        resultBytesFactory: PostgreSQLResultBytesFactory = .production,
+        checkpointIsolationAllowed: Bool = true
     ) {
         self.isNested = false
         self.tableName = tableName
@@ -191,15 +208,474 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         self.client = client
         self.beginStatement = beginStatement
         self.transactionDomain = transactionDomain
-        self.state = Mutex(MutableState())
+        let state = NativeState()
+        let completion = TransactionVersionstampCompletion()
+        self.state = state
         self.mutationByteMeter = TransactionMutationByteMeter()
-        self.versionstampCompletion = TransactionVersionstampCompletion()
+        self.versionstampCompletion = completion
+        self.connectionOwner = ConnectionOwner(
+            state: state, client: client, beginStatement: beginStatement,
+            logger: logger, versionstampCompletion: completion
+        )
+        self.checkpointIsolationAllowed = checkpointIsolationAllowed
         self.resultBytesFactory = resultBytesFactory
+    }
+
+    private struct CheckpointState {
+        var journal: TransactionJournal?
+        var accessStarted = false
+    }
+
+    public var checkpoints: (any TransactionCheckpointAccess)? {
+        checkpointState.withLock { $0.journal }
+    }
+
+    public func configureCheckpoints(limits: TransactionCheckpointLimits) throws {
+        try checkpointState.withLock { checkpoint in
+            try state.withLock { try Self.validateOpen($0.lifecycle, operation: .beginTransaction) }
+            guard checkpointIsolationAllowed, !isNested else {
+                throw StorageError.unsupportedOperation(
+                    "PostgreSQL checkpoints require a root transaction configured with SERIALIZABLE isolation",
+                    operation: .beginTransaction, backend: .postgreSQL
+                )
+            }
+            guard !checkpoint.accessStarted, checkpoint.journal == nil else {
+                throw TransactionCheckpointError.configurationAfterAdmission
+            }
+            checkpoint.journal = TransactionJournal(
+                limits: limits, backend: .postgreSQL, mutationByteMeter: mutationByteMeter
+            )
+        }
+    }
+
+    func requireNativeChildAdmission() throws {
+        try checkpointState.withLock { checkpoint in
+            guard checkpoint.journal == nil else {
+                throw StorageError.unsupportedOperation(
+                    "PostgreSQL checkpoint transactions cannot create native children",
+                    operation: .beginTransaction, backend: .postgreSQL
+                )
+            }
+            checkpoint.accessStarted = true
+        }
+    }
+
+    public func performOperation(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        if let journal = try admittedJournal() {
+            try await journal.performOperation(operation)
+        } else {
+            try await operation()
+        }
+    }
+
+    private func admittedJournal() throws -> TransactionJournal? {
+        let journal = noteAdmission()
+        if journal != nil {
+            try state.withLock { state in
+                switch state.lifecycle {
+                case .failed(let error, _): throw error
+                case .commitUnknown(let error): throw error
+                default: break
+                }
+            }
+        }
+        return journal
+    }
+
+    private func noteAdmission() -> TransactionJournal? {
+        checkpointState.withLock { checkpoint in
+            checkpoint.accessStarted = true
+            return checkpoint.journal
+        }
+    }
+
+    private var journalBackend: JournalBackend {
+        JournalBackend(
+            connectionOwner: connectionOwner, tableName: tableName,
+            logger: logger, resultBytesFactory: resultBytesFactory
+        )
     }
 
     public func configureMutationByteLimit(maximumBytes: Int?) throws {
         try mutationByteMeter.configure(maximumBytes: maximumBytes)
     }
+
+    fileprivate final class NativeState: Sendable {
+        private let value: Mutex<MutableState>
+
+        init(connection: PostgresConnection? = nil) {
+            value = Mutex(MutableState(connection: connection))
+        }
+
+        func withLock<Result>(
+            _ body: (inout sending MutableState) throws -> sending Result
+        ) rethrows -> sending Result {
+            try value.withLock(body)
+        }
+    }
+
+    fileprivate final class ConnectionOwner: Sendable {
+        let state: NativeState
+        let client: PostgresClient?
+        let beginStatement: String?
+        let logger: Logger
+        let versionstampCompletion: TransactionVersionstampCompletion
+
+        init(
+            state: NativeState, client: PostgresClient?, beginStatement: String?,
+            logger: Logger, versionstampCompletion: TransactionVersionstampCompletion
+        ) {
+            self.state = state
+            self.client = client
+            self.beginStatement = beginStatement
+            self.logger = logger
+            self.versionstampCompletion = versionstampCompletion
+        }
+
+        func ensureConnection(allowCancelling: Bool = false) async throws -> PostgresConnection {
+            try state.withLock { state in
+                switch state.lifecycle {
+                case .open, .committing:
+                    break
+                case .cancelling where allowCancelling:
+                    break
+                default:
+                    throw PostgreSQLStorageTransaction.error(for: state.lifecycle, operation: .beginTransaction)
+                }
+            }
+
+            let outcome: ConnectionOutcome = try state.withLock { state in
+                switch state.lifecycle {
+                case .open, .committing:
+                    break
+                case .cancelling where allowCancelling:
+                    break
+                default:
+                    throw PostgreSQLStorageTransaction.error(for: state.lifecycle, operation: .beginTransaction)
+                }
+                if let connection = state.connection {
+                    return .existing(connection)
+                }
+                if let task = state.acquireTask {
+                    return .pending(task)
+                }
+                guard let client else {
+                    throw StorageError.invalidOperation(
+                        "No connection available and no client for lazy acquisition"
+                    )
+                }
+                let beginStatement = self.beginStatement
+                let task = Task {
+                    try await self.acquireAndBegin(client: client, beginStatement: beginStatement, allowCancelling: allowCancelling)
+                }
+                state.acquireTask = task
+                return .pending(task)
+            }
+
+            switch outcome {
+            case .existing(let connection):
+                return connection
+            case .pending(let task):
+                return try await task.value
+            }
+        }
+
+        /// Acquire a connection from the pool, issue BEGIN, and publish it.
+        private func acquireAndBegin(
+            client: PostgresClient,
+            beginStatement: String?,
+            allowCancelling: Bool
+        ) async throws -> PostgresConnection {
+            // The acquisition Task captures self; clearing the stored reference on
+            // every exit breaks the self -> state -> acquireTask -> self retain cycle.
+            defer { state.withLock { $0.acquireTask = nil } }
+
+            let connection: PostgresConnection
+            do {
+                connection = try await park(client: client)
+            } catch {
+                throw markFailed(error, operation: .beginTransaction)
+            }
+
+            // Cancelled while parking? No BEGIN ran yet — release and abort.
+            let parkingError = state.withLock { state -> (any Error)? in
+                switch state.lifecycle {
+                case .open, .committing:
+                    return nil
+                case .cancelling where allowCancelling:
+                    return nil
+                default:
+                    return PostgreSQLStorageTransaction.error(for: state.lifecycle, operation: .beginTransaction)
+                }
+            }
+            if let parkingError {
+                releaseConnection()
+                throw parkingError
+            }
+
+            if let beginStatement {
+                do {
+                    try await connection.query(PostgresQuery(unsafeSQL: beginStatement), logger: logger)
+                } catch {
+                    releaseConnection()
+                    throw markFailed(error, operation: .beginTransaction)
+                }
+            }
+
+            // Publish the connection unless a concurrent cancel() beat us to it.
+            let publishError = state.withLock { state -> (any Error)? in
+                switch state.lifecycle {
+                case .open, .committing:
+                    break
+                case .cancelling where allowCancelling:
+                    break
+                default:
+                    return PostgreSQLStorageTransaction.error(for: state.lifecycle, operation: .beginTransaction)
+                }
+                state.connection = connection
+                return nil
+            }
+            if let publishError {
+                if beginStatement != nil {
+                    let rollbackResult = await rollback(
+                        connection: connection,
+                        reason: "cancelled during acquire"
+                    )
+                    if case .failure(let rollbackError) = rollbackResult {
+                        releaseConnection()
+                        if let original = publishError as? StorageError {
+                            throw combinedRollbackError(originalError: original, rollbackError: rollbackError)
+                        }
+                        throw StorageTransactionCleanupError(operationError: publishError, cancellationError: rollbackError)
+                    }
+                }
+                releaseConnection()
+                throw publishError
+            }
+            return connection
+        }
+
+        /// Lease a connection and keep it parked until `releaseConnection()` runs.
+        ///
+        /// The holder task retains this native owner while a connection is leased. If the caller never calls `commit()`/`cancel()`
+        /// the connection leaks — that is a documented caller-contract violation.
+        private func park(client: PostgresClient) async throws -> PostgresConnection {
+            try await withCheckedThrowingContinuation { (handoff: CheckedContinuation<PostgresConnection, any Error>) in
+                let didResume = Mutex(false)
+
+                func shouldResumeHandoff() -> Bool {
+                    didResume.withLock { didResume in
+                        guard !didResume else { return false }
+                        didResume = true
+                        return true
+                    }
+                }
+
+                func resumeHandoff(returning connection: PostgresConnection) {
+                    guard shouldResumeHandoff() else { return }
+                    handoff.resume(returning: connection)
+                }
+
+                func resumeHandoff(throwing error: any Error) {
+                    guard shouldResumeHandoff() else { return }
+                    handoff.resume(throwing: error)
+                }
+
+                Task { [self] in
+                    do {
+                        try await client.withConnection { connection in
+                            await withCheckedContinuation { (release: CheckedContinuation<Void, Never>) in
+                                // Assign the release continuation BEFORE resuming the
+                                // handoff so releaseConnection() can never miss it.
+                                state.withLock { $0.releaseContinuation = release }
+                                resumeHandoff(returning: connection)
+                            }
+                        }
+                    } catch {
+                        resumeHandoff(throwing: error)
+                    }
+                }
+            }
+        }
+
+        /// Resume the parked holder task, returning the connection to the pool.
+        /// Idempotent: clears both the continuation and the published connection.
+        func releaseConnection() {
+            let continuation = state.withLock { state -> CheckedContinuation<Void, Never>? in
+                let continuation = state.releaseContinuation
+                state.releaseContinuation = nil
+                state.connection = nil
+                return continuation
+            }
+            continuation?.resume()
+        }
+
+
+        func markFailed(_ error: any Error, operation: StorageOperation) -> any Error {
+            let mapped = error is CancellationError
+                ? PostgreSQLStorageTransaction.invalidOperation(
+                    "PostgreSQL transaction operation was cancelled", operation: operation
+                )
+                : PostgreSQLStorageEngine.mapError(error, operation: operation)
+            state.withLock { state in
+                if case .open = state.lifecycle {
+                    state.lifecycle = .failed(
+                        mapped, cleanupRequired: state.connection != nil || state.acquireTask != nil
+                    )
+                    state.writeBuffer.removeAll(keepingCapacity: false)
+                }
+            }
+            versionstampCompletion.fail(mapped)
+            return error is CancellationError ? error : mapped
+        }
+
+        private func rollback(connection: PostgresConnection, reason: String) async -> Result<Void, StorageError> {
+            do {
+                try await connection.query(PostgresQuery(unsafeSQL: "ROLLBACK"), logger: logger)
+                return .success(())
+            } catch {
+                return .failure(PostgreSQLStorageEngine.mapError(error, operation: .rollback))
+            }
+        }
+
+        private func combinedRollbackError(originalError: StorageError, rollbackError: StorageError) -> StorageError {
+            StorageError(
+                code: .backendFailure, operation: .rollback, backend: .postgreSQL,
+                message: "PostgreSQL operation failed and rollback also failed",
+                underlyingDescription: "operation=\(originalError); rollback=\(rollbackError)"
+            )
+        }
+    }
+
+    struct JournalBackend: TransactionJournalBackendAccess {
+        fileprivate let connectionOwner: ConnectionOwner
+        let tableName: String
+        let logger: Logger
+        let resultBytesFactory: PostgreSQLResultBytesFactory
+
+        func getValue(
+            for key: ByteString, snapshot: Bool, maximumByteCount: Int
+        ) async throws -> ByteString? {
+            do {
+                let connection = try await connectionOwner.ensureConnection(allowCancelling: true)
+                var bindings = PostgresBindings()
+                bindings.append(PostgreSQLBindingBytes.copyToOwnedBuffer(key), context: .default)
+                let rows = try await connection.query(
+                    PostgresQuery(unsafeSQL: "SELECT value FROM \(tableName) WHERE key = $1", binds: bindings),
+                    logger: logger
+                )
+                for try await value in rows.decode(ByteBuffer.self) {
+                    guard value.readableBytes <= maximumByteCount else {
+                        throw StorageError.pointReadValueTooLarge(
+                            observedByteCount: value.readableBytes,
+                            maximumByteCount: maximumByteCount, backend: .postgreSQL
+                        )
+                    }
+                    return resultBytesFactory.makeByteString(retaining: value)
+                }
+                return nil
+            } catch {
+                if let storage = error as? StorageError, storage.isPointReadValueTooLarge { throw storage }
+                throw connectionOwner.markFailed(error, operation: .read)
+            }
+        }
+
+        func rangeCursor(
+            in range: TransactionJournalRange, reverse: Bool, snapshot: Bool,
+            pageSize: Int, maximumByteCount: Int
+        ) -> KeyValueCursor {
+            KeyValueCursor(consuming: PostgreSQLRangeResult(
+                backend: self,
+                plan: RangeScanPlan(
+                    begin: Self.boundary(range.lower, lower: true),
+                    end: Self.boundary(range.upper, lower: false),
+                    limit: 0, reverse: reverse, batchSize: pageSize,
+                    tableName: tableName, maximumByteCount: maximumByteCount
+                )
+            ))
+        }
+
+        private static func boundary(
+            _ boundary: TransactionJournalBoundary, lower: Bool
+        ) -> SQLRangeBoundary? {
+            switch boundary {
+            case .unbounded: nil
+            case .inclusive(let key): .direct(op: lower ? ">=" : "<=", key: key)
+            case .exclusive(let key): .direct(op: lower ? ">" : "<", key: key)
+            }
+        }
+
+        func fetchRangeBatch(
+            plan: RangeScanPlan, after lastKey: ByteString?, remaining: Int
+        ) async throws -> [(ByteString, ByteString)] {
+            do {
+                let connection = try await connectionOwner.ensureConnection(allowCancelling: true)
+                let batchLimit = plan.limit > 0 ? min(plan.batchSize, remaining) : plan.batchSize
+                guard batchLimit > 0 else { return [] }
+
+                var bindValues: [ByteString] = []
+                func placeholder(for key: ByteString) -> String {
+                    bindValues.append(key)
+                    return "$\(bindValues.count)"
+                }
+
+                var clauses: [String] = []
+                if let begin = plan.begin {
+                    clauses.append(PostgreSQLStorageTransaction.boundaryClause(begin, tableName: plan.tableName, placeholder: placeholder))
+                }
+                if let end = plan.end {
+                    clauses.append(PostgreSQLStorageTransaction.boundaryClause(end, tableName: plan.tableName, placeholder: placeholder))
+                }
+                if clauses.isEmpty { clauses.append("TRUE") }
+                if let lastKey {
+                    // Keyset pagination: advance strictly past the last emitted key.
+                    let op = plan.reverse ? "<" : ">"
+                    clauses.append("key \(op) \(placeholder(for: lastKey))")
+                }
+                let order = plan.reverse ? "DESC" : "ASC"
+                let sql = "SELECT key, value FROM \(plan.tableName) WHERE "
+                    + clauses.joined(separator: " AND ")
+                    + " ORDER BY key \(order) LIMIT \(batchLimit)"
+
+                var bindings = PostgresBindings()
+                for value in bindValues {
+                    bindings.append(
+                        PostgreSQLBindingBytes.copyToOwnedBuffer(value),
+                        context: .default
+                    )
+                }
+                let rows = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
+                var results: [(ByteString, ByteString)] = []
+                var transferredBytes = 0
+                for try await (keyBuffer, valueBuffer) in rows.decode((ByteBuffer, ByteBuffer).self) {
+                    if let maximum = plan.maximumByteCount {
+                        let (rowBytes, rowOverflow) = keyBuffer.readableBytes.addingReportingOverflow(valueBuffer.readableBytes)
+                        let (total, totalOverflow) = transferredBytes.addingReportingOverflow(rowBytes)
+                        guard !rowOverflow, !totalOverflow, total <= maximum else {
+                            throw StorageError(
+                                code: .resourceUnavailable, operation: .rangeRead, backend: .postgreSQL,
+                                message: "PostgreSQL journal page exceeds the transfer byte limit"
+                            )
+                        }
+                        transferredBytes = total
+                    }
+                    results.append(
+                        (
+                            resultBytesFactory.makeByteString(retaining: keyBuffer),
+                            resultBytesFactory.makeByteString(retaining: valueBuffer)
+                        )
+                    )
+                }
+                return results
+            } catch {
+                if let storage = error as? StorageError, storage.code == .resourceUnavailable { throw storage }
+                throw connectionOwner.markFailed(error, operation: .rangeRead)
+            }
+        }
+    }
+
 
     // MARK: - Connection Acquisition
 
@@ -211,175 +687,16 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     private func ensureConnection() async throws -> PostgresConnection {
         try state.withLock { state in
             switch state.lifecycle {
-            case .open, .committing:
-                break
-            default:
-                throw Self.error(for: state.lifecycle, operation: .beginTransaction)
+            case .open, .committing: break
+            default: throw Self.error(for: state.lifecycle, operation: .beginTransaction)
             }
         }
-
-        if let parent {
-            return try await parent.ensureConnection()
-        }
-
-        let outcome: ConnectionOutcome = try state.withLock { state in
-            switch state.lifecycle {
-            case .open, .committing:
-                break
-            default:
-                throw Self.error(for: state.lifecycle, operation: .beginTransaction)
-            }
-            if let connection = state.connection {
-                return .existing(connection)
-            }
-            if let task = state.acquireTask {
-                return .pending(task)
-            }
-            guard let client else {
-                throw StorageError.invalidOperation(
-                    "No connection available and no client for lazy acquisition"
-                )
-            }
-            let beginStatement = self.beginStatement
-            let task = Task {
-                try await self.acquireAndBegin(client: client, beginStatement: beginStatement)
-            }
-            state.acquireTask = task
-            return .pending(task)
-        }
-
-        switch outcome {
-        case .existing(let connection):
-            return connection
-        case .pending(let task):
-            return try await task.value
-        }
+        if let parent { return try await parent.ensureConnection() }
+        return try await connectionOwner.ensureConnection()
     }
 
-    /// Acquire a connection from the pool, issue BEGIN, and publish it.
-    private func acquireAndBegin(
-        client: PostgresClient,
-        beginStatement: String?
-    ) async throws -> PostgresConnection {
-        // The acquisition Task captures self; clearing the stored reference on
-        // every exit breaks the self -> state -> acquireTask -> self retain cycle.
-        defer { state.withLock { $0.acquireTask = nil } }
-
-        let connection: PostgresConnection
-        do {
-            connection = try await park(client: client)
-        } catch {
-            throw markFailed(error, operation: .beginTransaction)
-        }
-
-        // Cancelled while parking? No BEGIN ran yet — release and abort.
-        let parkingError = state.withLock { state -> StorageError? in
-            switch state.lifecycle {
-            case .open, .committing:
-                return nil
-            default:
-                return Self.error(for: state.lifecycle, operation: .beginTransaction)
-            }
-        }
-        if let parkingError {
-            releaseConnection()
-            throw parkingError
-        }
-
-        if let beginStatement {
-            do {
-                try await connection.query(PostgresQuery(unsafeSQL: beginStatement), logger: logger)
-            } catch {
-                releaseConnection()
-                throw markFailed(error, operation: .beginTransaction)
-            }
-        }
-
-        // Publish the connection unless a concurrent cancel() beat us to it.
-        let publishError = state.withLock { state -> StorageError? in
-            switch state.lifecycle {
-            case .open, .committing:
-                break
-            default:
-                return Self.error(for: state.lifecycle, operation: .beginTransaction)
-            }
-            state.connection = connection
-            return nil
-        }
-        if let publishError {
-            if beginStatement != nil {
-                let rollbackResult = await rollback(
-                    connection: connection,
-                    reason: "cancelled during acquire"
-                )
-                if case .failure(let rollbackError) = rollbackResult {
-                    releaseConnection()
-                    throw combinedRollbackError(
-                        originalError: publishError,
-                        rollbackError: rollbackError
-                    )
-                }
-            }
-            releaseConnection()
-            throw publishError
-        }
-        return connection
-    }
-
-    /// Lease a connection and keep it parked until `releaseConnection()` runs.
-    ///
-    /// The holder task captures self strongly so the transaction cannot deinit
-    /// while a connection is leased. If the caller never calls `commit()`/`cancel()`
-    /// the connection leaks — that is a documented caller-contract violation.
-    private func park(client: PostgresClient) async throws -> PostgresConnection {
-        try await withCheckedThrowingContinuation { (handoff: CheckedContinuation<PostgresConnection, any Error>) in
-            let didResume = Mutex(false)
-
-            func shouldResumeHandoff() -> Bool {
-                didResume.withLock { didResume in
-                    guard !didResume else { return false }
-                    didResume = true
-                    return true
-                }
-            }
-
-            func resumeHandoff(returning connection: PostgresConnection) {
-                guard shouldResumeHandoff() else { return }
-                handoff.resume(returning: connection)
-            }
-
-            func resumeHandoff(throwing error: any Error) {
-                guard shouldResumeHandoff() else { return }
-                handoff.resume(throwing: error)
-            }
-
-            Task { [self] in
-                do {
-                    try await client.withConnection { connection in
-                        await withCheckedContinuation { (release: CheckedContinuation<Void, Never>) in
-                            // Assign the release continuation BEFORE resuming the
-                            // handoff so releaseConnection() can never miss it.
-                            state.withLock { $0.releaseContinuation = release }
-                            resumeHandoff(returning: connection)
-                        }
-                    }
-                } catch {
-                    resumeHandoff(throwing: error)
-                }
-            }
-        }
-    }
-
-    /// Resume the parked holder task, returning the connection to the pool.
-    /// Idempotent: clears both the continuation and the published connection.
     private func releaseConnection() {
-        let continuation = state.withLock { state -> CheckedContinuation<Void, Never>? in
-            let continuation = state.releaseContinuation
-            state.releaseContinuation = nil
-            state.connection = nil
-            return continuation
-        }
-        continuation?.resume()
+        connectionOwner.releaseConnection()
     }
 
     /// Append writes transferred from a nested child into this buffer.
@@ -405,7 +722,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         )
     }
 
-    private static func error(for lifecycle: Lifecycle, operation: StorageOperation) -> StorageError {
+    private static func error(for lifecycle: Lifecycle, operation: StorageOperation) -> any Error {
         switch lifecycle {
         case .open:
             return invalidOperation("Transaction is open", operation: operation)
@@ -417,8 +734,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             return invalidOperation("Transaction is cancelling", operation: operation)
         case .cancelled:
             return invalidOperation("Transaction is cancelled", operation: operation)
-        case .failed(let error, _), .commitUnknown(let error):
-            return error
+        case .failed(let error, _): return error
+        case .commitUnknown(let error): return error
         }
     }
 
@@ -555,6 +872,12 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         snapshot: Bool,
         maximumByteCount: Int?
     ) async throws -> ByteString? {
+        if let journal = try admittedJournal() {
+            return try await journal.getValue(
+                for: key, snapshot: snapshot, maximumByteCount: maximumByteCount,
+                using: journalBackend
+            )
+        }
         let writeBuffer = try state.withLock { state in
             switch state.lifecycle {
             case .open:
@@ -694,7 +1017,16 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         snapshot: Bool,
         streamingMode: StreamingMode
     ) -> PostgreSQLRangeResult {
-        let stateError = state.withLock { state -> StorageError? in
+        let admitted: TransactionJournal?
+        do { admitted = try admittedJournal() }
+        catch { return PostgreSQLRangeResult(error: error) }
+        if let journal = admitted {
+            return PostgreSQLRangeResult(cursor: journal.rangeCursor(
+                from: begin, to: end, limit: limit, reverse: reverse,
+                snapshot: snapshot, streamingMode: streamingMode, using: journalBackend
+            ))
+        }
+        let stateError = state.withLock { state -> (any Error)? in
             switch state.lifecycle {
             case .open:
                 return nil
@@ -774,46 +1106,9 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             if flushFirst {
                 try await flushWriteBuffer(connection: connection)
             }
-            let batchLimit = plan.limit > 0 ? min(plan.batchSize, remaining) : plan.batchSize
-            guard batchLimit > 0 else { return [] }
-
-            var bindValues: [ByteString] = []
-            func placeholder(for key: ByteString) -> String {
-                bindValues.append(key)
-                return "$\(bindValues.count)"
-            }
-
-            var clauses: [String] = []
-            clauses.append(Self.boundaryClause(plan.begin, tableName: plan.tableName, placeholder: placeholder))
-            clauses.append(Self.boundaryClause(plan.end, tableName: plan.tableName, placeholder: placeholder))
-            if let lastKey {
-                // Keyset pagination: advance strictly past the last emitted key.
-                let op = plan.reverse ? "<" : ">"
-                clauses.append("key \(op) \(placeholder(for: lastKey))")
-            }
-            let order = plan.reverse ? "DESC" : "ASC"
-            let sql = "SELECT key, value FROM \(plan.tableName) WHERE "
-                + clauses.joined(separator: " AND ")
-                + " ORDER BY key \(order) LIMIT \(batchLimit)"
-
-            var bindings = PostgresBindings()
-            for value in bindValues {
-                bindings.append(
-                    PostgreSQLBindingBytes.copyToOwnedBuffer(value),
-                    context: .default
-                )
-            }
-            let rows = try await connection.query(PostgresQuery(unsafeSQL: sql, binds: bindings), logger: logger)
-            var results: [(ByteString, ByteString)] = []
-            for try await (keyBuffer, valueBuffer) in rows.decode((ByteBuffer, ByteBuffer).self) {
-                results.append(
-                    (
-                        resultBytesFactory.makeByteString(retaining: keyBuffer),
-                        resultBytesFactory.makeByteString(retaining: valueBuffer)
-                    )
-                )
-            }
-            return results
+            return try await journalBackend.fetchRangeBatch(
+                plan: plan, after: lastKey, remaining: remaining
+            )
         } catch {
             throw markFailed(error, operation: .rangeRead)
         }
@@ -826,6 +1121,9 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         _ selector: KeySelector,
         snapshot: Bool
     ) async throws -> ByteString? {
+        if let journal = try admittedJournal() {
+            return try await journal.getKey(selector: selector, snapshot: snapshot, using: journalBackend)
+        }
         let nestedWriteCount = try state.withLock { state -> Int in
             switch state.lifecycle {
             case .open:
@@ -919,6 +1217,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     // MARK: - Write
 
     public func setValue(_ value: ByteString, for key: ByteString) throws {
+        if let journal = try admittedJournal() {
+            try journal.append(.set(key: key, value: value, suppressWriteConflict: false))
+            return
+        }
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .write)
             try mutationByteMeter.recordSet(
@@ -930,6 +1232,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     public func clear(key: ByteString) throws {
+        if let journal = try admittedJournal() {
+            try journal.append(.clear(key: key, suppressWriteConflict: false))
+            return
+        }
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .delete)
             try mutationByteMeter.recordClear(key: key)
@@ -938,6 +1244,10 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     public func clearRange(beginKey: ByteString, endKey: ByteString) throws {
+        if let journal = try admittedJournal() {
+            try journal.append(.clearRange(begin: beginKey, end: endKey, suppressWriteConflict: false))
+            return
+        }
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .deleteRange)
             try mutationByteMeter.recordClearRange(
@@ -953,6 +1263,12 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         param: ByteString,
         mutationType: MutationType
     ) throws {
+        if let journal = try admittedJournal() {
+            try journal.append(.atomic(
+                key: key, parameter: param, type: mutationType, suppressWriteConflict: false
+            ))
+            return
+        }
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .write)
             try mutationByteMeter.recordAtomic(
@@ -1008,6 +1324,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     private func cancelWithoutReleasingContextLease() async throws {
+        _ = noteAdmission()
         enum Start {
             case leader(TransactionOperationCompletion)
             case waitForCancellation(TransactionOperationCompletion)
@@ -1062,7 +1379,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             do {
                 try await completion.wait()
             } catch {
-                if error.code == .commitUnknownResult {
+                if let error = error as? StorageError, error.code == .commitUnknownResult {
                     throw error
                 }
                 return
@@ -1095,9 +1412,17 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     public func getReadVersion() async throws -> Int64 {
-        try state.withLock { state in
-            try Self.validateOpen(state.lifecycle, operation: .read)
+        if try admittedJournal() != nil {
+            return try await TransactionOperationExecutor(access: self).withOperation { [self] in
+                do {
+                    let connection = try await connectionOwner.ensureConnection(allowCancelling: true)
+                    return try await transactionVersion(connection: connection, allowCancelling: true)
+                } catch {
+                    throw markFailed(error, operation: .read)
+                }
+            }
         }
+        try state.withLock { try Self.validateOpen($0.lifecycle, operation: .read) }
         do {
             let connection = try await ensureConnection()
             return try await transactionVersion(connection: connection)
@@ -1117,7 +1442,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     public func requestVersionstamp() -> any PendingTransactionVersionstamp {
-        let failure = state.withLock { state -> StorageError? in
+        _ = noteAdmission()
+        let failure = state.withLock { state -> (any Error)? in
             guard case .open = state.lifecycle else {
                 return Self.error(for: state.lifecycle, operation: .read)
             }
@@ -1132,7 +1458,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     private func transactionVersion(
-        connection: PostgresConnection
+        connection: PostgresConnection,
+        allowCancelling: Bool = false
     ) async throws -> Int64 {
         if let cached = state.withLock({ $0.readVersion }) {
             return cached
@@ -1165,6 +1492,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
             switch state.lifecycle {
             case .open, .committing:
                 state.readVersion = version
+            case .cancelling where allowCancelling:
+                state.readVersion = version
             default:
                 throw Self.error(for: state.lifecycle, operation: .read)
             }
@@ -1173,7 +1502,8 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
     }
 
     private func beginCommit() -> CommitStart {
-        state.withLock { state in
+        _ = noteAdmission()
+        return state.withLock { state in
             switch state.lifecycle {
             case .open:
                 let completion = TransactionOperationCompletion()
@@ -1187,13 +1517,73 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 return .waitForCancellation(completion)
             case .cancelled:
                 return .cancelled
-            case .failed(let error, _), .commitUnknown(let error):
-                return .failed(error)
+            case .failed(let error, _): return .failed(error)
+            case .commitUnknown(let error): return .failed(error)
             }
         }
     }
 
-    private func performCommit() async -> Result<Void, StorageError> {
+    private func performCommit() async -> Result<Void, any Error> {
+        guard let journal = checkpointState.withLock({ $0.journal }) else {
+            return await performNativeCommit().mapError { $0 as any Error }
+        }
+        do {
+            let writes = try await journal.sealForCommit().map(Self.nativeMutation)
+            state.withLock { $0.writeBuffer = writes }
+        } catch {
+            var failure: any Error = error
+            do { try await journal.close(committed: false) }
+            catch {
+                failure = StorageTransactionCleanupError(operationError: failure, cancellationError: error)
+            }
+            let cleanup = await performNativeCancellation(resolveVersionstamp: false)
+            if case .failure(let cleanupError) = cleanup {
+                if let combined = failure as? StorageTransactionCleanupError {
+                    failure = combined.addingCancellationError(cleanupError)
+                } else {
+                    failure = StorageTransactionCleanupError(operationError: failure, cancellationError: cleanupError)
+                }
+            }
+            state.withLock { $0.lifecycle = .failed(failure, cleanupRequired: false) }
+            versionstampCompletion.fail(failure)
+            return .failure(failure)
+        }
+        let result = await performNativeCommit()
+        do {
+            switch result {
+            case .success: try await journal.close(committed: true)
+            case .failure(let error) where error.code == .commitUnknownResult:
+                try await journal.closeWithUnknownCommit()
+            case .failure: try await journal.close(committed: false)
+            }
+        } catch {
+            let failure: any Error
+            if case .failure(let original) = result {
+                failure = StorageTransactionCleanupError(operationError: original, cancellationError: error)
+            } else { failure = error }
+            state.withLock { $0.lifecycle = .failed(failure, cleanupRequired: false) }
+            versionstampCompletion.fail(failure)
+            return .failure(failure)
+        }
+        return result.mapError { $0 as any Error }
+    }
+
+    private static func nativeMutation(_ mutation: TransactionJournalMutation) throws -> WriteOp {
+        switch mutation {
+        case .set(let key, let value, _): return .set(key: key, value: value)
+        case .clear(let key, _): return .clear(key: key)
+        case .clearRange(let begin, let end, _): return .clearRange(begin: begin, end: end)
+        case .atomic(let key, let parameter, let type, _):
+            return .atomic(key: key, param: parameter, mutationType: type)
+        case .writeConflict:
+            throw StorageError.unsupportedOperation(
+                "PostgreSQL does not support explicit write conflict ranges",
+                operation: .write, backend: .postgreSQL
+            )
+        }
+    }
+
+    private func performNativeCommit() async -> Result<Void, StorageError> {
         if isNested {
             do {
                 try commitNested()
@@ -1404,7 +1794,26 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         }
     }
 
-    private func performCancellation() async -> Result<Void, StorageError> {
+    private func performCancellation() async -> Result<Void, any Error> {
+        var journalFailure: (any Error)?
+        if let journal = checkpointState.withLock({ $0.journal }) {
+            do { try await journal.close(committed: false) }
+            catch { journalFailure = error }
+        }
+        let result = await performNativeCancellation(resolveVersionstamp: journalFailure == nil)
+        if let journalFailure {
+            let failure: any Error
+            if case .failure(let nativeError) = result {
+                failure = StorageTransactionCleanupError(operationError: journalFailure, cancellationError: nativeError)
+            } else { failure = journalFailure }
+            state.withLock { $0.lifecycle = .failed(failure, cleanupRequired: false) }
+            versionstampCompletion.fail(failure)
+            return .failure(failure)
+        }
+        return result.mapError { $0 as any Error }
+    }
+
+    private func performNativeCancellation(resolveVersionstamp: Bool = true) async -> Result<Void, StorageError> {
         guard !isNested else {
             state.withLock { state in
                 state.lifecycle = .cancelled
@@ -1420,7 +1829,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 let mapped = storageError(from: error, operation: .rollback)
                 if mapped.operation == .rollback,
                    mapped.code == .backendFailure {
-                    finishCancellation(.failure(mapped))
+                    finishCancellation(.failure(mapped), resolveVersionstamp: resolveVersionstamp)
                     return .failure(mapped)
                 }
             }
@@ -1439,11 +1848,11 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
         if client != nil {
             releaseConnection()
         }
-        finishCancellation(result)
+        finishCancellation(result, resolveVersionstamp: resolveVersionstamp)
         return result
     }
 
-    private func finishCancellation(_ result: Result<Void, StorageError>) {
+    private func finishCancellation(_ result: Result<Void, StorageError>, resolveVersionstamp: Bool = true) {
         let versionstampFailure = state.withLock {
             state -> StorageError in
             switch result {
@@ -1461,7 +1870,7 @@ public final class PostgreSQLStorageTransaction: Transaction, Sendable {
                 return error
             }
         }
-        if !isNested {
+        if !isNested && resolveVersionstamp {
             versionstampCompletion.fail(versionstampFailure)
         }
     }

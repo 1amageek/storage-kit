@@ -20,6 +20,8 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     }
 
     private var storageAccess: RangeStorageAccess?
+    private let maximumTransferByteCount: Int?
+    private let rawBounds: (begin: StorageWireRangeBoundary, end: StorageWireRangeBoundary)?
     private let partitionIdentity: StoragePartitionIdentity
     private let begin: KeySelector
     private let end: KeySelector
@@ -72,8 +74,12 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
                 StorageWireKeyRange
             ) throws -> Void,
         validateStoredRow:
-            @escaping @Sendable (ByteString, ByteString) throws -> Void
+            @escaping @Sendable (ByteString, ByteString) throws -> Void,
+        rawBounds: (begin: StorageWireRangeBoundary, end: StorageWireRangeBoundary)? = nil,
+        maximumTransferByteCount: Int? = nil
     ) {
+        self.maximumTransferByteCount = maximumTransferByteCount
+        self.rawBounds = rawBounds
         self.storageAccess = RangeStorageAccess(
             read: read,
             range: range,
@@ -237,6 +243,11 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
     private mutating func prepareViewIfNeeded() async throws {
         guard !viewPrepared else { return }
         viewPrepared = true
+        if let rawBounds {
+            hostBegin = rawBounds.begin
+            hostEnd = rawBounds.end
+            return
+        }
         guard !mutations.isEmpty else {
             hostBegin = .selector(StorageWireKeySelector(begin))
             hostEnd = .selector(StorageWireKeySelector(end))
@@ -688,6 +699,20 @@ struct CloudflareDurableObjectRangeScan: CloudflareDurableObjectRangeScanning {
         if !snapshot {
             for conflictRange in response.readConflictRanges {
                 try storageAccess.recordReadConflictRange(conflictRange)
+            }
+        }
+        if let maximumTransferByteCount {
+            var bytes = 0
+            for row in response.rows {
+                let keyBytes = bytes.addingReportingOverflow(row.key.count)
+                let valueBytes = keyBytes.partialValue.addingReportingOverflow(row.value.count)
+                guard !keyBytes.overflow, !valueBytes.overflow,
+                      valueBytes.partialValue <= maximumTransferByteCount else {
+                    throw StorageError(code: .transactionTooLarge, operation: .rangeRead,
+                        backend: .cloudflareDurableObject,
+                        message: "Host range page exceeds the journal transfer byte limit")
+                }
+                bytes = valueBytes.partialValue
             }
         }
         return response

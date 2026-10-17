@@ -127,25 +127,29 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
     public func openRoot(
         transaction: any TransactionReadAccess
     ) async throws -> Directory? {
-        try requireDomain(of: transaction, operation: .open)
-        guard try await rootAllocatorHoldsNextNumber(transaction: transaction, operation: .open) else {
-            try await requireRootHoldsNoForeignData(transaction: transaction, operation: .open)
-            return nil
+        return try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try requireDomain(of: transaction, operation: .open)
+            guard try await rootAllocatorHoldsNextNumber(transaction: transaction, operation: .open) else {
+                try await requireRootHoldsNoForeignData(transaction: transaction, operation: .open)
+                return nil
+            }
+            return try rootDirectory.trackingProvenance()
         }
-        return rootDirectory
     }
 
     public func openOrInitializeRoot(
         transaction: any TransactionAccess
     ) async throws -> Directory {
-        try requireDomain(of: transaction, operation: .initialize)
-        if try await rootAllocatorHoldsNextNumber(transaction: transaction, operation: .initialize) {
-            return rootDirectory
+        return try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try requireDomain(of: transaction, operation: .initialize)
+            if try await rootAllocatorHoldsNextNumber(transaction: transaction, operation: .initialize) {
+                return try rootDirectory.trackingProvenance()
+            }
+            try await requireRootHoldsNoForeignData(transaction: transaction, operation: .initialize)
+            try admit(.initialize)
+            try transaction.setValue(Tuple(Layout.firstNumber).pack(), for: rootAllocatorKey)
+            return try rootDirectory.trackingProvenance(created: true)
         }
-        try await requireRootHoldsNoForeignData(transaction: transaction, operation: .initialize)
-        try admit(.initialize)
-        try transaction.setValue(Tuple(Layout.firstNumber).pack(), for: rootAllocatorKey)
-        return rootDirectory
     }
 
     /// Whether the root allocator holds the value this catalog writes.
@@ -218,19 +222,22 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         in parent: Directory,
         transaction: any TransactionReadAccess
     ) async throws -> Directory? {
-        try requireDomain(of: transaction, parent: parent, operation: .open)
-        let address = try childAddress(of: parent, name, operation: .open)
-        let layerRoot = parent.childLayerRoot
-        guard let edge = try await readEdge(
-            layerRoot: layerRoot,
-            parentPrefix: parent.keyspacePrefix,
-            name: name,
-            transaction: transaction
-        ) else {
-            return nil
+        return try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try requireDomain(of: transaction, parent: parent, operation: .open)
+            let address = try childAddress(of: parent, name, operation: .open)
+            let layerRoot = parent.childLayerRoot
+            guard let edge = try await readEdge(
+                layerRoot: layerRoot,
+                parentPrefix: parent.keyspacePrefix,
+                name: name,
+                transaction: transaction
+            ) else {
+                return nil
+            }
+            try requireLayer(edge.layer, expected: expected, name: name, operation: .open)
+            return try directory(at: address, edge: edge, layerRoot: layerRoot)
+                .trackingProvenance(parent: parent)
         }
-        try requireLayer(edge.layer, expected: expected, name: name, operation: .open)
-        return directory(at: address, edge: edge, layerRoot: layerRoot)
     }
 
     // MARK: - Operation 2
@@ -241,48 +248,51 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         in parent: Directory,
         transaction: any TransactionAccess
     ) async throws -> Directory {
-        try requireDomain(of: transaction, parent: parent, operation: .write)
-        let address = try childAddress(of: parent, name, operation: .write)
-        let livingParent = try await requireLiving(
-            parent,
-            "Parent Directory of '\(name)' does not exist",
-            operation: .write,
-            transaction: transaction
-        )
-        let layerRoot = livingParent.childLayerRoot
-        if let edge = try await readEdge(
-            layerRoot: layerRoot,
-            parentPrefix: livingParent.keyspacePrefix,
-            name: name,
-            transaction: transaction
-        ) {
-            try requireLayer(edge.layer, expected: layer, name: name, operation: .write)
-            return directory(at: address, edge: edge, layerRoot: layerRoot)
-        }
-        try admit(.write)
-        let number = try await allocateNumber(layerRoot: layerRoot, transaction: transaction)
-        let prefix = Layout.contentPrefix(layerRoot: layerRoot, number: number)
-        try transaction.setValue(
-            Layout.edgeValue(prefix: prefix, layer: layer),
-            for: Layout.edgeKey(
+        return try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try requireDomain(of: transaction, parent: parent, operation: .write)
+            let address = try childAddress(of: parent, name, operation: .write)
+            let livingParent = try await requireLiving(
+                parent,
+                "Parent Directory of '\(name)' does not exist",
+                operation: .write,
+                transaction: transaction
+            )
+            let layerRoot = livingParent.childLayerRoot
+            if let edge = try await readEdge(
                 layerRoot: layerRoot,
                 parentPrefix: livingParent.keyspacePrefix,
-                name: name
-            )
-        )
-        if layer.isPartition {
-            // The nested layer allocates inside the Partition from its own
-            // allocator, so a missing allocator always means corruption.
+                name: name,
+                transaction: transaction
+            ) {
+                try requireLayer(edge.layer, expected: layer, name: name, operation: .write)
+                return try directory(at: address, edge: edge, layerRoot: layerRoot)
+                    .trackingProvenance(parent: livingParent)
+            }
+            try admit(.write)
+            let number = try await allocateNumber(layerRoot: layerRoot, transaction: transaction)
+            let prefix = Layout.contentPrefix(layerRoot: layerRoot, number: number)
             try transaction.setValue(
-                Tuple(Layout.firstNumber).pack(),
-                for: Layout.allocatorKey(layerRoot: prefix)
+                Layout.edgeValue(prefix: prefix, layer: layer),
+                for: Layout.edgeKey(
+                    layerRoot: layerRoot,
+                    parentPrefix: livingParent.keyspacePrefix,
+                    name: name
+                )
             )
+            if layer.isPartition {
+                // The nested layer allocates inside the Partition from its own
+                // allocator, so a missing allocator always means corruption.
+                try transaction.setValue(
+                    Tuple(Layout.firstNumber).pack(),
+                    for: Layout.allocatorKey(layerRoot: prefix)
+                )
+            }
+            return try directory(
+                at: address,
+                edge: Edge(prefix: prefix, layer: layer),
+                layerRoot: layerRoot
+            ).trackingProvenance(parent: livingParent, created: true)
         }
-        return directory(
-            at: address,
-            edge: Edge(prefix: prefix, layer: layer),
-            layerRoot: layerRoot
-        )
     }
 
     // MARK: - Operation 3
@@ -293,39 +303,41 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         limit: Int,
         transaction: any TransactionReadAccess
     ) async throws -> [DirectoryEntry] {
-        try requireDomain(of: transaction, parent: parent, operation: .rangeRead)
-        try requireListLimit(limit)
-        if let after {
-            try validate(component: after, operation: .rangeRead)
-        }
-        let layerRoot = parent.childLayerRoot
-        let listPrefix = Layout.edgeListPrefix(
-            layerRoot: layerRoot,
-            parentPrefix: parent.keyspacePrefix
-        )
-        let begin: KeySelector
-        if let after {
-            begin = .firstGreaterThan(
-                Layout.edgeKey(
-                    layerRoot: layerRoot,
-                    parentPrefix: parent.keyspacePrefix,
-                    name: after
-                )
+        return try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try requireDomain(of: transaction, parent: parent, operation: .rangeRead)
+            try requireListLimit(limit)
+            if let after {
+                try validate(component: after, operation: .rangeRead)
+            }
+            let layerRoot = parent.childLayerRoot
+            let listPrefix = Layout.edgeListPrefix(
+                layerRoot: layerRoot,
+                parentPrefix: parent.keyspacePrefix
             )
-        } else {
-            begin = .firstGreaterOrEqual(listPrefix)
-        }
-        let end = KeySelector.firstGreaterOrEqual(try increment(listPrefix))
-        let rows = try await TransactionRangeCollection.collect(
-            using: transaction,
-            from: begin,
-            to: end,
-            limit: limit
-        )
-        return try rows.map { row in
-            let name = try decodeName(from: row.0, listPrefix: listPrefix)
-            let edge = try decodeEdge(row.1)
-            return DirectoryEntry(name: name, layer: edge.layer)
+            let begin: KeySelector
+            if let after {
+                begin = .firstGreaterThan(
+                    Layout.edgeKey(
+                        layerRoot: layerRoot,
+                        parentPrefix: parent.keyspacePrefix,
+                        name: after
+                    )
+                )
+            } else {
+                begin = .firstGreaterOrEqual(listPrefix)
+            }
+            let end = KeySelector.firstGreaterOrEqual(try increment(listPrefix))
+            let rows = try await TransactionRangeCollection.collect(
+                using: transaction,
+                from: begin,
+                to: end,
+                limit: limit
+            )
+            return try rows.map { row in
+                let name = try decodeName(from: row.0, listPrefix: listPrefix)
+                let edge = try decodeEdge(row.1)
+                return DirectoryEntry(name: name, layer: edge.layer)
+            }
         }
     }
 
@@ -338,81 +350,85 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         in destination: Directory,
         transaction: any TransactionAccess
     ) async throws -> Directory {
-        try requireDomain(of: transaction, parent: source, operation: .write)
-        guard destination.domain === transactionDomain else {
-            throw domainMismatch(operation: .write, subject: "Destination Directory")
-        }
-        let movedAddress = try childAddress(of: source, name, operation: .write)
-        let targetAddress = try childAddress(of: destination, newName, operation: .write)
-        let livingSource = try await requireLiving(
-            source,
-            "Source Directory does not exist",
-            operation: .write,
-            transaction: transaction
-        )
-        let livingDestination = try await requireLiving(
-            destination,
-            "Destination Directory does not exist",
-            operation: .write,
-            transaction: transaction
-        )
-        let layerRoot = livingSource.childLayerRoot
-        guard layerRoot == livingDestination.childLayerRoot else {
-            throw StorageError.partitionBoundaryViolation(
-                "A node cannot move into or out of a Partition",
+        return try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try requireDomain(of: transaction, parent: source, operation: .write)
+            guard destination.domain === transactionDomain else {
+                throw domainMismatch(operation: .write, subject: "Destination Directory")
+            }
+            try destination.checkProvenance(operation: .write, backend: backend)
+            let movedAddress = try childAddress(of: source, name, operation: .write)
+            let targetAddress = try childAddress(of: destination, newName, operation: .write)
+            let livingSource = try await requireLiving(
+                source,
+                "Source Directory does not exist",
                 operation: .write,
-                backend: backend
+                transaction: transaction
             )
-        }
-        guard let edge = try await readEdge(
-            layerRoot: layerRoot,
-            parentPrefix: livingSource.keyspacePrefix,
-            name: name,
-            transaction: transaction
-        ) else {
-            throw notFound(
-                "Node '\(name)' does not exist in the source Directory",
-                operation: .write
-            )
-        }
-        if movedAddress.isAncestorOrSelf(of: livingDestination.address)
-            || livingDestination.keyspacePrefix == edge.prefix {
-            throw StorageError.invalidDirectoryAddress(
-                .targetInsideMovedSubtree,
+            let livingDestination = try await requireLiving(
+                destination,
+                "Destination Directory does not exist",
                 operation: .write,
-                backend: backend
+                transaction: transaction
             )
-        }
-        if try await readEdge(
-            layerRoot: layerRoot,
-            parentPrefix: livingDestination.keyspacePrefix,
-            name: newName,
-            transaction: transaction
-        ) != nil {
-            throw StorageError(
-                code: .invalidOperation,
-                operation: .write,
-                backend: backend,
-                message: "Node '\(newName)' already exists in the destination Directory"
-            )
-        }
-        try admit(.write)
-        try transaction.clear(
-            key: Layout.edgeKey(
+            let layerRoot = livingSource.childLayerRoot
+            guard layerRoot == livingDestination.childLayerRoot else {
+                throw StorageError.partitionBoundaryViolation(
+                    "A node cannot move into or out of a Partition",
+                    operation: .write,
+                    backend: backend
+                )
+            }
+            guard let edge = try await readEdge(
                 layerRoot: layerRoot,
                 parentPrefix: livingSource.keyspacePrefix,
-                name: name
-            )
-        )
-        try transaction.setValue(
-            Layout.edgeValue(prefix: edge.prefix, layer: edge.layer),
-            for: Layout.edgeKey(
+                name: name,
+                transaction: transaction
+            ) else {
+                throw notFound(
+                    "Node '\(name)' does not exist in the source Directory",
+                    operation: .write
+                )
+            }
+            if movedAddress.isAncestorOrSelf(of: livingDestination.address)
+                || livingDestination.keyspacePrefix == edge.prefix {
+                throw StorageError.invalidDirectoryAddress(
+                    .targetInsideMovedSubtree,
+                    operation: .write,
+                    backend: backend
+                )
+            }
+            if try await readEdge(
                 layerRoot: layerRoot,
                 parentPrefix: livingDestination.keyspacePrefix,
-                name: newName
+                name: newName,
+                transaction: transaction
+            ) != nil {
+                throw StorageError(
+                    code: .invalidOperation,
+                    operation: .write,
+                    backend: backend,
+                    message: "Node '\(newName)' already exists in the destination Directory"
+                )
+            }
+            try admit(.write)
+            try transaction.clear(
+                key: Layout.edgeKey(
+                    layerRoot: layerRoot,
+                    parentPrefix: livingSource.keyspacePrefix,
+                    name: name
+                )
             )
-        )
-        return directory(at: targetAddress, edge: edge, layerRoot: layerRoot)
+            try transaction.setValue(
+                Layout.edgeValue(prefix: edge.prefix, layer: edge.layer),
+                for: Layout.edgeKey(
+                    layerRoot: layerRoot,
+                    parentPrefix: livingDestination.keyspacePrefix,
+                    name: newName
+                )
+            )
+            return try directory(at: targetAddress, edge: edge, layerRoot: layerRoot)
+                .trackingProvenance(parent: livingDestination, created: true)
+        }
     }
 
     // MARK: - Operation 5
@@ -422,29 +438,31 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         in parent: Directory,
         transaction: any TransactionAccess
     ) async throws {
-        try requireDomain(of: transaction, parent: parent, operation: .delete)
-        _ = try childAddress(of: parent, name, operation: .delete)
-        let layerRoot = parent.childLayerRoot
-        guard let edge = try await readEdge(
-            layerRoot: layerRoot,
-            parentPrefix: parent.keyspacePrefix,
-            name: name,
-            transaction: transaction
-        ) else {
-            throw notFound(
-                "Node '\(name)' does not exist in the parent Directory",
-                operation: .delete
-            )
-        }
-        try admit(.delete)
-        try await clearSubtree(of: edge, layerRoot: layerRoot, transaction: transaction)
-        try transaction.clear(
-            key: Layout.edgeKey(
+        try await transaction.performOperation { [self] in
+            try requireDomain(of: transaction, parent: parent, operation: .delete)
+            _ = try childAddress(of: parent, name, operation: .delete)
+            let layerRoot = parent.childLayerRoot
+            guard let edge = try await readEdge(
                 layerRoot: layerRoot,
                 parentPrefix: parent.keyspacePrefix,
-                name: name
+                name: name,
+                transaction: transaction
+            ) else {
+                throw notFound(
+                    "Node '\(name)' does not exist in the parent Directory",
+                    operation: .delete
+                )
+            }
+            try admit(.delete)
+            try await clearSubtree(of: edge, layerRoot: layerRoot, transaction: transaction)
+            try transaction.clear(
+                key: Layout.edgeKey(
+                    layerRoot: layerRoot,
+                    parentPrefix: parent.keyspacePrefix,
+                    name: name
+                )
             )
-        )
+        }
     }
 
     /// Clears a node's descendants and its own data, but not its parent edge.
@@ -664,6 +682,7 @@ public final class KeyValueDirectoryCatalog: DirectoryAccess, Sendable {
         guard parent.domain === transactionDomain else {
             throw domainMismatch(operation: operation, subject: "Directory")
         }
+        try parent.checkProvenance(operation: operation, backend: backend)
     }
 
     private func requireLayer(

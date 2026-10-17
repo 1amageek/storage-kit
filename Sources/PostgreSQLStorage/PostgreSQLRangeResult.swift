@@ -20,6 +20,8 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
     private enum Backing: Sendable {
         case scan(PostgreSQLStorageTransaction, RangeScanPlan)
         case failure(StorageError)
+        case raw(PostgreSQLStorageTransaction.JournalBackend, RangeScanPlan)
+        case overlay(KeyValueCursor)
     }
 
     private let backing: Backing
@@ -38,12 +40,24 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
         }
     }
 
+    init(backend: PostgreSQLStorageTransaction.JournalBackend, plan: RangeScanPlan) {
+        self.backing = .raw(backend, plan)
+    }
+
+    init(cursor: KeyValueCursor) {
+        self.backing = .overlay(cursor)
+    }
+
     public func makeCursor() -> Cursor {
         switch backing {
         case .scan(let transaction, let plan):
             return Cursor(transaction: transaction, plan: plan)
         case .failure(let error):
             return Cursor(failure: error)
+        case .raw(let backend, let plan):
+            return Cursor(backend: backend, plan: plan)
+        case .overlay(let cursor):
+            return Cursor(cursor: cursor)
         }
     }
 
@@ -54,6 +68,8 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
     public struct Cursor: TransactionRangeCursor, Sendable {
 
         private var transaction: PostgreSQLStorageTransaction?
+        private var backend: PostgreSQLStorageTransaction.JournalBackend?
+        private var overlay: KeyValueCursor?
         private var plan: RangeScanPlan?
         private var pendingFailure: StorageError?
 
@@ -88,7 +104,23 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
             self.pendingFailure = failure
         }
 
+        init(backend: PostgreSQLStorageTransaction.JournalBackend, plan: RangeScanPlan) {
+            self.transaction = nil
+            self.backend = backend
+            self.plan = plan
+        }
+
+        init(cursor: KeyValueCursor) {
+            self.transaction = nil
+            self.plan = nil
+            self.overlay = cursor
+        }
+
         public mutating func next() async throws -> (ByteString, ByteString)? {
+            if var cursor = overlay {
+                defer { overlay = cursor }
+                return try await cursor.next()
+            }
             do {
                 return try await nextEntry()
             } catch {
@@ -100,6 +132,10 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
         public mutating func finish(
             isolation actor: isolated (any Actor)?
         ) async throws {
+            if var cursor = overlay {
+                defer { overlay = cursor }
+                try await cursor.finish()
+            }
             finishState()
         }
 
@@ -111,7 +147,7 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
                 throw failure
             }
 
-            guard let transaction, let plan else {
+            guard let plan, transaction != nil || backend != nil else {
                 finishState()
                 return nil
             }
@@ -136,12 +172,20 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
                 lastKey = queryCursor
                 buffer.removeAll(keepingCapacity: false)
                 bufferIndex = 0
-                let batch = try await transaction.fetchRangeBatch(
-                    plan: plan,
-                    after: queryCursor,
-                    remaining: remaining,
-                    flushFirst: !started
-                )
+                let batch: [(ByteString, ByteString)]
+                if let backend {
+                    batch = try await backend.fetchRangeBatch(
+                        plan: plan, after: queryCursor, remaining: remaining
+                    )
+                } else if let transaction {
+                    batch = try await transaction.fetchRangeBatch(
+                        plan: plan, after: queryCursor, remaining: remaining,
+                        flushFirst: !started
+                    )
+                } else {
+                    finishState()
+                    return nil
+                }
                 started = true
                 buffer = batch
                 bufferIndex = 0
@@ -166,6 +210,8 @@ public struct PostgreSQLRangeResult: TransactionRangeResult {
 
         private mutating func finishState() {
             transaction = nil
+            backend = nil
+            overlay = nil
             plan = nil
             pendingFailure = nil
             buffer.removeAll(keepingCapacity: false)

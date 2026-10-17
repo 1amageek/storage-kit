@@ -53,6 +53,7 @@ let package = Package(
             exclude: [
                 "DESIGN.md",
                 "Directory/DESIGN.md",
+                "InMemory/DESIGN.md",
                 "Storage/DESIGN.md",
                 "Tuple/DESIGN.md",
             ]

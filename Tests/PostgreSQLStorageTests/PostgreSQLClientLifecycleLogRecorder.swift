@@ -34,16 +34,8 @@ final class PostgreSQLClientLifecycleLogRecorder: Sendable {
             set { metadata[key] = newValue }
         }
 
-        func log(
-            level: Logger.Level,
-            message: Logger.Message,
-            metadata: Logger.Metadata?,
-            source: String,
-            file: String,
-            function: String,
-            line: UInt
-        ) {
-            recorder.record(message)
+        func log(event: LogEvent) {
+            recorder.record(event.message)
         }
     }
 }

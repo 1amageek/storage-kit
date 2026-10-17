@@ -839,6 +839,143 @@ struct FDBStorageTransactionFootprintTests {
         }
     }
 
+    @Test("Checkpoint Directory options and writes replay in exact order", .timeLimit(.minutes(1)))
+    func checkpointDirectoryReplayPreservesOptions() async throws {
+        let backend = SizeReportingTransaction(approximateSize: 0)
+        let domain = StorageTransactionDomain()
+        let transaction = try FDBStorageTransaction(backend, transactionDomain: domain)
+        try transaction.configureCheckpoints(limits: checkpointLimits())
+        let checkpoints = try #require(transaction.checkpoints)
+        let marker = try await checkpoints.createCheckpoint()
+        try await transaction.withDirectoryOperation(transactionDomain: domain, writes: true, operation: .write) { native in
+            try native.setNextWriteNoWriteConflictRange()
+            try native.setValue([9], for: [0x19])
+            try native.addWriteConflictKey([0x19])
+        }
+        try await checkpoints.rollback(to: marker)
+        try await transaction.withDirectoryOperation(transactionDomain: domain, writes: true, operation: .write) { native in
+            try native.setNextWriteNoWriteConflictRange()
+            try native.clearRange(beginKey: [0x20], endKey: [0x21])
+            try native.atomicOp(key: [0x30], param: [1], mutationType: .add)
+            #expect(try await native.getValue(for: [0x30], snapshot: false) == ByteString([1]))
+            try native.addWriteConflictKey([0x30])
+        }
+        #expect(backend.events.isEmpty)
+        try await transaction.commit()
+        #expect(backend.events == ["suppress", "clearRange", "atomic", "writeConflict", "commit"])
+        #expect(backend.commitCount == 1)
+    }
+
+    @Test("Checkpoint commit unknown never replays or commits again", .timeLimit(.minutes(1)))
+    func checkpointUnknownCommitDoesNotReplay() async throws {
+        let backend = SizeReportingTransaction(approximateSize: 0, commitError: .commitUnknownResult)
+        let transaction = try FDBStorageTransaction(backend, transactionDomain: StorageTransactionDomain())
+        try transaction.configureCheckpoints(limits: checkpointLimits())
+        try transaction.setValue([1], for: [0x41])
+        #expect(backend.setCount == 0)
+        #expect(await commitFailure(from: transaction).code == .commitUnknownResult)
+        #expect(await commitFailure(from: transaction).code == .commitUnknownResult)
+        #expect(backend.setCount == 1)
+        #expect(backend.commitCount == 1)
+        #expect(transaction.storageFailure?.code == .commitUnknownResult)
+    }
+
+    @Test("Checkpoint commit drains an admitted native Directory operation", .timeLimit(.minutes(1)))
+    func checkpointCommitDrainsDirectoryOperation() async throws {
+        let gate = OperationGate()
+        let backend = SizeReportingTransaction(approximateSize: 0, valueReadGate: gate)
+        let domain = StorageTransactionDomain()
+        let transaction = try FDBStorageTransaction(backend, transactionDomain: domain)
+        try transaction.configureCheckpoints(limits: checkpointLimits())
+        let directory = Task {
+            try await transaction.withDirectoryOperation(transactionDomain: domain, writes: true, operation: .write) { native in
+                _ = try await native.getValue(for: [0x51], snapshot: false)
+                try native.setValue([1], for: [0x52])
+            }
+        }
+        try await gate.waitUntilEntered()
+        let commit = Task { try await transaction.commit() }
+        // This follower observes that the existing commit leader has entered
+        // preparation before the admitted Directory continuation is released.
+        let follower = Task { try await transaction.commit() }
+        try await waitUntilIteratorState("checkpoint commit follower") { transaction.commitFollowerCount > 0 }
+        #expect(backend.commitCount == 0)
+        await gate.release()
+        try await directory.value
+        try await commit.value
+        try await follower.value
+        #expect(backend.events == ["set", "commit"])
+        #expect(backend.commitCount == 1)
+    }
+
+    @Test("Checkpoint terminal work limit preserves its owning cause", .timeLimit(.minutes(1)))
+    func checkpointCommitWorkLimitPreservesCause() async throws {
+        let backend = SizeReportingTransaction(approximateSize: 0)
+        let transaction = try FDBStorageTransaction(backend, transactionDomain: StorageTransactionDomain())
+        try transaction.configureCheckpoints(limits: TransactionCheckpointLimits(
+            maximumEntries: 4, maximumDepth: 1, maximumRetainedBytes: 64,
+            maximumWorkUnits: 1, maximumReadPageRows: 1
+        ))
+        let access = try #require(transaction.checkpoints)
+        _ = try await access.createCheckpoint()
+        let expected = TransactionCheckpointError.limitExceeded(resource: .workUnits, actual: 2, maximum: 1)
+        for _ in 0..<2 {
+            do {
+                try await transaction.commit()
+                Issue.record("Checkpoint work limit unexpectedly committed")
+            } catch let error as TransactionCheckpointError {
+                #expect(error == expected)
+            }
+        }
+        #expect(transaction.storageFailure == nil)
+        #expect(backend.commitCount == 0)
+        #expect(backend.cancelCount == 1)
+        let pending = transaction.requestVersionstamp()
+        do {
+            _ = try await pending.value
+            Issue.record("Failed checkpoint transaction unexpectedly returned a versionstamp")
+        } catch let error as TransactionCheckpointError {
+            #expect(error == expected)
+        }
+        try await transaction.cancel()
+    }
+
+    @Test("Checkpoint external owners reenter transaction state outside locks", .timeLimit(.minutes(1)))
+    func checkpointExternalOwnerCanReenterTransaction() async throws {
+        let backend = SizeReportingTransaction(approximateSize: 0)
+        let transaction = try FDBStorageTransaction(backend, transactionDomain: StorageTransactionDomain())
+        try transaction.configureCheckpoints(limits: checkpointLimits())
+        let bytes = ByteString(retaining: ReentrantFDBBytes(transaction: transaction))
+        try transaction.setValue(bytes, for: [1])
+        try transaction.addConflictRange(beginKey: bytes, endKey: [8], type: .write)
+        #expect(try await transaction.getValue(for: [1]) == [7])
+        try await transaction.commit()
+        #expect(backend.events == ["set", "writeConflict", "commit"])
+    }
+
+    @Test("Checkpoint raw range maps native backend errors", .timeLimit(.minutes(1)))
+    func checkpointRangeNormalizesNativeFailure() async throws {
+        let gate = OperationGate()
+        let backend = SizeReportingTransaction(approximateSize: 0, rangeReadGate: gate)
+        let transaction = try FDBStorageTransaction(backend, transactionDomain: StorageTransactionDomain())
+        try transaction.configureCheckpoints(limits: checkpointLimits())
+        let rows = transaction.getRange(from: .firstGreaterOrEqual([]), to: .firstGreaterOrEqual([0xFF]),
+            limit: 0, reverse: false, snapshot: false, streamingMode: .iterator)
+        let read = Task { await firstRangeFailure(rows) }
+        try await gate.waitUntilEntered()
+        await gate.release()
+        let failure = try #require(await read.value)
+        #expect(failure.code == .backendFailure)
+        #expect(failure.operation == .rangeRead)
+        #expect(failure.backend == .foundationDB)
+        #expect(failure.backendCode == FDBErrorCode.invalidAPICall.rawValue)
+        try await transaction.cancel()
+    }
+
+    private func checkpointLimits() throws -> TransactionCheckpointLimits {
+        try TransactionCheckpointLimits(maximumEntries: 100, maximumDepth: 10, maximumRetainedBytes: 16_384, maximumWorkUnits: 10_000, maximumReadPageRows: 4)
+    }
+
     private func waitUntilIteratorState(
         _ description: String,
         condition: @escaping @Sendable () async -> Bool
@@ -979,6 +1116,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
         var commitCount = 0
         var cancelCount = 0
         var configuredSizeLimit: Int?
+        var events: [String] = []
     }
 
     private let state: Mutex<State>
@@ -1013,6 +1151,8 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
         self.rangeReadGate = rangeReadGate
         self.pointValue = pointValue
     }
+
+    var events: [String] { state.withLock { $0.events } }
 
     var approximateSizeRequestCount: Int {
         state.withLock { $0.approximateSizeRequestCount }
@@ -1054,18 +1194,21 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
     ) throws {
         state.withLock { state in
             state.setCount += 1
+            state.events.append("set")
             if let footprintAfterMutation = state.footprintAfterMutation {
                 state.approximateSize = footprintAfterMutation
             }
         }
     }
 
-    func clear<Key: FDB.ByteInput>(key: Key) throws {}
+    func clear<Key: FDB.ByteInput>(key: Key) throws {
+        state.withLock { $0.events.append("clear") }
+    }
 
     func clearRange<Begin: FDB.ByteInput, End: FDB.ByteInput>(
         beginKey: Begin,
         endKey: End
-    ) throws {}
+    ) throws { state.withLock { $0.events.append("clearRange") } }
 
     func getKey(
         selector: FDB.KeySelector,
@@ -1102,6 +1245,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
     func commit() async throws {
         let commitError = state.withLock { state in
             state.commitCount += 1
+            state.events.append("commit")
             return state.commitError
         }
         if let commitGate {
@@ -1171,7 +1315,7 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
         key: Key,
         param: Parameter,
         mutationType: FDB.MutationType
-    ) throws {}
+    ) throws { state.withLock { $0.events.append("atomic") } }
 
     func addConflictRange<
         Begin: FDB.ByteInput,
@@ -1180,14 +1324,16 @@ private final class SizeReportingTransaction: TransactionProtocol, Sendable {
         beginKey: Begin,
         endKey: End,
         type: FDB.ConflictRangeType
-    ) throws {}
+    ) throws { state.withLock { $0.events.append(type == .write ? "writeConflict" : "readConflict") } }
 
     func setOption<Value: FDB.ByteInput>(
         to value: Value,
         forOption option: FDB.TransactionOption
     ) throws {}
 
-    func setOption(forOption option: FDB.TransactionOption) throws {}
+    func setOption(forOption option: FDB.TransactionOption) throws {
+        if option == .nextWriteNoWriteConflictRange { state.withLock { $0.events.append("suppress") } }
+    }
 
     func setOption(
         to value: String,
@@ -1238,5 +1384,17 @@ private actor OperationGate {
         for waiter in waitingForRelease {
             waiter.resume()
         }
+    }
+}
+
+private final class ReentrantFDBBytes: ByteStringOwner, Sendable {
+    private let transaction: FDBStorageTransaction
+    init(transaction: FDBStorageTransaction) { self.transaction = transaction }
+    var count: Int { 1 }
+    var retainedByteCount: Int? { nil }
+    func borrowBytes(_ body: (UnsafeRawBufferPointer) throws -> Void) rethrows {
+        _ = transaction.storageFailure
+        _ = transaction.checkpoints
+        try [UInt8(7)].withUnsafeBytes(body)
     }
 }

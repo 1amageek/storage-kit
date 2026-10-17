@@ -8,6 +8,7 @@ public struct FDBStorageRangeResult: TransactionRangeResult {
 
     private enum Source: Sendable {
         case sequence(FDB.AsyncKVSequence, FDBStorageTransaction)
+        case journal(KeyValueCursor)
         case failure(StorageError)
     }
 
@@ -18,6 +19,10 @@ public struct FDBStorageRangeResult: TransactionRangeResult {
         transaction: FDBStorageTransaction
     ) {
         self.source = .sequence(base, transaction)
+    }
+
+    init(_ cursor: KeyValueCursor) {
+        self.source = .journal(cursor)
     }
 
     init(error: StorageError) {
@@ -31,6 +36,8 @@ public struct FDBStorageRangeResult: TransactionRangeResult {
                 sequence.makeAsyncIterator(),
                 transaction: transaction
             )
+        case .journal(let cursor):
+            return Cursor(cursor)
         case .failure(let error):
             return Cursor(error: error)
         }
@@ -40,7 +47,8 @@ public struct FDBStorageRangeResult: TransactionRangeResult {
     /// Only that state may enter the FoundationDB cursor, so `next()`
     /// and `finish()` cannot overlap even when aliases are used concurrently.
     public final class Cursor: TransactionRangeCursor, Sendable {
-        private let iterationState: RangeIterationState
+        private let iterationState: RangeIterationState?
+        private let journalCursor: KeyValueCursor?
 
         init(
             _ base: FDB.AsyncKVSequence.AsyncIterator,
@@ -50,31 +58,42 @@ public struct FDBStorageRangeResult: TransactionRangeResult {
                 base,
                 transaction: transaction
             )
+            self.journalCursor = nil
+        }
+
+        init(_ cursor: KeyValueCursor) {
+            self.iterationState = nil
+            self.journalCursor = cursor
         }
 
         init(error: StorageError) {
             self.iterationState = RangeIterationState(error: error)
+            self.journalCursor = nil
         }
 
         public func next() async throws -> Element? {
-            try await iterationState.next()
+            if var journalCursor { return try await journalCursor.next() }
+            guard let iterationState else { preconditionFailure("Missing range cursor state") }
+            return try await iterationState.next()
         }
 
         public func finish(
             isolation actor: isolated (any Actor)?
         ) async throws {
+            if var journalCursor { try await journalCursor.finish(); return }
+            guard let iterationState else { preconditionFailure("Missing range cursor state") }
             try await iterationState.finish()
         }
 
         var finishWaiterCount: Int {
             get async {
-                await iterationState.finishWaiterCount
+                await iterationState?.finishWaiterCount ?? 0
             }
         }
 
         var nextWaiterCount: Int {
             get async {
-                await iterationState.nextWaiterCount
+                await iterationState?.nextWaiterCount ?? 0
             }
         }
     }

@@ -7,6 +7,11 @@ import DatabaseTypes
 /// and versionstamp requests. Components that only inspect the admitted
 /// transaction view should depend on this protocol.
 public protocol TransactionReadAccess: Sendable {
+    /// Groups a compound operation without granting mutation or closure authority.
+    func performOperation(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) async throws
+
     /// The storage engine instance whose physical state this transaction reads.
     ///
     /// Read-side caches include this identity in their keys so equal logical
@@ -53,6 +58,12 @@ public protocol TransactionReadAccess: Sendable {
 }
 
 public extension TransactionReadAccess {
+    func performOperation(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        try await operation()
+    }
+
     /// Bounded point-read fallback for custom transaction implementations.
     func getValue(
         for key: ByteString,

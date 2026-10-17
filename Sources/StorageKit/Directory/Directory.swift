@@ -4,8 +4,10 @@ import DatabaseTypes
 /// opaque prefixes that place it in the keyspace.
 ///
 /// `keyspacePrefix` is the node's whole keyspace start and identifies this
-/// resolution: a node removed and recreated at the same address receives a
-/// different one. `root` is the Subspace a caller derives keys from. For a plain Directory the
+/// resolution: a committed node removed and recreated at the same address
+/// receives a different one. Unpublished resolutions additionally carry
+/// process-local provenance, because checkpoint rollback can reuse a prefix.
+/// `root` is the Subspace a caller derives keys from. For a plain Directory the
 /// two prefixes are identical. For a Partition the node prefix also carries the
 /// nested Directory Layer, so the data root is offset by one reserved byte that
 /// no allocated child prefix and no nested metadata key can start with.
@@ -27,22 +29,67 @@ public struct Directory: Sendable, Hashable {
     /// Content base of the Directory Layer that contains this node.
     package let layerRoot: ByteString
 
+    package let provenance: [DirectoryProvenance]
+
     package init(
         domain: StorageTransactionDomain,
         address: StorageAddress,
         layer: LayerTag,
         keyspacePrefix: ByteString,
-        layerRoot: ByteString
+        layerRoot: ByteString,
+        provenance: [DirectoryProvenance] = []
     ) {
         self.domain = domain
         self.address = address
         self.layer = layer
         self.keyspacePrefix = keyspacePrefix
         self.layerRoot = layerRoot
+        self.provenance = provenance
         self.root = Subspace(
             prefix: layer.isPartition
                 ? keyspacePrefix.appending(Self.partitionDataByte)
                 : keyspacePrefix
+        )
+    }
+
+    package func checkProvenance(operation: StorageOperation, backend: StorageBackend) throws {
+        for witness in provenance {
+            try witness.requireValid(operation: operation, backend: backend)
+        }
+    }
+
+    /// Resolves only pending provenance. Reading committed metadata does not
+    /// introduce a generation that a later rollback could discard.
+    package func trackingProvenance(
+        parent: Directory? = nil,
+        created: Bool = false
+    ) throws -> Directory {
+        let journal = TransactionJournal.current
+        let witness: DirectoryProvenance?
+        if let journal {
+            witness = try created
+                ? journal.recordDirectoryProvenance(address: address, prefix: keyspacePrefix)
+                : journal.directoryProvenance(address: address, prefix: keyspacePrefix)
+        } else {
+            witness = nil
+        }
+        let inherited = parent?.provenance ?? []
+        if inherited.isEmpty, witness == nil { return self }
+        let includesWitness = witness.map { own in inherited.contains { $0 === own } } ?? true
+        let count = inherited.count + (includesWitness ? 0 : 1)
+        guard count <= DirectoryLimits.maximumDepth + 1 else {
+            throw DirectoryAddressError.depthExceeded(depth: count - 1)
+        }
+        try journal?.chargeDirectoryDependencies(count)
+        var dependencies = inherited
+        if let witness, !includesWitness { dependencies.append(witness) }
+        return Directory(
+            domain: domain,
+            address: address,
+            layer: layer,
+            keyspacePrefix: keyspacePrefix,
+            layerRoot: layerRoot,
+            provenance: dependencies
         )
     }
 

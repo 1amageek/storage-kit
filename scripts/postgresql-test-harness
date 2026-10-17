@@ -4,12 +4,18 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCHEME="storage-kit-Package"
 DESTINATION="platform=macOS,arch=arm64"
-EXPECTED_TEST_COUNT=152
-MISSING_ENVIRONMENT_SELECTOR="PostgreSQLStorageTests/PostgreSQLIntegrationEnvironmentTests/endpointIsConfigured"
+EXPECTED_TEST_COUNT=161
+EXPECTED_CHECKPOINT_TEST_COUNT=9
+CHECKPOINT_SELECTOR="PostgreSQLStorageTests/PostgreSQLTransactionCheckpointTests"
+MISSING_ENVIRONMENT_SELECTOR="PostgreSQLStorageTests/PostgreSQLIntegrationEnvironmentTests/endpointIsConfigured()"
 BUILD_TIMEOUT_SECONDS="${XCODE_TEST_BUILD_TIMEOUT_SECONDS:-1200}"
 TEST_TIMEOUT_SECONDS="${XCODE_TEST_TIMEOUT_SECONDS:-1200}"
 RESULT_DIRECTORY="${XCODE_TEST_RESULT_DIRECTORY:-${TMPDIR:-/tmp}/storage-kit-postgresql-results}"
 WORK_ROOT=""
+POSTGRES_ENVIRONMENT_KEYS=(
+  POSTGRES_TEST_HOST POSTGRES_TEST_PORT POSTGRES_TEST_USER
+  POSTGRES_TEST_PASSWORD POSTGRES_TEST_DB
+)
 
 timeout_command() {
   local seconds="$1"
@@ -68,6 +74,17 @@ prepend_library_path() {
   fi
 }
 
+clear_postgresql_environment() {
+  local plist="$1"
+  local dictionary_path="$2"
+  local key
+  for key in "${POSTGRES_ENVIRONMENT_KEYS[@]}"; do
+    if plutil -extract "$dictionary_path.$key" raw "$plist" >/dev/null 2>&1; then
+      plutil -remove "$dictionary_path.$key" "$plist"
+    fi
+  done
+}
+
 inject_test_environment() {
   local plist="$1"
   local include_postgresql="$2"
@@ -77,7 +94,7 @@ inject_test_environment() {
   local target_count=0
   local configuration_index=0
 
-  swiftc="$(xcrun --toolchain "$TOOLCHAINS" --find swiftc)"
+  swiftc="$PINNED_SWIFT_COMPILER"
   toolchain_root="$(cd "$(dirname "$swiftc")/../.." && pwd)"
   testing_library_path="$toolchain_root/usr/lib/swift/macosx/testing"
   if [[ ! -f "$testing_library_path/libTesting.dylib" ]]; then
@@ -97,15 +114,13 @@ inject_test_environment() {
       if [[ "$include_postgresql" == true ]]; then
         local key
         local value
-        for key in \
-            POSTGRES_TEST_HOST \
-            POSTGRES_TEST_PORT \
-            POSTGRES_TEST_USER \
-            POSTGRES_TEST_PASSWORD \
-            POSTGRES_TEST_DB; do
+        for key in "${POSTGRES_ENVIRONMENT_KEYS[@]}"; do
           value="$(printenv "$key")"
           set_plist_string "$plist" "$target_path.EnvironmentVariables" "$key" "$value"
         done
+      else
+        clear_postgresql_environment "$plist" "$target_path.EnvironmentVariables"
+        clear_postgresql_environment "$plist" "$target_path.TestingEnvironmentVariables"
       fi
       target_count=$((target_count + 1))
       target_index=$((target_index + 1))
@@ -124,15 +139,13 @@ inject_test_environment() {
     if [[ "$include_postgresql" == true ]]; then
       local key
       local value
-      for key in \
-          POSTGRES_TEST_HOST \
-          POSTGRES_TEST_PORT \
-          POSTGRES_TEST_USER \
-          POSTGRES_TEST_PASSWORD \
-          POSTGRES_TEST_DB; do
+      for key in "${POSTGRES_ENVIRONMENT_KEYS[@]}"; do
         value="$(printenv "$key")"
         set_plist_string "$plist" "$top_level_key.EnvironmentVariables" "$key" "$value"
       done
+    else
+      clear_postgresql_environment "$plist" "$top_level_key.EnvironmentVariables"
+      clear_postgresql_environment "$plist" "$top_level_key.TestingEnvironmentVariables"
     fi
     target_count=$((target_count + 1))
   done < <(
@@ -148,8 +161,59 @@ inject_test_environment() {
 
 reject_internal_tool_errors() {
   local log_path="$1"
-  if rg -n 'Internal Error:|LLVM Profile Error:' "$log_path" >&2; then
+  if rg -n 'Internal Error:|LLVM Profile Error:|fatal error:|Assertion failed:' "$log_path" >&2; then
     echo "error: internal tool failure detected in $log_path" >&2
+    return 1
+  fi
+}
+
+classify_build_warnings() {
+  local log_path="$1"
+  local advisory_log="$2"
+  local rejected_log="$3"
+  local classification_summary="$4"
+  local count_path="$classification_summary.count"
+  local classification_status=0
+  : > "$advisory_log"
+  : > "$rejected_log"
+  # Xcode emits this advisory for test bundles with no AppIntents dependency.
+  awk -v advisory_log="$advisory_log" -v rejected_log="$rejected_log" \
+      -v count_path="$count_path" '
+    BEGIN { advisory_count = 0; rejected_count = 0 }
+    /(^|[[:space:]])warning:|ld: warning:/ {
+      if ($0 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3} appintentsmetadataprocessor\[[0-9]+:[0-9]+\] warning: Metadata extraction skipped, no AppIntents[.]framework dependency found$/) {
+        print >> advisory_log
+        advisory_count++
+      } else {
+        print >> rejected_log
+        rejected_count++
+      }
+    }
+    END {
+      print advisory_count > count_path
+      if (rejected_count > 0) exit 1
+    }
+  ' "$log_path" || classification_status=$?
+  if [[ ! -f "$count_path" ]]; then
+    echo "error: build warning classification did not produce a count" >&2
+    return 1
+  fi
+  jq -n --arg category "xcode_app_intents_metadata_advisory" \
+    --argjson count "$(cat "$count_path")" --arg rawLog "$advisory_log" \
+    '{category: $category, count: $count, rawLog: $rawLog}' \
+    > "$classification_summary" || return $?
+  if (( classification_status != 0 )); then
+    cat "$rejected_log" >&2
+    echo "error: build-for-testing emitted an unclassified compiler, plugin, or linker warning" >&2
+    return 1
+  fi
+}
+
+reject_postgres_client_startup_warnings() {
+  local log_path="$1"
+  if rg -n 'Trying to lease connection from `PostgresClient`|run\(\) hasn.t been called yet' \
+      "$log_path" >&2; then
+    echo "error: PostgresClient was leased before its run loop started" >&2
     return 1
   fi
 }
@@ -160,17 +224,19 @@ summary_number() {
   printf '%s' "$summary" | jq -er ".${key}"
 }
 
-for command in jq xcodebuild xcrun plutil perl rg tee; do
+for command in jq xcodebuild xcrun plutil perl rg tee awk; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "error: required command not found: $command" >&2
     exit 1
   fi
 done
 
-if [[ -z "${TOOLCHAINS:-}" ]]; then
-  echo "error: TOOLCHAINS must identify the pinned Swift snapshot" >&2
+if [[ "${TOOLCHAINS:-}" != org.swift.64202609041a ]]; then
+  echo "error: TOOLCHAINS must be org.swift.64202609041a" >&2
   exit 2
 fi
+PINNED_SWIFT_COMPILER="$(xcrun --toolchain "$TOOLCHAINS" --find swiftc)"
+
 if [[ -z "${POSTGRES_TEST_HOST:-}" ]]; then
   echo "error: POSTGRES_TEST_HOST must identify an isolated PostgreSQL server" >&2
   exit 2
@@ -198,20 +264,63 @@ if [[ ! -f "$FDB_SDK_LIBRARY_DIRECTORY/libfdb_c.dylib" ]]; then
   exit 2
 fi
 
+if [[ -n "${XCODE_TEST_DERIVED_DATA_DIRECTORY:-}" \
+    && "$XCODE_TEST_DERIVED_DATA_DIRECTORY" != /* ]]; then
+  echo "error: XCODE_TEST_DERIVED_DATA_DIRECTORY must be absolute" >&2
+  exit 2
+fi
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/storage-kit-postgresql-test.XXXXXX")"
-derived_data="$WORK_ROOT/DerivedData"
+derived_data="${XCODE_TEST_DERIVED_DATA_DIRECTORY:-$WORK_ROOT/DerivedData}"
 mkdir -p "$derived_data" "$RESULT_DIRECTORY"
 run_identifier="$(date -u +%Y%m%d-%H%M%S)-$$"
 build_result="$RESULT_DIRECTORY/Build-$run_identifier.xcresult"
+focused_result="$RESULT_DIRECTORY/Focused-$run_identifier.xcresult"
 test_result="$RESULT_DIRECTORY/Test-$run_identifier.xcresult"
 missing_environment_result="$RESULT_DIRECTORY/MissingEnvironment-$run_identifier.xcresult"
 build_log="$RESULT_DIRECTORY/Build-$run_identifier.log"
+build_summary="$RESULT_DIRECTORY/Build-$run_identifier-summary.json"
+metadata_advisory_log="$RESULT_DIRECTORY/Build-$run_identifier-metadata-advisories.log"
+rejected_warning_log="$RESULT_DIRECTORY/Build-$run_identifier-rejected-warnings.log"
+warning_classification="$RESULT_DIRECTORY/Build-$run_identifier-warning-classification.json"
+focused_log="$RESULT_DIRECTORY/Focused-$run_identifier.log"
+focused_summary_path="$RESULT_DIRECTORY/Focused-$run_identifier-summary.json"
 test_log="$RESULT_DIRECTORY/Test-$run_identifier.log"
 missing_environment_log="$RESULT_DIRECTORY/MissingEnvironment-$run_identifier.log"
+scheme_report="$RESULT_DIRECTORY/Schemes-$run_identifier.json"
+scheme_log="$RESULT_DIRECTORY/Schemes-$run_identifier.log"
 
 set +e
 (
   cd "$ROOT_DIR"
+  export TOOLCHAINS=com.apple.dt.toolchain.XcodeDefault
+  timeout_command "$BUILD_TIMEOUT_SECONDS" xcodebuild -list -json \
+    "SWIFT_EXEC=$PINNED_SWIFT_COMPILER" > "$scheme_report" 2> "$scheme_log"
+)
+scheme_status=$?
+set -e
+reject_internal_tool_errors "$scheme_log"
+if (( scheme_status != 0 )); then
+  cat "$scheme_log" >&2
+  echo "error: native package scheme discovery failed with status $scheme_status" >&2
+  exit "$scheme_status"
+fi
+if rg -n '(^|[[:space:]])warning:|ld: warning:' "$scheme_log" >&2; then
+  echo "error: package scheme discovery emitted a compiler, package, or linker warning" >&2
+  exit 1
+fi
+if ! jq -e --arg expected "$SCHEME" \
+    '[.. | objects | .schemes? // empty | .[]] | unique | index($expected) != null' \
+    "$scheme_report" >/dev/null; then
+  cat "$scheme_report" >&2
+  echo "error: expected full-package scheme $SCHEME is absent; inspect actual schemes before changing it" >&2
+  exit 1
+fi
+
+set +e
+(
+  cd "$ROOT_DIR"
+  # Apple platform tools supply the native linker; Swift compilation stays pinned.
+  export TOOLCHAINS=com.apple.dt.toolchain.XcodeDefault
   timeout_command "$BUILD_TIMEOUT_SECONDS" xcodebuild build-for-testing \
     -scheme "$SCHEME" \
     -destination "$DESTINATION" \
@@ -221,20 +330,35 @@ set +e
     -onlyUsePackageVersionsFromResolvedFile \
     -skipPackageUpdates \
     -only-testing:PostgreSQLStorageTests \
+    "SWIFT_EXEC=$PINNED_SWIFT_COMPILER" \
     "HEADER_SEARCH_PATHS=\$(inherited) $FDB_SDK_INCLUDE_DIRECTORY" \
     "LIBRARY_SEARCH_PATHS=\$(inherited) $FDB_SDK_LIBRARY_DIRECTORY" \
     2>&1 | tee "$build_log"
 )
 build_status=$?
 set -e
+xcrun xcresulttool get build-results --path "$build_result" --format json \
+  > "$build_summary"
+build_warning_status=0
+classify_build_warnings "$build_log" "$metadata_advisory_log" \
+  "$rejected_warning_log" "$warning_classification" || build_warning_status=$?
 reject_internal_tool_errors "$build_log"
 if (( build_status != 0 )); then
   echo "error: build-for-testing exited with status $build_status" >&2
   exit "$build_status"
 fi
+if ! jq -e '.errorCount == 0 and .warningCount == 0 and .analyzerWarningCount == 0' \
+    "$build_summary" >/dev/null; then
+  cat "$build_summary" >&2
+  echo "error: build-for-testing reported compiler or analyzer diagnostics" >&2
+  exit 1
+fi
+if (( build_warning_status != 0 )); then
+  exit "$build_warning_status"
+fi
 
 xctestrun_paths="$(find "$derived_data/Build/Products" -maxdepth 1 \
-  -type f -name '*.xctestrun' -print)"
+  -type f -name '*.xctestrun' ! -name '.*' -print)"
 xctestrun_count="$(printf '%s\n' "$xctestrun_paths" | sed '/^$/d' | wc -l | tr -d ' ')"
 if [[ "$xctestrun_count" != 1 ]]; then
   echo "error: expected one xctestrun file, found $xctestrun_count" >&2
@@ -257,8 +381,46 @@ set +e
 timeout_command "$TEST_TIMEOUT_SECONDS" xcodebuild test-without-building \
   -xctestrun "$configured_xctestrun" \
   -destination "$DESTINATION" \
+  -resultBundlePath "$focused_result" \
+  -enableCodeCoverage NO \
+  -parallel-testing-enabled NO \
+  -only-testing:"$CHECKPOINT_SELECTOR" \
+  2>&1 | tee "$focused_log"
+focused_status=$?
+set -e
+reject_internal_tool_errors "$focused_log"
+reject_postgres_client_startup_warnings "$focused_log"
+xcrun xcresulttool get test-results summary --path "$focused_result" --format json \
+  > "$focused_summary_path"
+if (( focused_status != 0 )); then
+  echo "error: focused PostgreSQL checkpoint tests exited with status $focused_status" >&2
+  exit "$focused_status"
+fi
+focused_summary="$(cat "$focused_summary_path")"
+focused_total="$(summary_number "$focused_summary" totalTestCount)"
+focused_passed="$(summary_number "$focused_summary" passedTests)"
+focused_failed="$(summary_number "$focused_summary" failedTests)"
+focused_skipped="$(summary_number "$focused_summary" skippedTests)"
+focused_expected_failures="$(summary_number "$focused_summary" expectedFailures)"
+focused_runtime_warnings="$(printf '%s' "$focused_summary" | jq -er '.runtimeWarnings | length')"
+if (( focused_total != EXPECTED_CHECKPOINT_TEST_COUNT \
+    || focused_passed != EXPECTED_CHECKPOINT_TEST_COUNT \
+    || focused_failed != 0 \
+    || focused_skipped != 0 \
+    || focused_expected_failures != 0 \
+    || focused_runtime_warnings != 0 )); then
+  printf '%s\n' "$focused_summary" >&2
+  echo "error: focused PostgreSQL checkpoint result did not meet the strict contract" >&2
+  exit 1
+fi
+
+set +e
+timeout_command "$TEST_TIMEOUT_SECONDS" xcodebuild test-without-building \
+  -xctestrun "$configured_xctestrun" \
+  -destination "$DESTINATION" \
   -resultBundlePath "$test_result" \
   -enableCodeCoverage NO \
+  -parallel-testing-enabled NO \
   -only-testing:PostgreSQLStorageTests \
   2>&1 | tee "$test_log"
 test_status=$?
@@ -272,11 +434,13 @@ fi
 summary="$(xcrun xcresulttool get test-results summary \
   --path "$test_result" --format json)"
 total_count="$(summary_number "$summary" totalTestCount)"
+passed_count="$(summary_number "$summary" passedTests)"
 failed_count="$(summary_number "$summary" failedTests)"
 skipped_count="$(summary_number "$summary" skippedTests)"
 expected_failure_count="$(summary_number "$summary" expectedFailures)"
 runtime_warning_count="$(printf '%s' "$summary" | jq -er '.runtimeWarnings | length')"
 if (( total_count != EXPECTED_TEST_COUNT \
+    || passed_count != EXPECTED_TEST_COUNT \
     || failed_count != 0 \
     || skipped_count != 0 \
     || expected_failure_count != 0 \
@@ -285,20 +449,20 @@ if (( total_count != EXPECTED_TEST_COUNT \
   echo "error: configured PostgreSQL result did not meet the strict contract" >&2
   exit 1
 fi
-if rg -n 'Trying to lease connection from `PostgresClient`|run\(\) hasn.t been called yet' \
-    "$test_log" >&2; then
-  echo "error: PostgresClient was leased before its run loop started" >&2
-  exit 1
-fi
+reject_postgres_client_startup_warnings "$test_log"
 
 set +e
-timeout_command "$TEST_TIMEOUT_SECONDS" xcodebuild test-without-building \
+(
+  unset "${POSTGRES_ENVIRONMENT_KEYS[@]}"
+  timeout_command "$TEST_TIMEOUT_SECONDS" xcodebuild test-without-building \
   -xctestrun "$runtime_only_xctestrun" \
   -destination "$DESTINATION" \
   -resultBundlePath "$missing_environment_result" \
   -enableCodeCoverage NO \
+  -parallel-testing-enabled NO \
   -only-testing:"$MISSING_ENVIRONMENT_SELECTOR" \
   2>&1 | tee "$missing_environment_log"
+)
 missing_environment_status=$?
 set -e
 reject_internal_tool_errors "$missing_environment_log"
@@ -339,7 +503,9 @@ if ! rg -q 'Set POSTGRES_TEST_HOST before running PostgreSQLStorageTests' \
   exit 1
 fi
 
+printf '%s\n' "$focused_summary"
 printf '%s\n' "$summary"
+echo "Focused PostgreSQL checkpoints: $focused_total passed"
 echo "Configured PostgreSQL tests: $total_count passed"
 echo "Missing-environment guard: 0 passed, 1 failed, 0 skipped"
 echo "Result directory: $RESULT_DIRECTORY"

@@ -33,7 +33,9 @@ public struct BoundReadAccess: ~Copyable, Sendable {
     ) async throws -> ByteString? {
         try requireLive(operation: .read)
         try bounds.requireKey(key, operation: .read)
-        return try await transaction.getValue(for: key, snapshot: snapshot)
+        let value = try await transaction.getValue(for: key, snapshot: snapshot)
+        try requireLive(operation: .read)
+        return value
     }
 
     public func getValue(
@@ -43,11 +45,13 @@ public struct BoundReadAccess: ~Copyable, Sendable {
     ) async throws -> ByteString? {
         try requireLive(operation: .read)
         try bounds.requireKey(key, operation: .read)
-        return try await transaction.getValue(
+        let value = try await transaction.getValue(
             for: key,
             snapshot: snapshot,
             maximumByteCount: maximumByteCount
         )
+        try requireLive(operation: .read)
+        return value
     }
 
     /// Resolves `selector` and returns the key only when it lies inside the
@@ -57,10 +61,9 @@ public struct BoundReadAccess: ~Copyable, Sendable {
         snapshot: Bool = false
     ) async throws -> ByteString? {
         try requireLive(operation: .read)
-        guard let key = try await transaction.getKey(selector: selector, snapshot: snapshot)
-        else {
-            return nil
-        }
+        let key = try await transaction.getKey(selector: selector, snapshot: snapshot)
+        try requireLive(operation: .read)
+        guard let key else { return nil }
         return bounds.contains(key) ? key : nil
     }
 
@@ -83,6 +86,7 @@ public struct BoundReadAccess: ~Copyable, Sendable {
         let registration = self.registration
         let scope = self.scope
         let backend = bounds.backend
+        let partition = self.partition
         let cursor = transaction.rangeCursor(
             from: begin,
             to: end,
@@ -91,6 +95,7 @@ public struct BoundReadAccess: ~Copyable, Sendable {
             snapshot: snapshot,
             streamingMode: streamingMode
         ).validatingScope {
+            try partition.root.checkProvenance(operation: .rangeRead, backend: backend)
             try registration.requireActive(operation: .rangeRead, backend: backend)
             try scope.requireOpen(operation: .rangeRead, backend: backend)
         }
@@ -99,6 +104,7 @@ public struct BoundReadAccess: ~Copyable, Sendable {
     }
 
     func requireLive(operation: StorageOperation) throws {
+        try partition.root.checkProvenance(operation: operation, backend: bounds.backend)
         try registration.requireActive(operation: operation, backend: bounds.backend)
         try scope.requireOpen(operation: operation, backend: bounds.backend)
     }

@@ -281,6 +281,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
     public typealias RangeResult = KeyValueRangeResult
 
     public static let declaredCapabilities = TransactionCapabilities(
+            transactionCheckpoints: true,
             readVersion: true,
             committedVersion: true,
             committedVersionstamp: true
@@ -295,9 +296,9 @@ public final class InMemoryTransaction: Transaction, Sendable {
     }
 
     public var storageFailure: StorageError? {
-        _state.withLock { state in
+        _state.value.withLock { state in
             guard case .failed(let error) = state.lifecycle else { return nil }
-            return error
+            return error as? StorageError
         }
     }
 
@@ -309,6 +310,8 @@ public final class InMemoryTransaction: Transaction, Sendable {
     private let versionstampCompletion = TransactionVersionstampCompletion()
 
     private struct MutableState: Sendable {
+        var journal: TransactionJournal?
+        var hasAdmittedOperation = false
         var writeBuffer: [WriteOp] = []
         var readConflictRegions: [InMemoryConflictRegion] = []
         var writeConflictRegions: [InMemoryConflictRegion] = []
@@ -322,9 +325,13 @@ public final class InMemoryTransaction: Transaction, Sendable {
         case committed
         case cancelling(TransactionOperationCompletion)
         case cancelled
-        case failed(StorageError)
+        case failed(any Error)
     }
-    private let _state: Mutex<MutableState>
+    private final class StateOwner: Sendable {
+        let value: Mutex<MutableState>
+        init(_ state: MutableState) { value = Mutex(state) }
+    }
+    private let _state: StateOwner
 
     private enum WriteOp: Sendable {
         case set(key: ByteString, value: ByteString)
@@ -349,11 +356,49 @@ public final class InMemoryTransaction: Transaction, Sendable {
         self.snapshot = snapshot
         self.snapshotVersion = snapshotVersion
         self.transactionIdentifier = transactionIdentifier
-        self._state = Mutex(MutableState())
+        self._state = StateOwner(MutableState())
     }
 
     deinit {
         engine.releaseTransaction(transactionIdentifier)
+    }
+
+    public var checkpoints: (any TransactionCheckpointAccess)? {
+        _state.value.withLock { $0.journal }
+    }
+
+    public func configureCheckpoints(limits: TransactionCheckpointLimits) throws {
+        try _state.value.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .beginTransaction)
+            guard !state.hasAdmittedOperation, state.journal == nil else {
+                throw TransactionCheckpointError.configurationAfterAdmission
+            }
+            state.journal = TransactionJournal(limits: limits, backend: .inMemory, mutationByteMeter: mutationByteMeter)
+        }
+    }
+
+    public func performOperation(_ operation: @escaping @Sendable () async throws -> Void) async throws {
+        if let journal = try admittedJournal(operation: .execute) {
+            try await journal.performOperation(operation)
+        } else { try await operation() }
+    }
+
+    private func admittedJournal(operation: StorageOperation) throws -> TransactionJournal? {
+        try _state.value.withLock { state in
+            let admitted = state.journal.map { TransactionJournal.current === $0 } ?? false
+            switch state.lifecycle {
+            case .committing where admitted, .cancelling where admitted:
+                break
+            default:
+                try Self.validateOpen(state.lifecycle, operation: operation)
+            }
+            state.hasAdmittedOperation = true
+            return state.journal
+        }
+    }
+
+    private var rawCheckpointAccess: RawCheckpointAccess {
+        RawCheckpointAccess(snapshot: snapshot, state: _state)
     }
 
     public func configureMutationByteLimit(maximumBytes: Int?) throws {
@@ -366,7 +411,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
         for key: ByteString,
         snapshot: Bool
     ) async throws -> ByteString? {
-        try readValue(for: key, snapshot: snapshot)
+        if let journal = try admittedJournal(operation: .read) {
+            return try await journal.getValue(for: key, snapshot: snapshot, using: rawCheckpointAccess)
+        }
+        return try readValue(for: key, snapshot: snapshot)
     }
 
     public func getValue(
@@ -379,6 +427,9 @@ public final class InMemoryTransaction: Transaction, Sendable {
                 maximumByteCount,
                 backend: .inMemory
             )
+        }
+        if let journal = try admittedJournal(operation: .read) {
+            return try await journal.getValue(for: key, snapshot: snapshot, maximumByteCount: maximumByteCount, using: rawCheckpointAccess)
         }
         let value = try readValue(for: key, snapshot: snapshot)
         guard let value else { return nil }
@@ -396,7 +447,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
         for key: ByteString,
         snapshot: Bool
     ) throws -> ByteString? {
-        try _state.withLock { state in
+        try _state.value.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .read)
             if !snapshot {
                 state.readConflictRegions.append(.point(key))
@@ -447,7 +498,13 @@ public final class InMemoryTransaction: Transaction, Sendable {
         streamingMode: StreamingMode
     ) -> KeyValueRangeResult {
         do {
-            return try _state.withLock { state throws(StorageError) in
+            if let journal = try admittedJournal(operation: .rangeRead) {
+                return KeyValueRangeResult(cursor: journal.rangeCursor(
+                    from: begin, to: end, limit: limit, reverse: reverse, snapshot: snapshot,
+                    streamingMode: streamingMode, using: rawCheckpointAccess
+                ))
+            }
+            return try _state.value.withLock { state throws in
                 try Self.validateOpen(state.lifecycle, operation: .rangeRead)
                 if !snapshot,
                    let conflictRegion = Self.readConflictRegion(
@@ -516,7 +573,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
     // MARK: - Write
 
     public func setValue(_ value: ByteString, for key: ByteString) throws {
-        try _state.withLock { state in
+        if let journal = try admittedJournal(operation: .write) {
+            try journal.append(.set(key: key, value: value, suppressWriteConflict: false)); return
+        }
+        try _state.value.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .write)
             try mutationByteMeter.recordSet(
                 key: key,
@@ -528,7 +588,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
     }
 
     public func clear(key: ByteString) throws {
-        try _state.withLock { state in
+        if let journal = try admittedJournal(operation: .delete) {
+            try journal.append(.clear(key: key, suppressWriteConflict: false)); return
+        }
+        try _state.value.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .delete)
             try mutationByteMeter.recordClear(key: key)
             state.writeBuffer.append(.clear(key: key))
@@ -537,7 +600,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
     }
 
     public func clearRange(beginKey: ByteString, endKey: ByteString) throws {
-        try _state.withLock { state in
+        if let journal = try admittedJournal(operation: .deleteRange) {
+            try journal.append(.clearRange(begin: beginKey, end: endKey, suppressWriteConflict: false)); return
+        }
+        try _state.value.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .deleteRange)
             try mutationByteMeter.recordClearRange(
                 beginKey: beginKey,
@@ -560,7 +626,13 @@ public final class InMemoryTransaction: Transaction, Sendable {
         param: ByteString,
         mutationType: MutationType
     ) throws {
-        try _state.withLock { state in
+        if let journal = try admittedJournal(operation: .write) {
+            guard mutationType != .setVersionstampedKey, mutationType != .setVersionstampedValue else {
+                throw StorageError.unsupportedOperation("In-memory versionstamped mutations are unavailable", operation: .write, backend: .inMemory)
+            }
+            try journal.append(.atomic(key: key, parameter: param, type: mutationType, suppressWriteConflict: false)); return
+        }
+        try _state.value.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .write)
             try mutationByteMeter.recordAtomic(
                 key: key,
@@ -587,7 +659,18 @@ public final class InMemoryTransaction: Transaction, Sendable {
                 message: "Conflict range must be non-empty and ordered"
             )
         }
-        try _state.withLock { state in
+        if let journal = try admittedJournal(operation: .write) {
+            switch type {
+            case .write:
+                try journal.append(.writeConflict(begin: beginKey, end: endKey))
+            case .read:
+                try journal.performSynchronousOperation {
+                    _state.value.withLock { $0.readConflictRegions.append(conflictRegion) }
+                }
+            }
+            return
+        }
+        try _state.value.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .write)
             switch type {
             case .read:
@@ -605,10 +688,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
             case leader(TransactionOperationCompletion, CommitPayload)
             case wait(TransactionOperationCompletion)
             case committed
-            case failed(StorageError)
+            case failed(any Error)
         }
 
-        let start = _state.withLock { state -> Start in
+        let start = _state.value.withLock { state -> Start in
             switch state.lifecycle {
             case .open:
                 let completion = TransactionOperationCompletion()
@@ -637,8 +720,36 @@ public final class InMemoryTransaction: Transaction, Sendable {
 
         switch start {
         case .leader(let completion, let payload):
-            let result = commitOperations(payload)
-            _state.withLock { state in
+            let journal = _state.value.withLock { $0.journal }
+            let finalPayload: CommitPayload
+            do {
+                if let journal {
+                    let entries = try await journal.sealForCommit()
+                    finalPayload = checkpointPayload(entries, original: payload)
+                } else { finalPayload = payload }
+            } catch {
+                _state.value.withLock { $0.lifecycle = .failed(error) }
+                versionstampCompletion.fail(error)
+                completion.fail(error)
+                throw error
+            }
+            let result = commitOperations(finalPayload)
+            do {
+                if let journal {
+                    if case .success = result { try await journal.close(committed: true) }
+                    else { try await journal.close(committed: false) }
+                }
+            } catch {
+                let failure: any Error
+                if case .failure(let operationError) = result {
+                    failure = StorageTransactionCleanupError(operationError: operationError, cancellationError: error)
+                } else { failure = error }
+                _state.value.withLock { $0.lifecycle = .failed(failure) }
+                versionstampCompletion.fail(failure)
+                completion.fail(failure)
+                throw failure
+            }
+            _state.value.withLock { state in
                 switch result {
                 case .success(let committedVersion):
                     state.lifecycle = .committed
@@ -664,7 +775,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
             }
         case .wait(let completion):
             try await completion.wait()
-            let lifecycle = _state.withLock { $0.lifecycle }
+            let lifecycle = _state.value.withLock { $0.lifecycle }
             if case .cancelled = lifecycle {
                 throw Self.stateError("Transaction cancelled", operation: .commit)
             }
@@ -685,7 +796,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
             case failed
         }
 
-        let start = _state.withLock { state -> Start in
+        let start = _state.value.withLock { state -> Start in
             switch state.lifecycle {
             case .open:
                 let completion = TransactionOperationCompletion()
@@ -707,8 +818,17 @@ public final class InMemoryTransaction: Transaction, Sendable {
 
         switch start {
         case .leader(let completion):
+            if let journal = _state.value.withLock({ $0.journal }) {
+                do { try await journal.close(committed: false) }
+                catch {
+                    _state.value.withLock { $0.lifecycle = .failed(error) }
+                    versionstampCompletion.fail(error)
+                    completion.fail(error)
+                    throw error
+                }
+            }
             engine.releaseTransaction(transactionIdentifier)
-            _state.withLock { $0.lifecycle = .cancelled }
+            _state.value.withLock { $0.lifecycle = .cancelled }
             versionstampCompletion.fail(
                 Self.stateError(
                     "Transaction cancelled",
@@ -725,7 +845,10 @@ public final class InMemoryTransaction: Transaction, Sendable {
                 return
             }
             throw Self.stateError("Transaction committed", operation: .cancel)
-        case .cancelled, .failed:
+        case .failed:
+            if let journal = _state.value.withLock({ $0.journal }) { try await journal.close(committed: false) }
+            return
+        case .cancelled:
             return
         case .committed:
             throw Self.stateError("Transaction committed", operation: .cancel)
@@ -733,27 +856,28 @@ public final class InMemoryTransaction: Transaction, Sendable {
     }
 
     public func setReadVersion(_ version: Int64) throws {
-        try _state.withLock { state in
-            try Self.validateOpen(state.lifecycle, operation: .read)
+        let journal = try admittedJournal(operation: .read)
+        let operation = { [snapshotVersion] in
             guard version == snapshotVersion else {
                 throw StorageError.unsupportedOperation(
                     "In-memory transactions cannot switch to a historical snapshot",
-                    operation: .read,
-                    backend: .inMemory
+                    operation: .read, backend: .inMemory
                 )
             }
         }
+        if let journal { try journal.performSynchronousOperation(operation) }
+        else { try operation() }
     }
 
     public func getReadVersion() async throws -> Int64 {
-        try _state.withLock { state in
-            try Self.validateOpen(state.lifecycle, operation: .read)
-            return snapshotVersion
+        if let journal = try admittedJournal(operation: .read) {
+            return try journal.performSynchronousOperation { snapshotVersion }
         }
+        return snapshotVersion
     }
 
     public func getCommittedVersion() throws -> Int64 {
-        try _state.withLock { state in
+        try _state.value.withLock { state in
             guard case .committed = state.lifecycle,
                   let committedVersion = state.committedVersion else {
                 throw Self.stateError(
@@ -766,7 +890,8 @@ public final class InMemoryTransaction: Transaction, Sendable {
     }
 
     public func requestVersionstamp() -> any PendingTransactionVersionstamp {
-        let failure = _state.withLock { state -> StorageError? in
+        let failure = _state.value.withLock { state -> StorageError? in
+            state.hasAdmittedOperation = true
             guard case .open = state.lifecycle else {
                 return Self.stateError(
                     "Versionstamp must be requested before commit begins",
@@ -781,6 +906,113 @@ public final class InMemoryTransaction: Transaction, Sendable {
         return TransactionVersionstampRequest(
             completion: versionstampCompletion
         )
+    }
+
+    private struct RawCheckpointAccess: TransactionJournalBackendAccess {
+        let snapshot: SortedKeyValueStore
+        let state: StateOwner
+
+        func getValue(for key: ByteString, snapshot isSnapshot: Bool, maximumByteCount: Int) async throws -> ByteString? {
+            if !isSnapshot { state.value.withLock { $0.readConflictRegions.append(.point(key)) } }
+            let value = snapshot.get(key)
+            if let value, value.count > maximumByteCount {
+                throw StorageError.pointReadValueTooLarge(observedByteCount: value.count, maximumByteCount: maximumByteCount, backend: .inMemory)
+            }
+            return value
+        }
+
+        func rangeCursor(in range: TransactionJournalRange, reverse: Bool, snapshot isSnapshot: Bool, pageSize: Int, maximumByteCount: Int) -> KeyValueCursor {
+            if !isSnapshot { state.value.withLock { $0.readConflictRegions.append(.entireKeyspace) } }
+            func bound(_ key: ByteString, afterEqual: Bool) -> Int {
+                var low = 0
+                var high = snapshot.entries.count
+                while low < high {
+                    let middle = low + (high - low) / 2
+                    let comparison = compareBytes(snapshot.entries[middle].key, key)
+                    if comparison < 0 || (comparison == 0 && afterEqual) { low = middle + 1 }
+                    else { high = middle }
+                }
+                return low
+            }
+            let lower: Int
+            switch range.lower {
+            case .unbounded: lower = 0
+            case .inclusive(let key): lower = bound(key, afterEqual: false)
+            case .exclusive(let key): lower = bound(key, afterEqual: true)
+            }
+            let upper: Int
+            switch range.upper {
+            case .unbounded: upper = snapshot.entries.count
+            case .inclusive(let key): upper = bound(key, afterEqual: true)
+            case .exclusive(let key): upper = bound(key, afterEqual: false)
+            }
+            return KeyValueCursor(consuming: RawCheckpointRange(
+                snapshot: snapshot, lower: lower, upper: max(lower, upper),
+                reverse: reverse, maximumByteCount: maximumByteCount
+            ))
+        }
+    }
+
+    private struct RawCheckpointRange: TransactionRangeResult {
+        let snapshot: SortedKeyValueStore
+        let lower: Int
+        let upper: Int
+        let reverse: Bool
+        let maximumByteCount: Int
+
+        func makeCursor() -> Cursor {
+            Cursor(snapshot: snapshot, lower: lower, upper: upper, reverse: reverse,
+                   maximumByteCount: maximumByteCount, index: reverse ? upper - 1 : lower)
+        }
+
+        struct Cursor: TransactionRangeCursor {
+            let snapshot: SortedKeyValueStore
+            let lower: Int
+            let upper: Int
+            let reverse: Bool
+            let maximumByteCount: Int
+            var index: Int
+            var closed = false
+
+            mutating func next() async throws -> (ByteString, ByteString)? {
+                guard !closed, index >= lower, index < upper else { return nil }
+                let row = snapshot.entries[index]
+                let (bytes, overflow) = row.key.count.addingReportingOverflow(row.value.count)
+                guard !overflow, bytes <= maximumByteCount else {
+                    throw TransactionCheckpointError.limitExceeded(resource: .retainedBytes,
+                        actual: overflow ? Int.max : bytes, maximum: maximumByteCount)
+                }
+                index += reverse ? -1 : 1
+                return (row.key, row.value)
+            }
+
+            mutating func finish(isolation actor: isolated (any Actor)?) async throws { closed = true }
+        }
+    }
+
+    private func checkpointPayload(_ entries: [TransactionJournalMutation], original: CommitPayload) -> CommitPayload {
+        var operations: [WriteOp] = []
+        var conflicts: [InMemoryConflictRegion] = []
+        for entry in entries {
+            switch entry {
+            case .set(let key, let value, let suppress):
+                operations.append(.set(key: key, value: value))
+                if !suppress { conflicts.append(.point(key)) }
+            case .clear(let key, let suppress):
+                operations.append(.clear(key: key))
+                if !suppress { conflicts.append(.point(key)) }
+            case .clearRange(let begin, let end, let suppress):
+                operations.append(.clearRange(begin: begin, end: end))
+                if !suppress, let range = InMemoryConflictRegion.halfOpen(begin: begin, end: end) { conflicts.append(range) }
+            case .atomic(let key, let parameter, let type, let suppress):
+                operations.append(.atomic(key: key, param: parameter, mutationType: type))
+                if !suppress { conflicts.append(.point(key)) }
+            case .writeConflict(let begin, let end):
+                if let range = InMemoryConflictRegion.halfOpen(begin: begin, end: end) { conflicts.append(range) }
+            }
+        }
+        let reads = _state.value.withLock { $0.readConflictRegions }
+        return CommitPayload(operations: operations, readConflictRegions: original.readConflictRegions + reads, writeConflictRegions: conflicts)
     }
 
     private func commitOperations(
@@ -895,7 +1127,7 @@ public final class InMemoryTransaction: Transaction, Sendable {
     private static func validateOpen(
         _ lifecycle: Lifecycle,
         operation: StorageOperation
-    ) throws(StorageError) {
+    ) throws {
         switch lifecycle {
         case .open:
             return

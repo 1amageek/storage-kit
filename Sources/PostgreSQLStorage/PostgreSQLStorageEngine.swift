@@ -285,6 +285,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                let existing = contextLease.transaction
                 as? PostgreSQLStorageTransaction,
                existing.transactionDomain === transactionDomain {
+                do { try existing.requireNativeChildAdmission() }
+                catch { contextLease.release(); throw error }
                 return PostgreSQLStorageTransaction(
                     parent: existing,
                     logger: logger,
@@ -299,7 +301,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                 tableName: configuration.tableName,
                 logger: logger,
                 transactionDomain: transactionDomain,
-                resultBytesFactory: resultBytesFactory
+                resultBytesFactory: resultBytesFactory,
+                checkpointIsolationAllowed: configuration.isolationLevel == .serializable
             )
         }
     }
@@ -341,7 +344,8 @@ public final class PostgreSQLStorageEngine: StorageEngine, Sendable {
                     tableName: configuration.tableName,
                     logger: logger,
                     transactionDomain: transactionDomain,
-                    resultBytesFactory: resultBytesFactory
+                    resultBytesFactory: resultBytesFactory,
+                    checkpointIsolationAllowed: configuration.isolationLevel == .serializable
                 )
 
                 let owner = TransactionLifecycleOwner(transaction: tx)

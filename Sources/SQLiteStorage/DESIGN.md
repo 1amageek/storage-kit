@@ -146,22 +146,30 @@ Changing the PRAGMA set, the `kv_store` schema, or the catalog placement is a
 persisted-layout change: update this design, the Directory component's adapter
 notes, and the package design's change-impact table before implementation.
 
-## Planned Checkpoint Integration (S12)
+## Checkpoint Integration (S12)
 
-Status: planned, not current support. The common semantics and proof obligations
-are owned by the [Storage component](../StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
-This section owns only the adapter-specific integration path.
+The [Storage checkpoint contract](../StorageKit/Storage/DESIGN.md#transaction-checkpoints-sql-compatibility-s12)
+owns journal, token, barrier, provenance, and budget semantics. The concrete
+transaction selects the common journal before its first operation. Its raw
+reader retains the coordinator, connection lifetime, and native identifiers;
+it never retains the parent transaction or flushes writes. Native range reads
+check each row's transferred key/value bytes before copying SQLite columns.
 
-Current path: `SQLiteStorageTransaction` buffers synchronous writes and
-flushes them before asynchronous database work; nested transactions use native
-SQLite savepoints coordinated in strict LIFO order. That implementation is not
-a portable checkpoint capability.
+Normal transactions retain their buffered flush and native-savepoint paths.
+Checkpoint transactions reject native child creation and physical compaction
+before either can change native state. Commit seals and drains the journal,
+replays surviving operations once into the existing root commit path, and
+awaits native cleanup before closing the journal. Directory catalog operations
+use the same overlay as data. File persistence, busy handling, and FIFO
+connection ownership retain SQ-1, SQ-2, SQ-4, and SQ-6 through SQ-8.
 
-S12 integrates the shared journal into the concrete transaction before the
-first write and stops read-triggered flushes on the deferred-write path. The
-existing `KeyValueDirectoryCatalog` uses the same transaction and overlay;
-native nested-savepoint composition must neither bypass nor double-replay the
-journal. File persistence, busy/locking behavior, native rollback, cursors,
-connection ownership, and shutdown continue to obey the existing contracts.
-Verification includes file-backed data and Directory rollback, commit/reopen,
-checkpoint composition with nested calls, and native failure/cleanup paths.
+Verification adds shared checkpoint conformance, file-backed rollback and
+commit/reopen, native-child and compaction rejection, and normal nested
+transaction regression. Source changes do not establish this evidence alone.
+
+Checkpoint writes select the immutable journal under the transaction-state
+mutex, then acquire journal operation admission before byte-owner materialization
+outside every mutex. Seal rejects writes not yet admitted and drains admitted
+writes before replay.
+Terminal checkpoint and cleanup causes follow the linked failure contract,
+including shared completion and repeated commit observation.

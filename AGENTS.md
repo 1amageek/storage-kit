@@ -27,10 +27,14 @@
 ## PostgreSQL Test Harness
 
 - Run PostgreSQL integration coverage with `scripts/postgresql-test-harness`.
-- Set `TOOLCHAINS=org.swift.64202608141a` and explicitly provide
+- Set `TOOLCHAINS=org.swift.64202609041a` and explicitly provide
   `POSTGRES_TEST_HOST`, `POSTGRES_TEST_PORT`, `POSTGRES_TEST_USER`,
   `POSTGRES_TEST_PASSWORD`, and `POSTGRES_TEST_DB` for an isolated PostgreSQL
   16 database.
+- The caller's snapshot identifier is validated before resolving `swiftc`.
+  Package discovery and build subshells use Xcode's Apple toolchain for native
+  clang and linker discovery, with `SWIFT_EXEC` explicitly set to that same
+  snapshot compiler. The injected testing runtime also comes from that snapshot.
 - The harness uses the `storage-kit-Package` Xcode scheme, selects only the
   `PostgreSQLStorageTests` target, injects the snapshot
   testing runtime and service environment into `.xctestrun`. The exact

@@ -89,3 +89,17 @@ a sibling repository checkout:
 ```bash
 npm install --save-exact https://github.com/1amageek/storage-kit/releases/download/26.0817.0/storage-kit-cloudflare-durable-object-storage-host-26.817.0.tgz
 ```
+
+### Swift checkpoint persistence probe
+
+`STORAGEKIT_CHECKPOINT_PROBE` optionally names an externally built executable
+for `smoke:local:persistence`. The smoke invokes it as
+`probe write|read endpoint databaseID` before shutdown and after restart, passing
+`STORAGEKIT_CHECKPOINT_PROBE_TOKEN`, `STORAGEKIT_CHECKPOINT_PROBE_TENANT_ID`, and
+`STORAGEKIT_CHECKPOINT_PROBE_WORKSPACE_ID` through its environment. Each invocation
+has a 60-second process timeout. The probe uses the production Swift HTTP adapter
+to checkpoint, roll back metadata/data, commit survivors once, and verify fresh
+reads after restart. It must not assume a particular global commit version.
+Without the executable, the smoke verifies only its existing JavaScript wire
+persistence contract. The executable belongs to the verification harness and
+is not a public storage package product.

@@ -37,8 +37,10 @@ struct TransactionVersionstampCompletionTests {
         do {
             _ = try await completion.wait()
             Issue.record("Expected versionstamp completion failure")
-        } catch let error {
+        } catch let error as StorageError {
             #expect(error == expected)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
         }
     }
 

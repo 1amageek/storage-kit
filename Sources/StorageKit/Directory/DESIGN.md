@@ -443,7 +443,7 @@ is never initialized, opened, or rejected because of another root's data.
 |---|---|---|
 | L-1 | Lease, transaction, and Partition domains match | `storageDomainMismatch` at issuance and at every bind |
 | L-2 | A lease is validated against the store at issuance and again at every access binding | the address walk runs in the issuing or binding transaction, so the resolution enters that transaction's read set |
-| L-3 | A stale generation fails; work is never redirected | `requirePartitionGeneration`: an absent node, a non-Partition layer, or a different `keyspacePrefix` → `staleLease`. It is one function over `DirectoryAccess`, not a member, so no conformance can replace it |
+| L-3 | A stale generation fails; work is never redirected | `requirePartitionGeneration`: invalid checkpoint provenance, an absent node, a non-Partition layer, or a different `keyspacePrefix` → `staleLease`. It is one function over `DirectoryAccess`, not a member, so no conformance can replace it |
 | L-4 | Read binding cannot mutate | `BoundReadAccess` has no mutation members |
 | L-5 | Write binding cannot commit or cancel | `BoundWriteAccess` has no lifecycle members |
 | L-6 | Bound access and cursors cannot escape the closure | noncopyable, borrowed; cursors validate the binding scope on both sides of every advance → `staleLease`, so an advance already in flight when the binding closes does not deliver its row either, and the binding scope owns every cursor it issued and completes that cursor's backend cleanup as part of closing, so no capability of an escaped cursor — cleanup included — is still outstanding when the binding closes |
@@ -464,17 +464,17 @@ node its own lease is bound to and report `dataCorruption` on the next create.
 Removing a Partition is still one range clear `[P, strinc(P))`, because the
 catalog clears through the transaction, not through bound access.
 
-Staleness is the only lease mechanism, and the store is its only authority:
+Committed generation staleness is determined by the store. Unpublished checkpoint generations additionally carry rollback provenance:
 
 - A lease does not block operation 4 or 5. Removal and move are unconditional
   here; whether removing a Partition that something is using is admissible is
   a database-operation decision the Framework makes before it calls
   (SPEC §12.3).
-- The prefix allocator never reuses a number, so a Partition removed and
-  recreated at the same address always carries a different `keyspacePrefix`.
-  Comparing the prefix is therefore a complete staleness test: it needs no
-  record of who else is running, and it gives the same answer in every process
-  that reads the same store.
+- The committed prefix allocator never reuses a number, so committed removal
+  and recreation changes `keyspacePrefix`. A checkpoint rollback can reuse an
+  uncommitted allocation, so prefix comparison is complemented by the
+  attempt-local provenance contract below. This is not a process-local
+  replacement for persisted existence or cross-process generation checks.
 - Issuance and every bind perform the same walk in the transaction that will
   use the lease. Concurrency is then the backend's: the resolution is in that
   transaction's read set, so a removal committing concurrently makes the
@@ -488,6 +488,94 @@ Staleness is the only lease mechanism, and the store is its only authority:
   rather than opening one per key. The walk is not deduplicated against earlier
   reads in the same transaction: what it shares with them is the read set, not
   the round trip.
+
+### Checkpoint Provenance (SQL S12)
+
+The [Storage checkpoint owner](../Storage/DESIGN.md#transaction-checkpoints-sql-compatibility-s12)
+owns journal offsets, marker/barrier lifecycle, and the generic operation scope.
+This component owns the meaning and validation of unpublished Directory values.
+The implementation below realizes these S12 adapter obligations.
+
+```text
+native/catalog create, root initialize, or move
+  -> append metadata/allocation bytes to the existing attempt journal
+  -> register node/path provenance at that journal position
+  -> Directory value retains its own + ancestor provenance witnesses
+  -> rollback suffix: invalidate only discarded generation/path witnesses
+       -> stale parent / lease issuance / bind / existing bound access fails
+  -> successful commit: promote surviving witnesses; later reads use store authority
+```
+
+A fresh `Directory` resolution carries a bounded immutable dependency set of
+`DirectoryProvenance` witnesses. Each witness has an immutable identity and a
+single `Mutex`-protected state: unpublished, published, or invalid. No witness
+retains its journal, transaction, backend, or lease. Directory equality and
+hashing remain domain/address/tag/prefix value semantics; permission to use a
+value additionally requires live provenance.
+
+Creation registers a witness for the node generation; root initialization
+registers the root generation; move registers a destination-path witness.
+Catalog/native reads look up pending witnesses by exact address plus prefix and
+compose them with the parent value's witnesses. Walking an address therefore
+includes transient ancestor moves and root initialization. Reading an unchanged
+committed node after a checkpoint does not create a discardable generation:
+rollback must not invalidate a value solely because its read happened later.
+Repeated reads of one pending generation reuse its witness. A new allocation or
+path transition after rollback receives a new witness identity even when its
+address and allocated prefix are byte-identical to a discarded one.
+
+The journal stores provenance events with journal position plus monotonic event
+identity. A marker records both positions, so events between byte mutations or
+at one journal offset remain distinguishable. Rollback invalidates events after
+the marker and removes their lookups. Release removes only markers. Cancel or a
+known failed commit invalidates every unpublished event; unknown commit also
+invalidates unpublished process-local values while preserving the unknown
+backend outcome. Successful commit publishes surviving witnesses and clears
+journal registrations without invalidating those values. Published provenance
+never substitutes for the existing store walk in later transactions.
+
+| Entry point | Required provenance validation |
+|---|---|
+| `DirectoryAccess.open`, `listChildren` | parent witnesses before deriving metadata coordinates |
+| `openOrCreate`, `remove` | parent witnesses before reads or writes; preserve current existence/position checks |
+| `move` | source and destination witnesses before resolving current positions |
+| `StorageEngine.leasePartition` | input Partition witnesses before generation walk; never issue a lease from an invalid old value even if its prefix was reused |
+| `PartitionLease` binding | input witnesses plus existing domain/admission/store generation walk |
+| `BoundReadAccess`, `BoundWriteAccess`, issued cursors | witnesses on every operation and before/after cursor advancement, in addition to registration/scope validation |
+
+Every compound catalog operation joins the result-free
+`TransactionReadAccess.performOperation` requirement, which checkpoint adapters
+forward to the journal; ordinary transactions execute the body directly. The scope spans resolution, allocation, all
+metadata/data mutations, witness registration, and result construction. FDB
+keeps the native Directory Layer as its sole catalog authority and registers
+provenance at the same adapter boundaries; it does not introduce the key-value
+catalog or a second existence registry.
+
+The package integration methods are `Directory.checkProvenance(operation:backend:)`,
+`TransactionJournal.recordDirectoryProvenance(address:prefix:) throws -> DirectoryProvenance`,
+and `TransactionJournal.directoryProvenance(address:prefix:) -> DirectoryProvenance?`.
+The current journal is discovered only inside an active attempt-identified
+operation lease through the package TaskLocal context; read-only access exposes
+no checkpoint control capability. The existing package-only Directory
+initializer accepts `provenance: [DirectoryProvenance] = []`. The package
+`trackingProvenance(parent:created:)` projection composes the parent dependency
+list with the current node lookup, deduplicates witness identity, and bounds the
+list by `DirectoryLimits.maximumDepth + 1`. Its work charge precedes the bounded
+array allocation. Each leaf exposes only package `publish`, `invalidate`, and
+`requireValid` operations; publication and invalidation affect only unpublished
+state, so a terminal invalid witness cannot be revived. Adapter result projection combines the current parent dependencies
+with the pending lookup; core root projection has no parent. Registration and
+the composed dependency count are charged before allocation against journal
+entry/work bounds and the existing Directory depth bound. Source and destination
+values are validated inside the same admitted operation that consumes them.
+
+Required shared cases are CP-03 and CP-05 in the Storage contract. In particular,
+`checkpoint -> create p -> retain Partition/lease -> rollback -> recreate p`
+must reject the old Partition at lease issuance, the old lease at binding, the
+old value as a parent, and a pre-existing bound cursor, despite byte-identical
+prefix reuse. A surviving pre-marker value remains usable after rollback and
+a successful commit; a post-marker read of an unchanged committed node also
+survives. New-transaction checks prove durable metadata/data results.
 
 ## Runtime Flows
 

@@ -15,6 +15,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     public var compaction: StorageCompactionAccess? { nil }
 
     public static let declaredCapabilities = TransactionCapabilities(
+            transactionCheckpoints: true,
             transactionTimeout: true,
             schedulingPriority: true,
             readPriority: true,
@@ -38,9 +39,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             case .cancellingPreparation(_, let error),
                  .cancelling(_, let error),
                  .cancelled(let error),
-                 .failed(let error),
                  .commitUnknown(let error):
                 return error
+            case .failed(let error):
+                return error as? StorageError
             case .open, .preparing, .failingPreparation, .committing,
                  .committed:
                 return nil
@@ -48,7 +50,41 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         }
     }
 
-    let fdbTransaction: any TransactionProtocol
+    private let nativeTransaction: any TransactionProtocol
+    private let checkpointMode = Mutex<FDBCheckpointTransaction?>(nil)
+
+    var fdbTransaction: any TransactionProtocol {
+        if let mode = checkpointMode.withLock({ $0 }) { return mode }
+        return nativeTransaction
+    }
+
+    public var checkpoints: (any TransactionCheckpointAccess)? {
+        checkpointMode.withLock { $0?.journal }
+    }
+
+    public func configureCheckpoints(limits: TransactionCheckpointLimits) throws {
+        try state.withLock { state in
+            try Self.validateExclusiveAccess(state, operation: .beginTransaction)
+            guard !state.hasAdmittedOperation else {
+                throw TransactionCheckpointError.configurationAfterAdmission
+            }
+            try checkpointMode.withLock { mode in
+                guard mode == nil else {
+                    throw TransactionCheckpointError.configurationAfterAdmission
+                }
+                let journal = TransactionJournal(limits: limits, backend: .foundationDB, mutationByteMeter: mutationByteMeter)
+                mode = FDBCheckpointTransaction(native: nativeTransaction, journal: journal, limits: limits, includesSystemKeys: state.systemKeyAccess)
+            }
+        }
+    }
+
+    public func performOperation(_ operation: @escaping @Sendable () async throws -> Void) async throws {
+        if let mode = checkpointMode.withLock({ $0 }) {
+            try await mode.journal.performOperation(operation)
+        } else {
+            try await operation()
+        }
+    }
     private let database: (any DatabaseProtocol)?
     private let commitRequestLimit: CommitRequestLimit
     private let state = Mutex(MutableState())
@@ -57,6 +93,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     private struct MutableState: Sendable {
         var lifecycle: Lifecycle = .open
         var hasPendingMutations = false
+        var hasAdmittedOperation = false
+        var systemKeyAccess = false
         var activeOperationCount = 0
         var commitFollowerCount = 0
         var commitCancellationWaiterCount = 0
@@ -81,18 +119,18 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         case committed
         case cancelling(TransactionOperationCompletion, StorageError)
         case cancelled(StorageError)
-        case failed(StorageError)
+        case failed(any Error)
         case commitUnknown(StorageError)
     }
 
     private enum CommitExecutionResolution: Sendable {
-        case resolve(Result<Void, StorageError>)
+        case resolve(Result<Void, any Error>)
         case resolvedByCancellation
     }
 
     private enum CommitPreparationAction: Sendable {
         case dispatch
-        case fail(StorageError)
+        case fail(any Error)
         case completeCancellation(CommitPreparation, StorageError)
     }
 
@@ -115,7 +153,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         transactionDomain: StorageTransactionDomain,
         commitRequestLimit: CommitRequestLimit = .default
     ) throws {
-        self.fdbTransaction = fdbTransaction
+        self.nativeTransaction = fdbTransaction
         self.database = database
         self.transactionDomain = transactionDomain
         self.commitRequestLimit = commitRequestLimit
@@ -148,6 +186,20 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         transactionDomain: StorageTransactionDomain,
         writes: Bool,
         operation: StorageOperation,
+        _ body: @escaping @Sendable (any TransactionProtocol) async throws -> T
+    ) async throws -> T {
+        try await TransactionOperationExecutor(access: self).withOperation { [self] in
+            try await withDirectoryOperationInScope(
+                transactionDomain: transactionDomain, writes: writes,
+                operation: operation, body
+            )
+        }
+    }
+
+    private func withDirectoryOperationInScope<T: Sendable>(
+        transactionDomain: StorageTransactionDomain,
+        writes: Bool,
+        operation: StorageOperation,
         _ body: (any TransactionProtocol) async throws -> T
     ) async throws -> T {
         guard self.transactionDomain === transactionDomain else {
@@ -159,10 +211,13 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             )
         }
         let token = try state.withLock { state -> UInt64 in
-            try Self.validateExclusiveAccess(state, operation: operation)
+            try Self.validateExclusiveAccess(
+                state, operation: operation, admittedOperation: isAdmittedJournalOperation
+            )
             let token = state.nextDirectoryOperation
             state.nextDirectoryOperation &+= 1
             state.activeDirectoryOperation = token
+            state.hasAdmittedOperation = true
             if writes {
                 state.hasPendingMutations = true
             }
@@ -251,6 +306,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 snapshot: snapshot
             )
             return value
+        } catch let error as TransactionCheckpointError {
+            throw error
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as FDBError {
@@ -274,6 +331,12 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         try beginOperation(.read)
         defer { finishOperation() }
         do {
+            if let mode = checkpointMode.withLock({ $0 }) {
+                return try await mode.journal.getValue(
+                    for: key, snapshot: snapshot, maximumByteCount: maximumByteCount,
+                    using: mode.raw
+                )
+            }
             let value = try await fdbTransaction.getValue(
                 for: key,
                 snapshot: snapshot
@@ -290,6 +353,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 )
             }
             return value
+        } catch let error as TransactionCheckpointError {
+            throw error
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as FDBError {
@@ -319,6 +384,13 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 operation: .rangeRead
             ))
         }
+        if let mode = checkpointMode.withLock({ $0 }) {
+            return FDBStorageRangeResult(mode.journal.rangeCursor(
+                from: begin, to: end, limit: limit, reverse: reverse,
+                snapshot: snapshot, streamingMode: streamingMode,
+                using: mode.raw
+            ))
+        }
         let fdbBegin = toFDB(begin)
         let fdbEnd = toFDB(end)
         let fdbMode = toFDB(streamingMode)
@@ -346,126 +418,82 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     public func setValue(_ value: ByteString, for key: ByteString) throws {
         try Self.validateFoundationDBLength(key, operation: .write)
         try Self.validateFoundationDBLength(value, operation: .write)
-        try key.withUnsafeBytes { keyBytes in
-            try value.withUnsafeBytes { valueBytes in
-                let borrowedKey = ScopedByteInput(keyBytes)
-                let borrowedValue = ScopedByteInput(valueBytes)
-                try state.withLock { state in
-                    try Self.validateExclusiveAccess(state, operation: .write)
-                    try mutationByteMeter.recordSet(key: key, value: value)
-                    do {
-                        try fdbTransaction.setValue(
-                            borrowedValue,
-                            for: borrowedKey
-                        )
-                        state.hasPendingMutations = true
-                    } catch {
-                        let converted = Self.convertBackendError(
-                            error,
-                            operation: .write
-                        )
-                        state.lifecycle = .failed(converted)
-                        throw converted
-                    }
-                }
-            }
+        try mutate(operation: .write, charge: { try mutationByteMeter.recordSet(key: key, value: value) }) {
+            try $0.setValue(value, for: key)
         }
     }
 
     public func clear(key: ByteString) throws {
         try Self.validateFoundationDBLength(key, operation: .delete)
-        try key.withUnsafeBytes { keyBytes in
-            let borrowedKey = ScopedByteInput(keyBytes)
-            try state.withLock { state in
-                try Self.validateExclusiveAccess(state, operation: .delete)
-                try mutationByteMeter.recordClear(key: key)
-                do {
-                    try fdbTransaction.clear(key: borrowedKey)
-                    state.hasPendingMutations = true
-                } catch {
-                    let converted = Self.convertBackendError(
-                        error,
-                        operation: .delete
-                    )
-                    state.lifecycle = .failed(converted)
-                    throw converted
-                }
-            }
+        try mutate(operation: .delete, charge: { try mutationByteMeter.recordClear(key: key) }) {
+            try $0.clear(key: key)
         }
     }
 
     public func clearRange(beginKey: ByteString, endKey: ByteString) throws {
         try Self.validateFoundationDBLength(beginKey, operation: .deleteRange)
         try Self.validateFoundationDBLength(endKey, operation: .deleteRange)
-        try beginKey.withUnsafeBytes { beginBytes in
-            try endKey.withUnsafeBytes { endBytes in
-                let borrowedBegin = ScopedByteInput(beginBytes)
-                let borrowedEnd = ScopedByteInput(endBytes)
-                try state.withLock { state in
-                    try Self.validateExclusiveAccess(
-                        state,
-                        operation: .deleteRange
-                    )
-                    try mutationByteMeter.recordClearRange(
-                        beginKey: beginKey,
-                        endKey: endKey
-                    )
-                    do {
-                        try fdbTransaction.clearRange(
-                            beginKey: borrowedBegin,
-                            endKey: borrowedEnd
-                        )
-                        state.hasPendingMutations = true
-                    } catch {
-                        let converted = Self.convertBackendError(
-                            error,
-                            operation: .deleteRange
-                        )
-                        state.lifecycle = .failed(converted)
-                        throw converted
-                    }
-                }
-            }
+        try mutate(operation: .deleteRange, charge: {
+            try mutationByteMeter.recordClearRange(beginKey: beginKey, endKey: endKey)
+        }) {
+            try $0.clearRange(beginKey: beginKey, endKey: endKey)
         }
     }
 
-    // MARK: - Atomic Operations
-
-    public func atomicOp(
-        key: ByteString,
-        param: ByteString,
-        mutationType: MutationType
-    ) throws {
+    public func atomicOp(key: ByteString, param: ByteString, mutationType: MutationType) throws {
         try Self.validateFoundationDBLength(key, operation: .write)
         try Self.validateFoundationDBLength(param, operation: .write)
-        try key.withUnsafeBytes { keyBytes in
-            try param.withUnsafeBytes { parameterBytes in
-                let borrowedKey = ScopedByteInput(keyBytes)
-                let borrowedParameter = ScopedByteInput(
-                    parameterBytes
-                )
-                try state.withLock { state in
-                    try Self.validateExclusiveAccess(state, operation: .write)
-                    try mutationByteMeter.recordAtomic(
-                        key: key,
-                        parameter: param
-                    )
+        try mutate(operation: .write, charge: {
+            try mutationByteMeter.recordAtomic(key: key, parameter: param)
+        }) {
+            try $0.atomicOp(key: key, param: param, mutationType: toFDB(mutationType))
+        }
+    }
+
+    private func mutate(
+        operation: StorageOperation,
+        charge: () throws -> Void,
+        _ body: (any TransactionProtocol) throws -> Void
+    ) throws {
+        try withJournalAdmission {
+            let mode = try state.withLock { state -> FDBCheckpointTransaction? in
+                try Self.validateExclusiveAccess(state, operation: operation, admittedOperation: isAdmittedJournalOperation)
+                state.hasAdmittedOperation = true
+                let mode = checkpointMode.withLock { $0 }
+                guard let mode else {
+                    try charge()
                     do {
-                        try fdbTransaction.atomicOp(
-                            key: borrowedKey,
-                            param: borrowedParameter,
-                            mutationType: toFDB(mutationType)
-                        )
+                        try body(nativeTransaction)
                         state.hasPendingMutations = true
+                    } catch let error as TransactionMutationByteLimitError {
+                        throw error
                     } catch {
-                        let converted = Self.convertBackendError(
-                            error,
-                            operation: .write
-                        )
-                        state.lifecycle = .failed(converted)
-                        throw converted
+                        let failure = Self.convertBackendError(error, operation: operation)
+                        state.lifecycle = .failed(failure)
+                        throw failure
                     }
+                    return nil
                 }
+                // Exclusive admission proves the active count is zero here.
+                state.activeOperationCount = 1
+                return mode
+            }
+            guard let mode else { return }
+            defer { finishOperation() }
+            do {
+                try body(mode)
+                state.withLock { $0.hasPendingMutations = true }
+            } catch let error as TransactionCheckpointError {
+                throw error
+            } catch let error as TransactionMutationByteLimitError {
+                throw error
+            } catch {
+                let failure: any Error
+                if error is FDBError || error is StorageError {
+                    failure = Self.convertBackendError(error, operation: operation)
+                } else { failure = error }
+                state.withLock { $0.lifecycle = .failed(failure) }
+                throw failure
             }
         }
     }
@@ -481,15 +509,17 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 StorageError
             )
             case committed
-            case failed(StorageError)
+            case failed(any Error)
         }
 
         let start = state.withLock { state -> Start in
             switch state.lifecycle {
             case .open:
-                guard state.activeDirectoryOperation == nil,
-                      state.activeOperationCount == 0,
-                      state.rangeLeaseActivity.isEmpty else {
+                guard checkpointMode.withLock({ $0 != nil }) || (
+                    state.activeDirectoryOperation == nil &&
+                    state.activeOperationCount == 0 &&
+                    state.rangeLeaseActivity.isEmpty
+                ) else {
                     return .failed(Self.lifecycleError(
                         "FoundationDB transaction has active operations",
                         operation: .commit,
@@ -517,8 +547,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 return .waitForCancellation(completion, error)
             case .cancelled(let error):
                 return .failed(error)
-            case .failed(let error), .commitUnknown(let error):
-                return .failed(error)
+            case .failed(let error): return .failed(error)
+            case .commitUnknown(let error): return .failed(error)
             }
         }
 
@@ -526,6 +556,28 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         case .leader(let completion):
             switch await performCommit() {
             case .resolve(let result):
+                if let mode = checkpointMode.withLock({ $0 }) {
+                    do {
+                        switch result {
+                        case .success:
+                            try await mode.journal.close(committed: true)
+                        case .failure(let error):
+                            if (error as? StorageError)?.code == .commitUnknownResult {
+                                try await mode.journal.closeWithUnknownCommit()
+                            } else {
+                                try await mode.journal.close(committed: false)
+                            }
+                        }
+                    } catch {
+                        let failure: any Error
+                        if case .failure(let operationError) = result {
+                            failure = StorageTransactionCleanupError(operationError: operationError, cancellationError: error)
+                        } else { failure = error }
+                        state.withLock { $0.lifecycle = .failed(failure) }
+                        completion.fail(failure)
+                        throw failure
+                    }
+                }
                 switch result {
                 case .success:
                     completion.succeed()
@@ -549,8 +601,16 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     }
 
     private func performCommit() async -> CommitExecutionResolution {
-        let admissionResult: Result<Void, StorageError>
+        let admissionResult: Result<Void, any Error>
         do {
+            if let mode = checkpointMode.withLock({ $0 }) {
+                do { try await mode.replay() }
+                catch let error as FDBError { throw Self.convertFDBError(error, operation: .prepare) }
+                catch let error as StorageError { throw Self.normalizeCommitAdmissionError(error) }
+                catch {
+                    return await finishCommitAdmission(.failure(error))
+                }
+            }
             try await checkCommitRequestFootprint()
             admissionResult = .success(())
         } catch is CancellationError {
@@ -570,12 +630,13 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 Self.normalizeCommitAdmissionError(error)
             )
         } catch {
-            admissionResult = .failure(Self.convertBackendError(
-                error,
-                operation: .prepare
-            ))
+            admissionResult = .failure(Self.convertBackendError(error, operation: .prepare))
         }
 
+        return await finishCommitAdmission(admissionResult)
+    }
+
+    private func finishCommitAdmission(_ admissionResult: Result<Void, any Error>) async -> CommitExecutionResolution {
         switch selectCommitPreparationAction(for: admissionResult) {
         case .completeCancellation(let preparation, let error):
             state.withLock { state in
@@ -583,6 +644,14 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                     return
                 }
                 state.lifecycle = .cancelled(error)
+            }
+            if let mode = checkpointMode.withLock({ $0 }) {
+                do { try await mode.journal.close(committed: false) }
+                catch {
+                    state.withLock { $0.lifecycle = .failed(error) }
+                    preparation.cleanup.fail(error)
+                    return .resolvedByCancellation
+                }
             }
             preparation.cleanup.succeed()
             return .resolvedByCancellation
@@ -636,7 +705,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     }
 
     private func selectCommitPreparationAction(
-        for admissionResult: Result<Void, StorageError>
+        for admissionResult: Result<Void, any Error>
     ) -> CommitPreparationAction {
         state.withLock { state in
             switch state.lifecycle {
@@ -770,11 +839,21 @@ public final class FDBStorageTransaction: Transaction, Sendable {
         switch start {
         case .leader(let completion, let drain):
             fdbTransaction.cancel()
+            var cleanupError: (any Error)?
+            if let mode = checkpointMode.withLock({ $0 }) {
+                do { try await mode.journal.close(committed: false) }
+                catch { cleanupError = error }
+            }
             if let drain {
                 await drain.wait()
             }
             let error = Self.cancellationError(operation: .cancel)
             state.withLock { $0.lifecycle = .cancelled(error) }
+            if let cleanupError {
+                state.withLock { $0.lifecycle = .failed(cleanupError) }
+                completion.fail(cleanupError)
+                throw cleanupError
+            }
             completion.succeed()
         case .preparationLeader(let preparation, let error):
             fdbTransaction.cancel()
@@ -788,7 +867,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             do {
                 try await completion.wait()
             } catch {
-                if error.code == .commitUnknownResult {
+                if (error as? StorageError)?.code == .commitUnknownResult {
                     throw error
                 }
                 return
@@ -814,15 +893,23 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     public func setReadVersion(_ version: Int64) throws {
         try state.withLock { state in
             try Self.validateExclusiveAccess(state, operation: .read)
-            fdbTransaction.setReadVersion(version)
+            try withJournalAdmission { fdbTransaction.setReadVersion(version) }
         }
     }
 
     public func getReadVersion() async throws -> Int64 {
+        try await TransactionOperationExecutor(access: self).withOperation { [self] in
+            try await readVersionInOperation()
+        }
+    }
+
+    private func readVersionInOperation() async throws -> Int64 {
         try beginOperation(.read)
         defer { finishOperation() }
         do {
             return try await fdbTransaction.getReadVersion()
+        } catch let error as TransactionCheckpointError {
+            throw error
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as FDBError {
@@ -862,6 +949,9 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 default:
                     try fdbTransaction.setOption(forOption: toFDBOption(option))
                 }
+                if case .accessSystemKeys = option { state.systemKeyAccess = true }
+            } catch let error as TransactionCheckpointError {
+                throw error
             } catch let error as FDBError {
                 throw Self.convertFDBError(error, operation: .execute)
             } catch {
@@ -884,6 +974,9 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                         to: borrowedValue,
                         forOption: toFDBOption(option)
                     )
+                    if case .accessSystemKeys = option { state.systemKeyAccess = true }
+                } catch let error as TransactionCheckpointError {
+                    throw error
                 } catch let error as FDBError {
                     throw Self.convertFDBError(error, operation: .execute)
                 } catch {
@@ -898,6 +991,9 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             try Self.validateExclusiveAccess(state, operation: .execute)
             do {
                 try fdbTransaction.setOption(to: value, forOption: toFDBOption(option))
+                if case .accessSystemKeys = option { state.systemKeyAccess = true }
+            } catch let error as TransactionCheckpointError {
+                throw error
             } catch let error as FDBError {
                 throw Self.convertFDBError(error, operation: .execute)
             } catch {
@@ -1058,18 +1154,27 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     public func addConflictRange(beginKey: ByteString, endKey: ByteString, type: ConflictRangeType) throws {
         try Self.validateFoundationDBLength(beginKey, operation: .write)
         try Self.validateFoundationDBLength(endKey, operation: .write)
+        if checkpointMode.withLock({ $0 != nil }) {
+            try mutate(operation: .write, charge: {}) {
+                try $0.addConflictRange(beginKey: beginKey, endKey: endKey, type: toFDB(type))
+            }
+            return
+        }
         try beginKey.withUnsafeBytes { beginBytes in
             try endKey.withUnsafeBytes { endBytes in
                 let borrowedBegin = ScopedByteInput(beginBytes)
                 let borrowedEnd = ScopedByteInput(endBytes)
                 try state.withLock { state in
                     try Self.validateExclusiveAccess(state, operation: .write)
+                    state.hasAdmittedOperation = true
                     do {
                         try fdbTransaction.addConflictRange(
                             beginKey: borrowedBegin,
                             endKey: borrowedEnd,
                             type: toFDB(type)
                         )
+                    } catch let error as TransactionCheckpointError {
+                        throw error
                     } catch let error as FDBError {
                         throw Self.convertFDBError(error, operation: .write)
                     } catch {
@@ -1122,6 +1227,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 )
             }
             return result
+        } catch let error as TransactionCheckpointError {
+            throw error
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as FDBError {
@@ -1160,16 +1267,13 @@ public final class FDBStorageTransaction: Transaction, Sendable {
     public func requestVersionstamp() -> any PendingTransactionVersionstamp {
         let pendingResult: Result<
             any FDB.PendingTransactionVersionstamp,
-            StorageError
+            any Error
         > = state.withLock { state in
             do {
                 try Self.validateExclusiveAccess(state, operation: .read)
-                return .success(fdbTransaction.requestVersionstamp())
+                return .success(try withJournalAdmission { fdbTransaction.requestVersionstamp() })
             } catch {
-                return .failure(Self.convertBackendError(
-                    error,
-                    operation: .read
-                ))
+                return .failure(error)
             }
         }
 
@@ -1182,6 +1286,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 )
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let error as TransactionCheckpointError {
+                throw error
             } catch let error as FDBError {
                 throw Self.convertFDBError(error, operation: .read)
             } catch {
@@ -1192,13 +1298,26 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     private func validateOpen(operation: StorageOperation) throws {
         try state.withLock { state in
-            try Self.validateAvailable(state, operation: operation)
+            try Self.validateAvailable(state, operation: operation, admittedOperation: isAdmittedJournalOperation)
+            state.hasAdmittedOperation = true
         }
+    }
+
+    private func withJournalAdmission<Result>(_ body: () throws -> Result) throws -> Result {
+        if let mode = checkpointMode.withLock({ $0 }) {
+            return try mode.journal.performSynchronousOperation(body)
+        }
+        return try body()
+    }
+
+    private var isAdmittedJournalOperation: Bool {
+        guard let mode = checkpointMode.withLock({ $0 }) else { return false }
+        return TransactionJournal.current === mode.journal
     }
 
     private func beginOperation(_ operation: StorageOperation) throws {
         try state.withLock { state in
-            try Self.validateAvailable(state, operation: operation)
+            try Self.validateAvailable(state, operation: operation, admittedOperation: isAdmittedJournalOperation)
             let nextCount = state.activeOperationCount.addingReportingOverflow(1)
             guard !nextCount.overflow else {
                 throw Self.lifecycleError(
@@ -1208,6 +1327,7 @@ public final class FDBStorageTransaction: Transaction, Sendable {
                 )
             }
             state.activeOperationCount = nextCount.partialValue
+            state.hasAdmittedOperation = true
         }
     }
 
@@ -1264,9 +1384,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     private static func validateAvailable(
         _ state: MutableState,
-        operation: StorageOperation
+        operation: StorageOperation,
+        admittedOperation: Bool = false
     ) throws {
-        try validateOpen(state.lifecycle, operation: operation)
+        try validateOpen(state.lifecycle, operation: operation, admittedOperation: admittedOperation)
         guard state.activeDirectoryOperation == nil else {
             throw lifecycleError(
                 "FoundationDB transaction has an active Directory operation",
@@ -1277,9 +1398,10 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     private static func validateExclusiveAccess(
         _ state: MutableState,
-        operation: StorageOperation
+        operation: StorageOperation,
+        admittedOperation: Bool = false
     ) throws {
-        try validateAvailable(state, operation: operation)
+        try validateAvailable(state, operation: operation, admittedOperation: admittedOperation)
         guard state.activeOperationCount == 0,
               state.rangeLeaseActivity.isEmpty else {
             throw lifecycleError(
@@ -1292,10 +1414,13 @@ public final class FDBStorageTransaction: Transaction, Sendable {
 
     private static func validateOpen(
         _ lifecycle: Lifecycle,
-        operation: StorageOperation
+        operation: StorageOperation,
+        admittedOperation: Bool = false
     ) throws {
         switch lifecycle {
         case .open:
+            return
+        case .preparing where admittedOperation:
             return
         case .preparing, .failingPreparation, .cancellingPreparation,
              .committing:
@@ -1304,8 +1429,8 @@ public final class FDBStorageTransaction: Transaction, Sendable {
             throw lifecycleError("FoundationDB transaction committed", operation: operation)
         case .cancelling, .cancelled:
             throw cancellationError(operation: operation)
-        case .failed(let error), .commitUnknown(let error):
-            throw error
+        case .failed(let error): throw error
+        case .commitUnknown(let error): throw error
         }
     }
 

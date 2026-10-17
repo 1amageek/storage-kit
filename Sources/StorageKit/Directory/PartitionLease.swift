@@ -188,6 +188,7 @@ public struct PartitionLease: ~Copyable, Sendable {
             )
         }
         try registration.requireActive(operation: operation, backend: bounds.backend)
+        try partition.root.checkProvenance(operation: operation, backend: bounds.backend)
     }
 
     deinit {

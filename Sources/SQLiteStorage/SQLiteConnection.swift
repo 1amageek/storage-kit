@@ -277,8 +277,8 @@ final class SQLiteConnection {
     /// borrow. Result payloads remain untouched until `nextRangeCursor`.
     func openRangeCursor(
         ownerTransactionIdentifier: UInt64,
-        begin: SQLRangeBoundary,
-        end: SQLRangeBoundary,
+        begin: SQLRangeBoundary?,
+        end: SQLRangeBoundary?,
         limit: Int,
         reverse: Bool
     ) throws -> UInt64 {
@@ -298,12 +298,13 @@ final class SQLiteConnection {
         clauses.reserveCapacity(2)
         var bindings: [ByteString] = []
         bindings.reserveCapacity(2)
-        appendRangeBoundary(begin, clauses: &clauses, bindings: &bindings)
-        appendRangeBoundary(end, clauses: &clauses, bindings: &bindings)
+        if let begin { appendRangeBoundary(begin, clauses: &clauses, bindings: &bindings) }
+        if let end { appendRangeBoundary(end, clauses: &clauses, bindings: &bindings) }
 
         let order = reverse ? "DESC" : "ASC"
         let limitClause = limit > 0 ? " LIMIT ?" : ""
-        let sql = "SELECT key, value FROM kv_store WHERE \(clauses[0]) AND \(clauses[1]) ORDER BY key \(order)\(limitClause)"
+        let predicate = clauses.isEmpty ? "1" : clauses.joined(separator: " AND ")
+        let sql = "SELECT key, value FROM kv_store WHERE \(predicate) ORDER BY key \(order)\(limitClause)"
 
         var statement: OpaquePointer?
         rangePrepareCount &+= 1
@@ -381,7 +382,8 @@ final class SQLiteConnection {
     /// final owners. SQLite invalidates both column pointers at the next step,
     /// reset, or finalize, so one owned copy per column is mandatory here.
     func nextRangeCursor(
-        identifier: UInt64
+        identifier: UInt64,
+        maximumByteCount: Int? = nil
     ) throws -> (key: ByteString, value: ByteString)? {
         guard let cursor = rangeCursors[identifier] else {
             throw StorageError(
@@ -396,6 +398,19 @@ final class SQLiteConnection {
         let rc = sqlite3_step(cursor.statement)
         if rc == SQLITE_ROW {
             do {
+                if let maximumByteCount {
+                    let keyBytes = Int(sqlite3_column_bytes(cursor.statement, 0))
+                    let valueBytes = Int(sqlite3_column_bytes(cursor.statement, 1))
+                    let (total, overflow) = keyBytes.addingReportingOverflow(valueBytes)
+                    guard !overflow, total <= maximumByteCount else {
+                        throw StorageError(
+                            code: .resourceUnavailable,
+                            operation: .rangeRead,
+                            backend: .sqlite,
+                            message: "SQLite journal row exceeds the transfer byte limit"
+                        )
+                    }
+                }
                 guard let key = try extractBlob(
                     cursor.statement,
                     column: 0,

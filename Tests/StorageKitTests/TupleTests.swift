@@ -68,7 +68,7 @@ struct TupleTests {
         counter.reset()
         var admittedByteCounts: [Int] = []
 
-        let packed = try tuple.pack(admitting: { byteCount in
+        let packed = tuple.pack(admitting: { byteCount in
             admittedByteCounts.append(byteCount)
         })
 

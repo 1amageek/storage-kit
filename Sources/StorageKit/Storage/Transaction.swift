@@ -22,6 +22,9 @@ import DatabaseTypes
 /// `atomicOp` must be implemented by every backend. Backends that support
 /// versionstamp mutations materialize them with the transaction's commit version.
 public protocol TransactionAccess: TransactionReadAccess {
+    /// Available only after its lifecycle owner selects checkpoint mode.
+    var checkpoints: (any TransactionCheckpointAccess)? { get }
+
 
     /// Optional semantics implemented by this concrete backend.
     var capabilities: TransactionCapabilities { get }
@@ -111,6 +114,9 @@ public protocol TransactionAccess: TransactionReadAccess {
 /// mutate storage should depend on `TransactionAccess`; read-only index
 /// execution should depend on `TransactionReadAccess`.
 public protocol Transaction: TransactionAccess {
+    /// Selects checkpoint mode before exposing transaction access.
+    func configureCheckpoints(limits: TransactionCheckpointLimits) throws
+
     /// The authoritative storage failure recorded by this transaction.
     ///
     /// Higher layers use this state after an arbitrary backend or transaction
@@ -143,6 +149,8 @@ public protocol Transaction: TransactionAccess {
 // MARK: - Convenience (default parameters)
 
 extension TransactionAccess {
+
+    public var checkpoints: (any TransactionCheckpointAccess)? { nil }
 
     /// Backends expose no optional semantics unless they declare them.
     public var capabilities: TransactionCapabilities { .none }
@@ -313,6 +321,15 @@ extension Transaction {
         throw StorageError.unsupportedOperation(
             "This storage backend does not expose a committed version",
             operation: .read
+        )
+    }
+}
+
+extension Transaction {
+    public func configureCheckpoints(limits: TransactionCheckpointLimits) throws {
+        throw StorageError.unsupportedOperation(
+            "This storage backend does not support transaction checkpoints",
+            operation: .beginTransaction
         )
     }
 }

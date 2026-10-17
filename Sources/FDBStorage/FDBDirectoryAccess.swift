@@ -33,6 +33,48 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         self.rootPath = rootPath
     }
 
+    func openRoot(transaction: any TransactionReadAccess) async throws -> Directory? {
+        try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try await openRootInOperation(transaction: transaction)
+        }
+    }
+
+    func openOrInitializeRoot(transaction: any TransactionAccess) async throws -> Directory {
+        try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try await openOrInitializeRootInOperation(transaction: transaction)
+        }
+    }
+
+    func open(_ name: String, expecting expected: LayerTag?, in parent: Directory, transaction: any TransactionReadAccess) async throws -> Directory? {
+        try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try await openInOperation(name, expecting: expected, in: parent, transaction: transaction)
+        }
+    }
+
+    func openOrCreate(_ name: String, layer tag: LayerTag, in parent: Directory, transaction: any TransactionAccess) async throws -> Directory {
+        try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try await openOrCreateInOperation(name, layer: tag, in: parent, transaction: transaction)
+        }
+    }
+
+    func listChildren(in parent: Directory, after: String?, limit: Int, transaction: any TransactionReadAccess) async throws -> [DirectoryEntry] {
+        try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try await listChildrenInOperation(in: parent, after: after, limit: limit, transaction: transaction)
+        }
+    }
+
+    func move(_ name: String, in source: Directory, to newName: String, in destination: Directory, transaction: any TransactionAccess) async throws -> Directory {
+        try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            try await moveInOperation(name, in: source, to: newName, in: destination, transaction: transaction)
+        }
+    }
+
+    func remove(_ name: String, in parent: Directory, transaction: any TransactionAccess) async throws {
+        try await transaction.performOperation { [self] in
+            try await removeInOperation(name, in: parent, transaction: transaction)
+        }
+    }
+
     // MARK: - Root
 
     /// The witness the native layer holds in its own slot on the node at
@@ -63,10 +105,10 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
     /// One cluster hosts one storage root per root path, so existence is asked
     /// of that node and never of the cluster. Another root's nodes and the
     /// native allocator counters are not this root's data.
-    func openRoot(transaction: any TransactionReadAccess) async throws -> Directory? {
+    private func openRootInOperation(transaction: any TransactionReadAccess) async throws -> Directory? {
         let operation = StorageOperation.open
         let storage = try resolve(transaction, operation: operation)
-        return try await withLayer(storage, writes: false, operation: operation) { layer, native in
+        return try await withLayer(storage, writes: false, operation: operation) { [self] layer, native in
             // Observation resolves the path and reads one slot without touching
             // the layer version key, so an uninitialized root is observed
             // without any write.
@@ -87,10 +129,10 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
     }
 
-    func openOrInitializeRoot(transaction: any TransactionAccess) async throws -> Directory {
+    private func openOrInitializeRootInOperation(transaction: any TransactionAccess) async throws -> Directory {
         let operation = StorageOperation.initialize
         let storage = try resolve(transaction, operation: operation)
-        return try await withLayer(storage, writes: true, operation: operation) { layer, native in
+        return try await withLayer(storage, writes: true, operation: operation) { [self] layer, native in
             let witness = try Self.rootWitness()
             // The node is observed before it is created, so an existing node is
             // adjudicated by `requireRoot`: an untyped node this catalog never
@@ -121,13 +163,13 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 recording: witness,
                 transaction: native
             )
-            return try requireRootShape(node, operation: operation)
+            return try requireRootShape(node, operation: operation).trackingProvenance(created: true)
         }
     }
 
     // MARK: - Children
 
-    func open(
+    private func openInOperation(
         _ name: String,
         expecting expected: LayerTag?,
         in parent: Directory,
@@ -139,7 +181,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         let address = try childAddress(of: parent, name, operation: operation)
         let layerRoot = parent.childLayerRoot
         let path = nativePath(of: address)
-        return try await withLayer(storage, writes: false, operation: operation) { layer, native in
+        return try await withLayer(storage, writes: false, operation: operation) { [self] layer, native in
             guard let node = try await openIfExists(layer, path: path, transaction: native) else {
                 return nil
             }
@@ -147,7 +189,8 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 at: address,
                 node: node,
                 layerRoot: layerRoot,
-                operation: operation
+                operation: operation,
+                parent: parent
             )
             // The native layer verifies nothing when the caller states no type,
             // so the expected tag is verified here for every open.
@@ -156,7 +199,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
     }
 
-    func openOrCreate(
+    private func openOrCreateInOperation(
         _ name: String,
         layer tag: LayerTag,
         in parent: Directory,
@@ -181,7 +224,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         )
         let layerRoot = living.childLayerRoot
         let path = nativePath(of: address)
-        return try await withLayer(storage, writes: true, operation: operation) { layer, native in
+        return try await withLayer(storage, writes: true, operation: operation) { [self] layer, native in
             // Resolving the child first keeps an existing node at one descent.
             // The tag is verified here rather than by the native layer, matching
             // `open`: a stored tag that differs is never adopted.
@@ -190,7 +233,8 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                     at: address,
                     node: existing,
                     layerRoot: layerRoot,
-                    operation: operation
+                    operation: operation,
+                    parent: living
                 )
                 try requireLayer(child.layer, expected: tag, name: name, operation: operation)
                 return child
@@ -204,14 +248,16 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 at: address,
                 node: node,
                 layerRoot: layerRoot,
-                operation: operation
+                operation: operation,
+                parent: living,
+                created: true
             )
             try requireLayer(child.layer, expected: tag, name: name, operation: operation)
             return child
         }
     }
 
-    func listChildren(
+    private func listChildrenInOperation(
         in parent: Directory,
         after: String?,
         limit: Int,
@@ -226,7 +272,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
         let layerRoot = parent.childLayerRoot
         let path = nativePath(of: parent.address)
-        return try await withLayer(storage, writes: false, operation: operation) { layer, native in
+        return try await withLayer(storage, writes: false, operation: operation) { [self] layer, native in
             // Both bounds go to the native subdirectory range read, so the page
             // is produced by the store in the store's own key order. Tuple
             // string encoding preserves UTF-8 byte order, which is the order
@@ -269,7 +315,8 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                     at: address,
                     node: node,
                     layerRoot: layerRoot,
-                    operation: operation
+                    operation: operation,
+                    parent: parent
                 )
                 entries.append(DirectoryEntry(name: name, layer: resolved.layer))
             }
@@ -277,7 +324,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
     }
 
-    func move(
+    private func moveInOperation(
         _ name: String,
         in source: Directory,
         to newName: String,
@@ -294,6 +341,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 backend: backend
             )
         }
+        try destination.checkProvenance(operation: operation, backend: backend)
         let movedAddress = try childAddress(of: source, name, operation: operation)
         let targetAddress = try childAddress(of: destination, newName, operation: operation)
         // D-13: one operation reads both endpoints through the same authority,
@@ -327,7 +375,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         }
         let oldPath = nativePath(of: movedAddress)
         let newPath = nativePath(of: targetAddress)
-        return try await withLayer(storage, writes: true, operation: operation) { layer, native in
+        return try await withLayer(storage, writes: true, operation: operation) { [self] layer, native in
             guard let node = try await openIfExists(layer, path: oldPath, transaction: native) else {
                 throw notFound(
                     "Node '\(name)' does not exist in the source Directory",
@@ -361,12 +409,14 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 at: targetAddress,
                 node: moved,
                 layerRoot: layerRoot,
-                operation: operation
+                operation: operation,
+                parent: livingDestination,
+                created: true
             )
         }
     }
 
-    func remove(
+    private func removeInOperation(
         _ name: String,
         in parent: Directory,
         transaction: any TransactionAccess
@@ -376,7 +426,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         try requireDomain(of: parent, operation: operation)
         let address = try childAddress(of: parent, name, operation: operation)
         let path = nativePath(of: address)
-        try await withLayer(storage, writes: true, operation: operation) { layer, native in
+        try await withLayer(storage, writes: true, operation: operation) { [self] layer, native in
             guard try await layer.exists(path: path, transaction: native) else {
                 throw notFound(
                     "Node '\(name)' does not exist in the parent Directory",
@@ -430,7 +480,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         _ transaction: FDBStorageTransaction,
         writes: Bool,
         operation: StorageOperation,
-        _ body: (DirectoryLayer, any TransactionProtocol) async throws -> T
+        _ body: @escaping @Sendable (DirectoryLayer, any TransactionProtocol) async throws -> T
     ) async throws -> T {
         let database = try transaction.retainedDatabaseForDirectoryOperation(operation: operation)
         let layer = DirectoryLayer(database: database)
@@ -442,6 +492,8 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
             ) { native in
                 try await body(layer, native)
             }
+        } catch let error as TransactionCheckpointError {
+            throw error
         } catch is CancellationError {
             // Cancellation is a Swift task signal, not a backend failure. The
             // transaction paths already surface it unchanged, so the Directory
@@ -472,20 +524,22 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         at address: StorageAddress,
         node: DirectorySubspace,
         layerRoot: ByteString,
-        operation: StorageOperation
+        operation: StorageOperation,
+        parent: Directory? = nil,
+        created: Bool = false
     ) throws -> Directory {
         let tag = try FDBDirectoryLayout.layerTag(
             for: node.type,
             operation: operation,
             backend: backend
         )
-        return Directory(
+        return try Directory(
             domain: transactionDomain,
             address: address,
             layer: tag,
             keyspacePrefix: ByteString(node.prefix),
             layerRoot: layerRoot
-        )
+        ).trackingProvenance(parent: parent, created: created)
     }
 
     /// The catalog root is the witnessed node at `rootPath`, and its children
@@ -504,7 +558,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
         let root = try requireRootShape(node, operation: operation)
         switch witness {
         case .matching:
-            return root
+            return try root.trackingProvenance()
         case .absent:
             throw StorageError.incompatibleStorageLayout(
                 "the node at the configured root path was not initialized as a storage root",
@@ -646,6 +700,7 @@ final class FDBDirectoryAccess: DirectoryAccess, Sendable {
                 backend: backend
             )
         }
+        try directory.checkProvenance(operation: operation, backend: backend)
     }
 
     private func requireLayer(

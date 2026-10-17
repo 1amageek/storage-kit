@@ -53,8 +53,10 @@ struct TransactionOperationCompletionTests {
         do {
             try await completion.wait()
             Issue.record("Expected late waiter to receive failure")
-        } catch let error {
+        } catch let error as StorageError {
             #expect(error == expected)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
         }
     }
 }

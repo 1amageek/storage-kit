@@ -203,21 +203,23 @@ extension DirectoryAccess {
         at address: StorageAddress,
         transaction: any TransactionReadAccess
     ) async throws -> Directory? {
-        guard var current = try await openRoot(transaction: transaction) else {
-            return nil
-        }
-        for component in address.components {
-            guard let next = try await open(
-                component,
-                expecting: nil,
-                in: current,
-                transaction: transaction
-            ) else {
+        return try await TransactionOperationExecutor(access: transaction).withOperation { [self] in
+            guard var current = try await openRoot(transaction: transaction) else {
                 return nil
             }
-            current = next
+            for component in address.components {
+                guard let next = try await open(
+                    component,
+                    expecting: nil,
+                    in: current,
+                    transaction: transaction
+                ) else {
+                    return nil
+                }
+                current = next
+            }
+            return current
         }
-        return current
     }
 
     private func requirePartition(
@@ -239,10 +241,9 @@ extension DirectoryAccess {
 /// different generation than the one the caller holds.
 ///
 /// This is the single staleness test behind every Partition lease. The prefix
-/// allocator never reuses a number, so a Partition removed and recreated at the
-/// same address always carries a different `keyspacePrefix`; comparing prefixes
-/// therefore separates the two generations without any record of what else is
-/// running.
+/// allocator never reuses a committed number. Checkpoint rollback can reuse an
+/// unpublished prefix, so provenance rejects discarded values before the store
+/// walk compares the currently resolved prefix.
 ///
 /// The walk runs in `transaction`, which puts the resolution into that
 /// transaction's read set. A removal committing concurrently then makes
@@ -261,18 +262,21 @@ package func requirePartitionGeneration(
     access: any DirectoryAccess,
     transaction: any TransactionReadAccess
 ) async throws {
-    let current = try await access.openDirectory(
-        at: partition.root.address,
-        transaction: transaction
-    )
-    guard let current,
-          current.layer.isPartition,
-          current.keyspacePrefix == partition.keyspacePrefix
-    else {
-        throw StorageError.staleLease(
-            "Partition no longer exists at its address with the same keyspace",
-            operation: operation,
-            backend: access.backend
+    try await transaction.performOperation {
+        try partition.root.checkProvenance(operation: operation, backend: access.backend)
+        let current = try await access.openDirectory(
+            at: partition.root.address,
+            transaction: transaction
         )
+        guard let current,
+              current.layer.isPartition,
+              current.keyspacePrefix == partition.keyspacePrefix
+        else {
+            throw StorageError.staleLease(
+                "Partition no longer exists at its address with the same keyspace",
+                operation: operation,
+                backend: access.backend
+            )
+        }
     }
 }

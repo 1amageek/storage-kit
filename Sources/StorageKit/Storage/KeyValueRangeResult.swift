@@ -8,38 +8,57 @@ import DatabaseTypes
 /// the error is thrown on the first `next()` call.
 public struct KeyValueRangeResult: TransactionRangeResult {
     public typealias Element = (ByteString, ByteString)
-    public typealias Failure = StorageError
 
     private let results: [(key: ByteString, value: ByteString)]
-    private let error: StorageError?
+    private let error: (any Error)?
+    private let overlay: KeyValueCursor?
 
     public init(_ results: [(key: ByteString, value: ByteString)]) {
         self.results = results
         self.error = nil
+        self.overlay = nil
     }
 
-    public init(error: StorageError) {
+    public init(error: any Error) {
         self.results = []
         self.error = error
+        self.overlay = nil
+    }
+
+    package init(cursor: KeyValueCursor) {
+        self.results = []
+        self.error = nil
+        self.overlay = cursor
     }
 
     public func makeCursor() -> Cursor {
-        Cursor(results: results, error: error)
+        Cursor(results: results, error: error, overlay: overlay)
     }
 
     public struct Cursor: TransactionRangeCursor, Sendable {
-        public typealias Failure = StorageError
 
         private var results: [(key: ByteString, value: ByteString)]?
-        private var error: StorageError?
+        private var error: (any Error)?
         private var index: Int = 0
+        private var overlay: KeyValueCursor?
 
-        init(results: [(key: ByteString, value: ByteString)], error: StorageError?) {
+        init(results: [(key: ByteString, value: ByteString)], error: (any Error)?, overlay: KeyValueCursor?) {
             self.results = results
             self.error = error
+            self.overlay = overlay
         }
 
-        public mutating func next() async throws(StorageError) -> (ByteString, ByteString)? {
+        public mutating func next() async throws -> (ByteString, ByteString)? {
+            if var cursor = overlay {
+                do {
+                    let result = try await cursor.next()
+                    overlay = cursor
+                    return result
+                } catch {
+                    overlay = cursor
+                    throw error
+                }
+            }
             if let error {
                 self.error = nil
                 results = nil
@@ -66,6 +85,10 @@ public struct KeyValueRangeResult: TransactionRangeResult {
             results = nil
             error = nil
             index = 0
+            if var cursor = overlay {
+                overlay = nil
+                try await cursor.finish()
+            }
         }
     }
 }

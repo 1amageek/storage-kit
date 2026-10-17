@@ -163,24 +163,30 @@ Changing the relation schema, the isolation admission rule, or the catalog
 placement is a persisted-layout or capability change: update this design, the
 Directory component's adapter notes, and the package design before implementation.
 
-## Planned Checkpoint Integration (S12)
+## Checkpoint Integration (S12)
 
-Status: planned, not current support. The common semantics and proof obligations
-are owned by the [Storage component](../StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
-This section owns only the adapter-specific integration path.
+The [Storage checkpoint contract](../StorageKit/Storage/DESIGN.md#transaction-checkpoints-sql-compatibility-s12)
+owns journal, token, barrier, provenance, and budget semantics. Admission is
+available only for configured SERIALIZABLE isolation and precedes all operation
+admission; it never changes configured isolation. Normal eager, lazy, and nested
+transaction behavior remains unchanged. Native child creation is rejected
+before writes while checkpoint mode is active.
 
-Current path: the concrete transaction owns eager, lazy, and nested
-connection modes; point reads replay the buffer while ranges can flush it, and
-nested child commit merges its write buffer. Those behaviors alone do not
-satisfy the portable checkpoint contract.
+The raw reader owns the shared native connection acquisition/lifecycle state,
+table identity, logger, and byte factory, without retaining the transaction or
+journal. Point and keyset-page reads never flush. Point lengths and cumulative
+page key/value lengths are checked before transferring retained result owners
+to the journal. Selector resolution and limits follow overlay application.
+Commit seals the journal before one surviving ordered replay through the
+existing native atomic and commit path. Unknown commit outcomes remain unknown;
+closing checkpoint access does not initiate replay or reinterpret the outcome.
+Catalog data and ordinary data share the same journal under PG-3.
 
-S12 integrates one ordered journal/overlay with connection admission and
-prevents read-triggered buffer flush on the deferred-write path. Nested child
-composition preserves the parent's journal view and checkpoint ownership.
-`KeyValueDirectoryCatalog` reads and writes the same journal; its existing
-SERIALIZABLE admission rules remain unchanged. No database-query SQL is
-forwarded to the PostgreSQL backend as an execution shortcut.
-Verification requires the isolated real PostgreSQL service, mixed catalog/data
-rollback, reverse/limited ranges after atomics and clear-range, nested calls,
-conflicts, authoritative commit, pool release, and shutdown. The backend's
-native isolation and connection-budget rules are not weakened by checkpoints.
+Verification requires shared checkpoint conformance against an isolated real
+PostgreSQL server, non-SERIALIZABLE admission rejection, native-child rejection,
+normal nested regression, authoritative commit, pool release, and shutdown.
+Source changes do not establish this evidence alone.
+
+Terminal journal and cleanup failures follow the linked failure contract.
+Lifecycle state and shared completions preserve their original causes; native
+PostgreSQL failures continue to use the existing StorageError mapping.

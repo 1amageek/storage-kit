@@ -75,8 +75,8 @@ final class SQLiteConnectionHandle: Sendable {
 
     func openRangeCursor(
         ownerTransactionIdentifier: UInt64,
-        begin: SQLRangeBoundary,
-        end: SQLRangeBoundary,
+        begin: SQLRangeBoundary?,
+        end: SQLRangeBoundary?,
         limit: Int,
         reverse: Bool
     ) throws -> UInt64 {
@@ -93,11 +93,14 @@ final class SQLiteConnectionHandle: Sendable {
     }
 
     func nextRangeCursor(
-        identifier: UInt64
+        identifier: UInt64,
+        maximumByteCount: Int? = nil
     ) throws -> (key: ByteString, value: ByteString)? {
         try connection.withLock { connection in
             let connection = try Self.unwrap(connection)
-            return try connection.nextRangeCursor(identifier: identifier)
+            return try connection.nextRangeCursor(
+                identifier: identifier, maximumByteCount: maximumByteCount
+            )
         }
     }
 

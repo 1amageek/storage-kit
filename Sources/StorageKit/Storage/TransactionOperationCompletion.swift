@@ -19,7 +19,7 @@ public final class TransactionOperationCompletion: Sendable {
     private enum Resolution: Sendable {
         case pending
         case succeeded
-        case failed(StorageError)
+        case failed(any Error)
     }
 
     private struct State: Sendable {
@@ -31,7 +31,7 @@ public final class TransactionOperationCompletion: Sendable {
 
     public init() {}
 
-    public func wait() async throws(StorageError) {
+    public func wait() async throws {
         await withCheckedContinuation { continuation in
             let isResolved = state.withLock { state -> Bool in
                 switch state.resolution {
@@ -49,7 +49,7 @@ public final class TransactionOperationCompletion: Sendable {
                 continuation.resume()
             }
         }
-        try state.withLock { state throws(StorageError) in
+        try state.withLock { state throws in
             switch state.resolution {
             case .succeeded:
                 return
@@ -67,7 +67,7 @@ public final class TransactionOperationCompletion: Sendable {
         resolve(.succeeded)
     }
 
-    public func fail(_ error: StorageError) {
+    public func fail(_ error: any Error) {
         resolve(.failed(error))
     }
 

@@ -153,6 +153,7 @@ KeyValueDirectoryCatalog -> transaction.getValue / setValue / clear on catalog k
 | Contract | Evidence |
 |---|---|
 | D-1…D-12, operations 1–5, root bootstrap, L-1…L-3, L-7, L-8 | `Tests/CloudflareDurableObjectStorageTests/CloudflareDurableObjectDirectoryConformanceTests.swift` (shared `DirectoryConformanceCase` steps over `InMemoryCloudflareDurableObjectStorageTransport`) |
+| Checkpoint journal, survivor frame, raw transfer bounds, unknown outcome, independent raw cursor owner | `CloudflareDurableObjectCheckpointTests` plus shared `TransactionCheckpointConformanceCase` |
 | DO-2, DO-3, DO-4 | `CloudflareDurableObjectStorageTransactionTests`, `CloudflareDurableObjectStorageSemanticsTests`, `CloudflareDurableObjectStorageValueSemanticsTests` |
 | DO-5, DO-6 | `CloudflareDurableObjectStorageWireClientTests` with the `ConfiguredFailure…`, `MismatchedOperation…`, `TruncatedResponse…`, `Suspending…`, and `BorrowedResponse…` transport fixtures |
 | Deadlines | `CloudflareDurableObjectStorageTimeoutTests` |
@@ -166,25 +167,54 @@ catalog placement is a protocol or persisted-layout change: update the protocol
 document, this design, the Directory component's adapter notes, and the package
 design before implementation.
 
-## Planned Checkpoint Integration (S12)
+## Deferred Checkpoint Transactions
 
-Status: planned, not current support. The common semantics and proof obligations
-are owned by the [Storage component](../StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
-This section owns only the adapter-specific integration path.
+The [Storage component](../StorageKit/Storage/DESIGN.md#transaction-checkpoints-sql-compatibility-s12)
+owns checkpoint semantics, limits, opaque tokens, journal order, overlay, and
+barrier behavior. This adapter selects that mode through
+`configureCheckpoints(limits:)` before any transaction access. Ordinary
+transactions retain their wire mutation buffer and existing read overlay.
 
-Current path: one mutex-protected transaction state retains mutations,
-read/write conflict ranges, and the pinned observed read version, then sends
-one host commit request. Existing mutation buffering is not a portable
-checkpoint capability.
+```text
+checkpoint transaction -> TransactionJournal -> raw host reader
+                        -> seal -> surviving wire mutations/conflicts
+                                -> one existing host commit request
+```
 
-S12 integrates the shared journal and overlay before converting surviving
-operations into that one commit frame. `KeyValueDirectoryCatalog` shares this
-state; checkpoint rollback removes staged metadata and data without resetting
-the pinned snapshot or claiming a host rollback happened. No wire operation is
-needed merely to name or roll back a local checkpoint; if a frame shape must
-change, the wire/host design owns that change. Host limits still apply to the
-final frame, in addition to journal/overlay bounds enforced before dispatch.
-Verification includes real Durable Object host persistence/restart, snapshot
-conflicts, negative readback of rolled-back Directory/data, cancellation,
-commit-unknown outcomes, and Native/WASM/Embedded transport ownership. The
-in-memory transport fixture remains local evidence only.
+The raw reader retains only the client, immutable configuration, versionstamp
+completion, and shared mutex-protected host state. Registered journal cursors
+never retain the parent transaction or journal, so their authoritative cleanup
+can release every owner without a cycle. Native, ordinary WASM, and Embedded
+share the same state owner, Mutex, Sendable contracts, and lifecycle entry points.
+
+| Invariant | Adapter guarantee |
+|---|---|
+| Admission | Configuration fails after read, cursor, mutation, option, or explicit conflict admission. Ordinary transactions expose no checkpoint access. |
+| Raw reads | Read the existing host snapshot without replay; validate transferred rows against configured host limits and the journal transfer bound before handing them to the overlay. Inclusive, exclusive, and unbounded bounds remain explicit. |
+| Rollback | Only surviving mutations and explicit write conflicts enter the final frame. Already observed host read conflicts and the pinned read version remain in shared host state. |
+| Commit | Seal and finish cursors before converting the journal into a single existing commit frame; conversion does not charge accepted mutations twice. No read flushes mutations. |
+| Host capability limits | Wire v1 cannot suppress automatic write conflicts; any journal entry requesting suppression fails typed before host dispatch. Versionstamped entries retain their existing commit semantics and unresolved overlay reads fail typed. |
+| Unknown outcome | Preserve the existing commitUnknown terminal phase and close journal authority without retry or success conversion. |
+| Cleanup | Cancel closes journal access and awaits cursor cleanup before completing the existing transaction cancellation path. |
+
+The shared-state review matrix is identical for Native, ordinary WASM, and
+Embedded; exact target compile/link and runtime evidence belongs to the harness.
+
+| Logical state | Storage and isolation on all targets | Read entry | Mutation entry | Cleanup owner |
+|---|---|---|---|---|
+| Host phase, versions, conflicts, ordinary mutations, deadline | `CloudflareDurableObjectTransactionStateOwner` / `Mutex<State>` | reader or transaction `withLock` | transaction/reader `withLock` | terminal transaction operation |
+| Configured checkpoint authority | transaction `Mutex<TransactionJournal?>` | `checkpoints`, `journalForAccess` | pre-access `configureCheckpoints` | transaction; raw cursor retains no transaction |
+| Journal view, operations, cursor registry, bounds | shared `TransactionJournal` and its activity owner | common overlay / admitted operation | common append and checkpoint barrier | seal/close awaits registered cursor cleanup |
+| Raw range iteration | value cursor owned by `KeyValueCursor` actor | ordered `next()` | cursor actor | `finish()` before journal view change |
+
+Host storage and Wire v1 are unchanged: the host applies the final survivor frame
+inside its existing `transactionSync`. The real-host persistence smoke optionally
+invokes an external Swift probe before shutdown and after restart. That probe
+must exercise the production checkpoint adapter, commit survivors, discard
+metadata/data after rollback, and verify both from fresh transactions after the
+same persisted Durable Object restarts. JavaScript wire and in-memory client
+fixtures provide only their narrower evidence.
+
+Terminal journal and cleanup failures follow the linked failure contract
+through lifecycle state, shared completion, and versionstamp waiters. Host
+commit failures keep their existing native StorageError mapping.

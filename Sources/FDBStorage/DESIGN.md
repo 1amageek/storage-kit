@@ -278,9 +278,9 @@ Changing the path mapping, the layer-tag mapping, the bootstrap witness, or
 the root path default is a layout change: update this design, then the Directory
 component design's adapter notes, then database-framework binding.
 
-## Planned Checkpoint Integration (S12)
+## Checkpoint Integration (S12)
 
-Status: planned, not current support. The common semantics and proof obligations
+The common semantics and proof obligations
 are owned by the [Storage component](../StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
 This section owns only the adapter-specific integration path.
 
@@ -290,9 +290,11 @@ window and supplies `fdbTransaction: any TransactionProtocol` to the bindings.
 A wrapper around `TransactionAccess` alone is rejected by that concrete cast
 and cannot intercept native Directory mutations.
 
-S12 must integrate the shared journal inside `FDBStorageTransaction` and pass a
-journal-aware bindings `TransactionProtocol` implementation inside the same
-exclusive window. The native `DirectoryLayer` and its HCA allocator remain the
+`FDBStorageTransaction` owns an optional `FDBCheckpointTransaction` selected
+before any user read or mutation. That bindings `TransactionProtocol` projection owns
+the same native handle and common `TransactionJournal` used by ordinary byte
+operations and the exclusive Directory window. Normal transactions keep their
+direct native path. The native `DirectoryLayer` and its HCA allocator remain the
 sole existence/allocation authority; no shadow catalog or reconstructed native
 metadata keys are permitted. HCA uses atomic add followed by a non-snapshot
 read, `setNextWriteNoWriteConflictRange` before set/clear-range, and explicit
@@ -301,8 +303,45 @@ write and route `getKey`/`readRangeBatch` through the same ordered overlay as
 ordinary data reads. Generic C-byte inputs are retained as immutable owners at
 the bindings boundary; scoped pointers never enter the journal.
 
+Raw reads retain only the native handle, never the parent transaction, and do
+not flush journal entries. Read conflicts and the native read version remain
+after rollback; explicit write conflicts and one-shot write-conflict suppression
+join the ordered journal. The commit leader seals the journal, replays surviving
+entries once, checks the native footprint after replay, and invokes the existing
+single native commit. Unknown commit outcomes close unpublished provenance and
+remain unknown without replay. Directory compound scopes and provenance follow
+the [Directory owner](../StorageKit/Directory/DESIGN.md#checkpoint-provenance-sql-s12).
+
+| State owner | Storage and isolation | Entry and release paths | Target scope |
+|---|---|---|---|
+| Native transaction lifecycle | `FDBStorageTransaction.state: Mutex<MutableState>` | Existing operation/Directory admission, one commit leader, authoritative cancel drain | Native FDB only; this adapter is outside WASM/Embedded graphs |
+| Checkpoint mode selection | `Mutex<FDBCheckpointTransaction?>` | Configured once before reads/writes; the projection retains native handle and common journal without retaining its parent | Same native declaration and access paths; no conditional state replacement |
+| System-key read boundary | Projection `Mutex<Bool>` | Successful native access option changes the bounded raw range endpoint | Native only; never implies an unlocked state |
+| Raw range page | `FDBJournalRangeResult.IterationState` actor | Serialized page reads and finish; returned rows retain native future owners | Native only; no parent transaction or journal retention |
+| Journal, cursor and provenance lifetime | Common `TransactionJournal` contracts | Shared admission/barrier, cursor cleanup and provenance promotion/invalidation | Native/WASM/Embedded share the Storage owner implementation |
+
 Verification must mix native root/Partition creation, HCA allocation,
 move/removal, data/index writes, and rollback before one real FoundationDB
 commit, then reopen through the native layer in a fresh transaction. Conflicts,
 retry, versionstamps, cancellation, exclusivity, and commit-unknown behavior
 remain required native-client tests.
+
+| Checkpoint-specific contract | Evidence owner |
+|---|---|
+| Shared CP-01...CP-06 over the actual FoundationDB adapter | `FDBCheckpointConformanceTests`; requires the run-owned cluster identity and clears only the shared fixture's exact raw keys |
+| Root witness/HCA/metadata/data rollback, nested native Partitions and fresh native reopen | `FDBTransactionCheckpointTests.nativeRootRollback` |
+| Native move/remove, atomic and clear-range survivor state | `FDBTransactionCheckpointTests.nativeDirectoryMutationRollback` |
+| Conservative native read conflicts and surviving/discarded explicit write conflicts | `nativeReadConflictSurvivesRollback`, `discardedWriteConflictIsNotReplayed` |
+| Unresolved versionstamp rollback, committed versionstamp and cancelled bootstrap | `nativeUnresolvedVersionstampRollback`, `nativeCheckpointCancellation` |
+| Exact suppression/replay order, commit-unknown at-most-once, admitted Directory drain | The three `checkpoint...` cases in `FDBStorageTransactionFootprintTests` |
+
+The targeted native lane selects both checkpoint suites, with the checkpoint
+footprint cases in the service-independent adapter lane. Full native
+FoundationDB regression remains deferred to S18 and is not claimed by this lane.
+
+Checkpoint mutation admission retains an active transaction operation while
+materializing outside every transaction mutex. The journal admission gate
+orders append against seal, while the transaction drain orders native cancel
+against admitted mutation completion. Raw range reads normalize only native
+FDBError at the readRangeBatch boundary; journal and cleanup errors retain
+their semantic owners through terminal state and shared completion.

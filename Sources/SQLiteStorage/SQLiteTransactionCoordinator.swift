@@ -137,7 +137,8 @@ actor SQLiteTransactionCoordinator {
         )
         do {
             let first = try connection.nextRangeCursor(
-                identifier: cursorIdentifier
+                identifier: cursorIdentifier,
+                maximumByteCount: plan.maximumByteCount
             )
             return (cursorIdentifier, first)
         } catch {
@@ -149,14 +150,17 @@ actor SQLiteTransactionCoordinator {
     func nextRange(
         rootIdentifier: UInt64,
         transactionIdentifier: UInt64,
-        cursorIdentifier: UInt64
+        cursorIdentifier: UInt64,
+        maximumByteCount: Int? = nil
     ) throws -> (ByteString, ByteString)? {
         try requireTopTransaction(
             rootIdentifier: rootIdentifier,
             transactionIdentifier: transactionIdentifier,
             operation: .rangeRead
         )
-        return try connection.nextRangeCursor(identifier: cursorIdentifier)
+        return try connection.nextRangeCursor(
+            identifier: cursorIdentifier, maximumByteCount: maximumByteCount
+        )
     }
 
     func compact(

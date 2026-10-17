@@ -15,7 +15,7 @@ public final class SQLiteStorageTransaction:
 
     public typealias RangeResult = SQLiteRangeResult
 
-    public static let declaredCapabilities = TransactionCapabilities.none
+    public static let declaredCapabilities = TransactionCapabilities(transactionCheckpoints: true)
     public var capabilities: TransactionCapabilities { Self.declaredCapabilities }
     public var compaction: StorageCompactionAccess? {
         StorageCompactionAccess(limits: compactionLimits) {
@@ -34,11 +34,13 @@ public final class SQLiteStorageTransaction:
         case committed
         case cancelling(TransactionOperationCompletion)
         case cancelled
-        case failed(StorageError, cleanupRequired: Bool)
+        case failed(any Error, cleanupRequired: Bool)
     }
 
     private struct MutableState: Sendable {
         var writes: [SQLiteWriteOperation] = []
+        var journal: TransactionJournal?
+        var accessStarted = false
         var lifecycle: Lifecycle = .open
         var activeChildIdentifier: UInt64?
         var activeRangeRegistrations: Set<UInt64> = []
@@ -54,14 +56,16 @@ public final class SQLiteStorageTransaction:
     private let mutationByteMeter: TransactionMutationByteMeter
     private let contextLease: ActiveTransactionContext.Lease?
     private let state = Mutex(MutableState())
+    private let journalFailure = SQLiteJournalBackend.Failure()
     public let transactionDomain: StorageTransactionDomain
 
     public var storageFailure: StorageError? {
-        state.withLock { state in
+        if let error = journalFailure.error { return error }
+        return state.withLock { state in
             guard case .failed(let error, _) = state.lifecycle else {
                 return nil
             }
-            return error
+            return error as? StorageError
         }
     }
 
@@ -97,6 +101,57 @@ public final class SQLiteStorageTransaction:
         self.mutationByteMeter = parent.mutationByteMeter
         self.contextLease = contextLease
         self.transactionDomain = parent.transactionDomain
+    }
+
+    public var checkpoints: (any TransactionCheckpointAccess)? {
+        state.withLock { $0.journal }
+    }
+
+    public func configureCheckpoints(limits: TransactionCheckpointLimits) throws {
+        try state.withLock { state in
+            try Self.validateOpen(state.lifecycle, operation: .beginTransaction)
+            guard parent == nil else {
+                throw StorageError.unsupportedOperation(
+                    "SQLite native child transactions cannot select checkpoints",
+                    operation: .beginTransaction, backend: .sqlite
+                )
+            }
+            guard !state.accessStarted, state.journal == nil else {
+                throw TransactionCheckpointError.configurationAfterAdmission
+            }
+            state.journal = TransactionJournal(
+                limits: limits, backend: .sqlite, mutationByteMeter: mutationByteMeter
+            )
+        }
+    }
+
+    public func performOperation(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        if let journal = try admittedJournal(operation: .execute) {
+            try await journal.performOperation(operation)
+        } else {
+            try await operation()
+        }
+    }
+
+    private var journalBackend: SQLiteJournalBackend {
+        SQLiteJournalBackend(
+            rootIdentifier: rootIdentifier, identifier: identifier,
+            coordinator: coordinator, connection: connection, lifetime: lifetime,
+            failure: journalFailure
+        )
+    }
+
+    private func admittedJournal(operation: StorageOperation) throws -> TransactionJournal? {
+        if let error = journalFailure.error { throw error }
+        return try state.withLock { state in
+            if case .failed(let error, _) = state.lifecycle { throw error }
+            if let journal = state.journal { return journal }
+            try Self.validateReadable(state, operation: operation)
+            state.accessStarted = true
+            return nil
+        }
     }
 
     public func configureMutationByteLimit(maximumBytes: Int?) throws {
@@ -149,6 +204,13 @@ public final class SQLiteStorageTransaction:
     ) throws -> SQLiteStorageTransaction {
         try state.withLock { state in
             try Self.validateOpen(state.lifecycle, operation: .beginTransaction)
+            guard state.journal == nil else {
+                throw StorageError.unsupportedOperation(
+                    "SQLite checkpoint transactions cannot create native children",
+                    operation: .beginTransaction, backend: .sqlite
+                )
+            }
+            state.accessStarted = true
             guard state.activeChildIdentifier == nil else {
                 throw Self.invalidState(
                     "SQLite nested transactions must be created in strict LIFO order",
@@ -176,6 +238,11 @@ public final class SQLiteStorageTransaction:
         for key: ByteString,
         snapshot: Bool
     ) async throws -> ByteString? {
+        if let journal = try admittedJournal(operation: .read) {
+            return try await journal.getValue(
+                for: key, snapshot: snapshot, maximumByteCount: nil, using: journalBackend
+            )
+        }
         let writes = try takeWrites(operation: .read)
         do {
             try await ensureBackendStarted()
@@ -201,6 +268,12 @@ public final class SQLiteStorageTransaction:
                 backend: .sqlite
             )
         }
+        if let journal = try admittedJournal(operation: .read) {
+            return try await journal.getValue(
+                for: key, snapshot: snapshot,
+                maximumByteCount: maximumByteCount, using: journalBackend
+            )
+        }
         let writes = try takeWrites(operation: .read)
         do {
             try await ensureBackendStarted()
@@ -224,6 +297,11 @@ public final class SQLiteStorageTransaction:
         selector: KeySelector,
         snapshot: Bool
     ) async throws -> ByteString? {
+        if let journal = try admittedJournal(operation: .rangeRead) {
+            return try await journal.getKey(
+                selector: selector, snapshot: snapshot, using: journalBackend
+            )
+        }
         let plan: SQLiteKeySelectionPlan
         do {
             plan = try SQLiteKeySelectionPlan(selector: selector)
@@ -254,6 +332,12 @@ public final class SQLiteStorageTransaction:
         streamingMode: StreamingMode
     ) -> SQLiteRangeResult {
         do {
+            if let journal = try admittedJournal(operation: .rangeRead) {
+                return SQLiteRangeResult(cursor: journal.rangeCursor(
+                    from: begin, to: end, limit: limit, reverse: reverse,
+                    snapshot: snapshot, streamingMode: streamingMode, using: journalBackend
+                ))
+            }
             try state.withLock { state in
                 try Self.validateReadable(
                     state,
@@ -409,6 +493,12 @@ public final class SQLiteStorageTransaction:
         maximumWorkUnits: UInt64,
         continuation: StorageCompactionContinuation?
     ) async throws -> StorageCompactionResult {
+        if try admittedJournal(operation: .execute) != nil {
+            throw StorageError.unsupportedOperation(
+                "SQLite checkpoint transactions cannot perform physical compaction",
+                operation: .execute, backend: .sqlite
+            )
+        }
         let maximum = Self.maximumCompactionWorkUnitsPerSlice
         guard maximumWorkUnits > 0, maximumWorkUnits <= maximum else {
             throw StorageCompactionError.invalidMaximumWorkUnits(
@@ -474,7 +564,7 @@ public final class SQLiteStorageTransaction:
             case waitForCancellation(TransactionOperationCompletion)
             case committed
             case cancelled
-            case failed(StorageError)
+            case failed(any Error)
         }
 
         let start = state.withLock { state -> Start in
@@ -545,7 +635,7 @@ public final class SQLiteStorageTransaction:
             case cancelled
             case committed
             case cleanedFailure
-            case failed(StorageError)
+            case failed(any Error)
         }
 
         let start = state.withLock { state -> Start in
@@ -612,12 +702,40 @@ public final class SQLiteStorageTransaction:
         }
     }
 
-    private func performCommit() async -> Result<Void, StorageError> {
+    private func performCommit() async -> Result<Void, any Error> {
+        guard let journal = state.withLock({ $0.journal }) else {
+            return await performNativeCommit(additionalWrites: []).mapError { $0 as any Error }
+        }
+        do {
+            let writes = try await journal.sealForCommit().map(Self.nativeMutation)
+            if let error = journalFailure.error { throw error }
+            let result = await performNativeCommit(additionalWrites: writes)
+            do {
+                switch result {
+                case .success: try await journal.close(committed: true)
+                case .failure: try await journal.close(committed: false)
+                }
+            } catch {
+                if case .failure(let operationError) = result {
+                    throw StorageTransactionCleanupError(operationError: operationError, cancellationError: error)
+                }
+                throw error
+            }
+            return result.mapError { $0 as any Error }
+        } catch {
+            state.withLock { $0.lifecycle = .failed(error, cleanupRequired: true) }
+            return .failure(error)
+        }
+    }
+
+    private func performNativeCommit(
+        additionalWrites: [SQLiteWriteOperation]
+    ) async -> Result<Void, StorageError> {
         let writes = state.withLock { state -> [SQLiteWriteOperation] in
             let writes = state.writes
             state.writes.removeAll(keepingCapacity: false)
             state.activeRangeRegistrations.removeAll(keepingCapacity: false)
-            return writes
+            return writes + additionalWrites
         }
 
         if let parent {
@@ -691,7 +809,25 @@ public final class SQLiteStorageTransaction:
         }
     }
 
-    private func performCancellation() async -> Result<Void, StorageError> {
+    private func performCancellation() async -> Result<Void, any Error> {
+        var journalError: (any Error)?
+        if let journal = state.withLock({ $0.journal }) {
+            do { try await journal.close(committed: false) }
+            catch { journalError = error }
+        }
+        let result = await performNativeCancellation()
+        if let journalError {
+            let failure: any Error
+            if case .failure(let nativeError) = result {
+                failure = StorageTransactionCleanupError(operationError: journalError, cancellationError: nativeError)
+            } else { failure = journalError }
+            state.withLock { $0.lifecycle = .failed(failure, cleanupRequired: false) }
+            return .failure(failure)
+        }
+        return result.mapError { $0 as any Error }
+    }
+
+    private func performNativeCancellation() async -> Result<Void, StorageError> {
         state.withLock {
             $0.activeRangeRegistrations.removeAll(keepingCapacity: false)
         }
@@ -738,6 +874,31 @@ public final class SQLiteStorageTransaction:
         return .success(())
     }
 
+    private static func journalMutation(_ write: SQLiteWriteOperation) -> TransactionJournalMutation {
+        switch write {
+        case .set(let key, let value): .set(key: key, value: value, suppressWriteConflict: false)
+        case .clear(let key): .clear(key: key, suppressWriteConflict: false)
+        case .clearRange(let begin, let end): .clearRange(begin: begin, end: end, suppressWriteConflict: false)
+        case .atomic(let key, let parameter, let type):
+            .atomic(key: key, parameter: parameter, type: type, suppressWriteConflict: false)
+        }
+    }
+
+    private static func nativeMutation(_ mutation: TransactionJournalMutation) throws -> SQLiteWriteOperation {
+        switch mutation {
+        case .set(let key, let value, _): return .set(key: key, value: value)
+        case .clear(let key, _): return .clear(key: key)
+        case .clearRange(let begin, let end, _): return .clearRange(begin: begin, end: end)
+        case .atomic(let key, let parameter, let type, _):
+            return .atomic(key: key, parameter: parameter, mutationType: type)
+        case .writeConflict:
+            throw StorageError.unsupportedOperation(
+                "SQLite does not support explicit write conflict ranges",
+                operation: .write, backend: .sqlite
+            )
+        }
+    }
+
     // MARK: - Transaction Lifecycle and Backend Access
 
     private func ensureBackendStarted() async throws {
@@ -776,8 +937,12 @@ public final class SQLiteStorageTransaction:
         admit: () throws -> Void,
         makeWrite: () -> SQLiteWriteOperation
     ) throws {
-        try state.withLock { state in
+        if let error = journalFailure.error { throw error }
+        let journal = try state.withLock { state -> TransactionJournal? in
+            if case .failed(let error, _) = state.lifecycle { throw error }
+            if let journal = state.journal { return journal }
             try Self.validateOpen(state.lifecycle, operation: operation)
+            state.accessStarted = true
             guard state.activeChildIdentifier == nil else {
                 throw Self.invalidState(
                     "SQLite parent transaction is suspended by its child",
@@ -792,6 +957,10 @@ public final class SQLiteStorageTransaction:
             }
             try admit()
             state.writes.append(makeWrite())
+            return nil
+        }
+        if let journal {
+            try journal.append(Self.journalMutation(makeWrite()))
         }
     }
 

@@ -18,7 +18,7 @@ package final class TransactionVersionstampCompletion: Sendable {
     private enum Resolution: Sendable {
         case pending
         case succeeded(TransactionVersionstamp)
-        case failed(StorageError)
+        case failed(any Error)
     }
 
     private struct State: Sendable {
@@ -34,13 +34,13 @@ package final class TransactionVersionstampCompletion: Sendable {
         )
     }
 
-    package init(failure: StorageError) {
+    package init(failure: any Error) {
         self.state = Mutex(
             State(resolution: .failed(failure), firstWaiter: nil)
         )
     }
 
-    package func wait() async throws(StorageError)
+    package func wait() async throws
         -> TransactionVersionstamp {
         await withCheckedContinuation { continuation in
             let isResolved = state.withLock { state -> Bool in
@@ -59,7 +59,7 @@ package final class TransactionVersionstampCompletion: Sendable {
                 continuation.resume()
             }
         }
-        return try state.withLock { state throws(StorageError) in
+        return try state.withLock { state throws in
             switch state.resolution {
             case .succeeded(let versionstamp):
                 return versionstamp
@@ -77,7 +77,7 @@ package final class TransactionVersionstampCompletion: Sendable {
         resolveIfPending(.succeeded(versionstamp))
     }
 
-    package func fail(_ error: StorageError) {
+    package func fail(_ error: any Error) {
         resolveIfPending(.failed(error))
     }
 

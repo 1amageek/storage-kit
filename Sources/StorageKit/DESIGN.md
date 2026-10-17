@@ -12,7 +12,7 @@ transaction lifecycle owner, and the InMemory reference engine.
 |---|---|
 | Design level | module |
 | Parent | [storage-kit package](../../DESIGN.md) |
-| Children | [Directory component](Directory/DESIGN.md); [Storage component](Storage/DESIGN.md); [Tuple component](Tuple/DESIGN.md); `InMemory/` (reference engine, owned by its source files and tests until a component design is added) |
+| Children | [Directory component](Directory/DESIGN.md); [Storage component](Storage/DESIGN.md); [Tuple component](Tuple/DESIGN.md); [InMemory component](InMemory/DESIGN.md) |
 
 ## Responsibilities and Boundaries
 
@@ -33,7 +33,7 @@ transaction lifecycle owner, and the InMemory reference engine.
 | [Directory component](Directory/DESIGN.md) | child | `DirectoryAccess`, `Directory`, `Partition`, `PartitionLease`, `BoundReadAccess`, `BoundWriteAccess`, `KeyValueDirectoryCatalog` | Placement, catalog authority, root bootstrap, leases. | Read operations accept only `TransactionReadAccess`; catalog reads never create. |
 | [Storage component](Storage/DESIGN.md) | child | `StorageEngine`, `Transaction`, cursors, `StorageError`, `StorageEngineLifecycle`, `StorageTransactionDomain` | Transaction and bound contracts; the cursor state owns advance ordering, post-advance validation, and terminal cleanup. | `StorageTransactionDomain` owns domain identity and the shutdown gate on lease issuance. Cursor scope validation belongs to the cursor state, not to a caller wrapper. |
 | [Tuple component](Tuple/DESIGN.md) | child | `Tuple`, `Subspace`, `TupleElement`, `strinc`, admission-aware `pack(admitting:)` | Tuple encoding frozen by golden vectors; admission measures the exact packed byte count before the single result allocation. | Any byte-layout change is a layout change. The admission callback is a caller resource boundary, never a backend limit. |
-| `InMemory/` sources | child (no component design yet) | `InMemoryEngine`, `InMemoryTransaction` | Reference engine with conflict detection and versionstamps. | Reference only; must pass every shared fixture. |
+| [InMemory component](InMemory/DESIGN.md) | child | `InMemoryEngine`, `InMemoryTransaction` | Reference engine snapshot ownership, conflict detection, native closure, and checkpoint composition. | Reference only; must pass every shared fixture. |
 | database-framework | used by | all public contracts | Composes containers and kernels. | Holds leases, never raw Partition addresses, as authority. Whether a removal that would strand one of its leases is admissible is its own decision (SPEC §12.3); StorageKit removal has no lease precondition. |
 
 ## Architecture
@@ -100,7 +100,7 @@ holding deterministic path-derived prefixes is foreign data and is rejected
 | M-1 | A transaction belongs to exactly one domain; access from another domain fails `storageDomainMismatch`. |
 | M-2 | `commit()` succeeds at most once; a second commit or a commit after cancel fails `invalidOperation`. |
 | M-3 | `cancel()` is authoritative: after it returns, backend cleanup is complete or a typed cleanup failure is reported. |
-| M-4 | Every failure is a `StorageError`; unsupported operations fail `unsupportedOperation`, never empty success. |
+| M-4 | Failure propagation follows the [Storage component failure contract](Storage/DESIGN.md#failure-preservation); unsupported storage operations never become empty success. |
 | M-5 | Read operations accept `TransactionReadAccess` and cannot mutate. |
 | M-6 | Cursors are scoped: advancing a cursor after its owning scope closed fails typed, and closing the scope completes the cleanup of every cursor it issued, so no capability of an issued cursor outlives the scope. |
 | M-7 | Bounds (`keyTooLarge`, `valueTooLarge`, `transactionTooLarge`, `invalidPointReadMaximum`, `pointReadValueTooLarge`) are enforced before backend I/O where the bound is known. |
@@ -168,10 +168,10 @@ additionally requires the Embedded runtime verification: the compiler does not
 diagnose an extension-only member reached through an existential on a
 class-bound protocol.
 
-## Planned Checkpoint Composition
+## Checkpoint Composition
 
-S12 adds the storage-semantic checkpoint capability described only in the
-[Storage component contract](Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12).
+The S12 storage-semantic checkpoint capability is specified only in the
+[Storage component contract](Storage/DESIGN.md#transaction-checkpoints-sql-compatibility-s12).
 The module composes that contract with Directory access and the InMemory
 reference without interpreting SQL savepoint names or restoring Framework
 schema/runtime state. Every adapter's concrete transaction and Directory path

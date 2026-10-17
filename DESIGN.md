@@ -82,17 +82,18 @@ Package-wide invariants (each is owned in detail by the module design):
 |---|---|---|
 | P-1 | One `StorageTransactionDomain` per engine instance; a transaction, Directory, Partition, or lease is valid only inside its domain. | StorageKit module |
 | P-2 | `commit` succeeds at most once per transaction; authoritative `cancel` completes backend cleanup; operation failure and cleanup failure are both preserved. | StorageKit module, each adapter |
-| P-3 | Unsupported or malformed operations produce typed `StorageError`; empty success is never a substitute. | every module |
+| P-3 | Operations preserve typed failures and never substitute empty success, under the owning failure contract. | [Storage component](Sources/StorageKit/Storage/DESIGN.md#failure-preservation), each adapter |
 | P-4 | Every adapter exposes exactly one `DirectoryAccess` realization that is the sole existence authority for Directories and Partitions in that backend. | Directory component, each adapter |
 | P-5 | Tuple V1 byte layout is frozen by `Tests/StorageKitTests/TupleV1GoldenVectorTests.swift`. | Tuple component |
 | P-6 | Shutdown rejects new transactions and new lease issuance and completes admitted backend cleanup. | StorageKit module, each adapter |
 | P-7 | Every production adapter passes the same `StorageKitConformance` fixture that the InMemory reference engine passes. | AGENTS.md test procedure |
-| P-8 (planned S12) | Checkpointable deferred-write transactions preserve one ordered data/Directory view and rollback boundary in every adapter; currently no portable checkpoint API exists. | [Storage component](Sources/StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12) |
+| P-8 (S12; verification pending) | Checkpointable deferred-write transactions preserve one ordered data/Directory view and rollback boundary in every adapter; the opt-in API and adapter implementation await owned behavioral verification. | [Storage component](Sources/StorageKit/Storage/DESIGN.md#transaction-checkpoints-sql-compatibility-s12) |
 
 ## Failure, Concurrency, and Constraints
 
-- All failures cross module boundaries as `StorageError` with a `code`,
-  `operation`, and `backend`; adapters convert backend errors at the boundary.
+- Failure conversion and propagation follow the
+  [Storage component contract](Sources/StorageKit/Storage/DESIGN.md#failure-preservation);
+  adapter-native mappings remain owned by their adapter module.
 - Engines are `Sendable` classes; shared mutable state lives behind `Mutex` or
   an actor. Bound access and leases are noncopyable.
 - Bounds (key size, value size, mutation bytes, point-read maximum, Directory
@@ -103,7 +104,7 @@ Package-wide invariants (each is owned in detail by the module design):
 
 | Change | Re-verify |
 |---|---|
-| Portable transaction checkpoints (planned S12) | [Storage component contract](Sources/StorageKit/Storage/DESIGN.md#planned-transaction-checkpoints-sql-compatibility-s12), all concrete transactions and Directory pathways, shared conformance, Framework logical-state rollback |
+| Portable transaction checkpoints (S12) | [Storage component contract](Sources/StorageKit/Storage/DESIGN.md#transaction-checkpoints-sql-compatibility-s12), all concrete transactions and Directory pathways, shared conformance, Framework logical-state rollback |
 | Any public StorageKit contract | this design, the module design, all adapter modules, database-framework binding |
 | Adapter-internal change | that adapter's module design and its test target plus the shared conformance fixture |
 | Tuple encoding | golden vectors; any byte-layout change is a layout change |

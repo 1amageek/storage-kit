@@ -89,6 +89,19 @@ and SQLite host lifecycle. The Swift storage engine therefore never interprets a
 shutdown request as a successful storage mutation or as permission to bypass
 the host transaction boundary.
 
+## Deferred Checkpoint Boundary
+
+The [adapter design](../Sources/CloudflareDurableObjectStorage/DESIGN.md#deferred-checkpoint-transactions)
+connects the [StorageKit checkpoint contract](../Sources/StorageKit/Storage/DESIGN.md#transaction-checkpoints-sql-compatibility-s12)
+to the existing wire and host path. Checkpoints are local Swift authority: no
+checkpoint identifier or discarded mutation crosses StorageKit Wire v1. After
+sealing, one survivor frame retains observed read conflicts and the pinned
+version; the host executes its existing atomic `transactionSync` commit. A
+transport outcome classified as unknown remains terminal and cannot be replayed.
+The persistence smoke can invoke an external Swift checkpoint probe on both
+sides of a Wrangler restart, with the host state directory preserved only across
+those two runs and removed after authoritative host shutdown.
+
 ## Storage Partition Identity
 
 One logical partition identity routes to exactly one Durable Object:

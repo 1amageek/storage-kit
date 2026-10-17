@@ -8,6 +8,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     public typealias RangeResult = CloudflareDurableObjectRangeResult
 
     public static let declaredCapabilities = TransactionCapabilities(
+        transactionCheckpoints: true,
         transactionTimeout: true,
         readVersion: true,
         committedVersion: true,
@@ -24,9 +25,9 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     public var storageFailure: StorageError? {
         state.withLock { state in
             switch state.phase {
-            case .failed(let error), .commitUnknown(let error):
-                return error
-            case .open, .committing, .committed, .cancelling, .cancelled:
+            case .failed(let error): return error as? StorageError
+            case .commitUnknown(let error): return error
+            case .open, .sealing, .committing, .committed, .cancelling, .cancelled:
                 return nil
             }
         }
@@ -36,9 +37,55 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     private let client: any CloudflareDurableObjectStorageClient
     private let limits: CloudflareDurableObjectLimits
     private let monotonicClock: any StorageMonotonicClock
-    private let state = Mutex(CloudflareDurableObjectTransactionState())
+    private let state = CloudflareDurableObjectTransactionStateOwner()
+    private let checkpointMode = Mutex<TransactionJournal?>(nil)
     private let mutationByteMeter = TransactionMutationByteMeter()
     private let versionstampCompletion = TransactionVersionstampCompletion()
+    private let reader: CloudflareDurableObjectTransactionReader
+
+    public var checkpoints: (any TransactionCheckpointAccess)? {
+        checkpointMode.withLock { $0 }
+    }
+
+    public func configureCheckpoints(limits: TransactionCheckpointLimits) throws {
+        try state.withLock { state in
+            try Self.ensureOpen(state.phase, operation: .execute)
+            guard !state.hasAdmittedAccess else {
+                throw TransactionCheckpointError.configurationAfterAdmission
+            }
+            try checkpointMode.withLock { journal in
+                guard journal == nil else {
+                    throw TransactionCheckpointError.configurationAfterAdmission
+                }
+                journal = TransactionJournal(limits: limits,
+                    backend: .cloudflareDurableObject, mutationByteMeter: mutationByteMeter)
+                state.checkpointEnabled = true
+            }
+        }
+    }
+
+    public func performOperation(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        if let journal = try journalForAccess(operation: .execute) {
+            try await journal.performOperation(operation)
+        } else {
+            try await operation()
+        }
+    }
+
+    private func journalForAccess(operation: StorageOperation) throws -> TransactionJournal? {
+        try state.withLock { state in
+            let journal = checkpointMode.withLock { $0 }
+            if journal == nil {
+                try Self.ensureOpen(state.phase, operation: operation)
+            } else {
+                try Self.ensureHostAccess(state.phase, allowingBarrier: state.checkpointEnabled, operation: operation)
+            }
+            state.hasAdmittedAccess = true
+            return journal
+        }
+    }
 
     public func configureMutationByteLimit(maximumBytes: Int?) throws {
         try mutationByteMeter.configure(maximumBytes: maximumBytes)
@@ -63,6 +110,14 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         self.limits = limits
         self.monotonicClock = monotonicClock
         self.transactionDomain = transactionDomain
+        self.reader = CloudflareDurableObjectTransactionReader(
+            partitionIdentity: partitionIdentity,
+            client: client,
+            limits: limits,
+            monotonicClock: monotonicClock,
+            state: state,
+            versionstampCompletion: versionstampCompletion
+        )
     }
 
     public func getValue(
@@ -100,6 +155,16 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         maximumByteCount: Int?
     ) async throws -> ByteString? {
         try validateKey(key)
+        if let journal = try journalForAccess(operation: .read) {
+            let reader = reader
+            return try await TransactionOperationExecutor(access: self).withOperation {
+                try reader.validateAccess(operation: .read)
+                let value = try await journal.getValue(for: key, snapshot: snapshot,
+                    maximumByteCount: maximumByteCount, using: reader)
+                try reader.validateAccess(operation: .read)
+                return value
+            }
+        }
         let (phase, mutations, observedReadVersion) = state.withLock {
             ($0.phase, $0.mutations, $0.observedReadVersion)
         }
@@ -150,7 +215,22 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         snapshot: Bool,
         streamingMode: StreamingMode
     ) -> CloudflareDurableObjectRangeResult {
-        CloudflareDurableObjectRangeResult { [self] in
+        do {
+            if let journal = try journalForAccess(operation: .rangeRead) {
+                let reader = reader
+                return CloudflareDurableObjectRangeResult(cursor: {
+                    journal.rangeCursor(from: begin, to: end, limit: limit,
+                        reverse: reverse, snapshot: snapshot,
+                        streamingMode: streamingMode, using: reader)
+                        .validatingScope { try reader.validateAccess(operation: .rangeRead) }
+                })
+            }
+        } catch {
+            return CloudflareDurableObjectRangeResult(cursor: {
+                KeyValueCursor(validatingScope: { throw error })
+            })
+        }
+        return CloudflareDurableObjectRangeResult { [self] in
             let (mutations, observedReadVersion) = state.withLock {
                 ($0.mutations, $0.observedReadVersion)
             }
@@ -197,6 +277,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         try validateKey(key)
         try validateValue(value)
         try validateStoredPair(keyBytes: key.count, valueBytes: value.count)
+        if let journal = try journalForAccess(operation: .write) {
+            try journal.append(.set(key: key, value: value, suppressWriteConflict: false))
+            return
+        }
         try state.withLock { state in
             try prepareMutation(state: &state)
             try mutationByteMeter.recordSet(
@@ -214,6 +298,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
 
     public func clear(key: ByteString) throws {
         try validateKey(key)
+        if let journal = try journalForAccess(operation: .write) {
+            try journal.append(.clear(key: key, suppressWriteConflict: false))
+            return
+        }
         try state.withLock { state in
             try prepareMutation(state: &state)
             try mutationByteMeter.recordClear(key: key)
@@ -238,6 +326,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 backend: .cloudflareDurableObject,
                 message: "Clear range boundaries are not ordered"
             )
+        }
+        if let journal = try journalForAccess(operation: .deleteRange) {
+            try journal.append(.clearRange(begin: beginKey, end: endKey, suppressWriteConflict: false))
+            return
         }
         try state.withLock { state in
             try prepareMutation(state: &state)
@@ -299,6 +391,11 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 )
             }
         }
+        if let journal = try journalForAccess(operation: .write) {
+            try journal.append(.atomic(key: key, parameter: param, type: mutationType,
+                suppressWriteConflict: false))
+            return
+        }
         try state.withLock { state in
             try prepareMutation(state: &state)
             try mutationByteMeter.recordAtomic(
@@ -318,17 +415,24 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
 
     public func commit() async throws {
         enum Start {
-            case leader(TransactionOperationCompletion, CommitBatch)
+            case leader(TransactionOperationCompletion, CommitBatch?)
             case waitForCommit(TransactionOperationCompletion)
             case waitForCancellation(TransactionOperationCompletion)
             case committed
             case cancelled
-            case failed(StorageError)
+            case failed(any Error)
         }
 
         let start = state.withLock { state -> Start in
             switch state.phase {
             case .open:
+                state.hasAdmittedAccess = true
+                if checkpointMode.withLock({ $0 != nil }) {
+                    let completion = TransactionOperationCompletion()
+                    state.checkpointCompletion = completion
+                    state.phase = .sealing(completion)
+                    return .leader(completion, nil)
+                }
                 do {
                     try ensureDeadlineNotExpired(
                         state.deadline,
@@ -364,27 +468,98 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 state.phase = .committing(completion)
                 Self.clearPendingState(&state)
                 return .leader(completion, payload)
-            case .committing(let completion):
+            case .sealing(let completion), .committing(let completion):
                 return .waitForCommit(completion)
             case .committed:
+                if let completion = state.checkpointCompletion { return .waitForCommit(completion) }
                 return .committed
             case .cancelling(let completion):
                 return .waitForCancellation(completion)
             case .cancelled:
                 return .cancelled
-            case .failed(let error), .commitUnknown(let error):
+            case .failed(let error):
+                if let completion = state.checkpointCompletion { return .waitForCommit(completion) }
+                return .failed(error)
+            case .commitUnknown(let error):
+                if let completion = state.checkpointCompletion { return .waitForCommit(completion) }
                 return .failed(error)
             }
         }
 
         switch start {
-        case .leader(let completion, let payload):
+        case .leader(let completion, let bufferedPayload):
+            let journal = checkpointMode.withLock { $0 }
             do {
+                let payload: CommitBatch
+                if let bufferedPayload {
+                    payload = bufferedPayload
+                } else {
+                    guard let journal else { throw TransactionCheckpointError.closed }
+                    let entries = try await journal.sealForCommit()
+                    payload = try state.withLock { state in
+                        try ensureDeadlineNotExpired(state.deadline, operation: .commit)
+                        for entry in entries {
+                            switch entry {
+                            case .set(let key, let value, let suppress):
+                                try validateWriteConflictSuppression(suppress)
+                                state.mutations.append(.set(key: key, value: value))
+                            case .clear(let key, let suppress):
+                                try validateWriteConflictSuppression(suppress)
+                                state.mutations.append(.clear(key: key))
+                            case .clearRange(let begin, let end, let suppress):
+                                try validateWriteConflictSuppression(suppress)
+                                state.mutations.append(.clearRange(begin: begin, end: end))
+                            case .atomic(let key, let parameter, let type, let suppress):
+                                try validateWriteConflictSuppression(suppress)
+                                state.mutations.append(.atomic(key: key, param: parameter,
+                                    mutationType: StorageWireMutationType(type)))
+                            case .writeConflict(let begin, let end):
+                                state.writeConflictRanges = Self.merging(state.writeConflictRanges,
+                                    with: StorageWireKeyRange(begin: begin, end: end))
+                            }
+                        }
+                        try validate(state.mutations)
+                        guard state.readConflictRanges.count <= limits.maxConflictRangesPerCommit,
+                              state.writeConflictRanges.count <= limits.maxConflictRangesPerCommit else {
+                            throw StorageError(code: .transactionTooLarge, operation: .commit,
+                                backend: .cloudflareDurableObject,
+                                message: "Checkpoint conflict range batch exceeds configured limit")
+                        }
+                        let batch = CommitBatch(observedReadVersion: state.observedReadVersion,
+                            mutations: state.mutations, readConflictRanges: state.readConflictRanges,
+                            writeConflictRanges: state.writeConflictRanges)
+                        state.phase = .committing(completion)
+                        Self.clearPendingState(&state)
+                        return batch
+                    }
+                }
                 try await performCommit(payload)
+                if let journal { try await journal.close(committed: true) }
                 completion.succeed()
             } catch {
-                completion.fail(error)
-                throw error
+                let failure = error
+                let unknown = state.withLock { state -> Bool in
+                    if case .commitUnknown = state.phase { return true }
+                    state.phase = .failed(failure)
+                    Self.clearPendingState(&state)
+                    return false
+                }
+                do {
+                    if let journal {
+                        if unknown { try await journal.closeWithUnknownCommit() }
+                        else { try await journal.close(committed: false) }
+                    }
+                } catch {
+                    let combined = StorageTransactionCleanupError(
+                        operationError: failure, cancellationError: error)
+                    state.withLock { $0.phase = .failed(combined) }
+                    versionstampCompletion.fail(combined)
+                    completion.fail(combined)
+                    throw combined
+                }
+                versionstampCompletion.fail(failure)
+                completion.fail(failure)
+                throw failure
             }
         case .waitForCommit(let completion):
             try await completion.wait()
@@ -396,8 +571,13 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         case .cancelled:
             throw Self.phaseError(.cancelled, operation: .commit)
         case .failed(let error):
-            versionstampCompletion.fail(error)
-            throw error
+            let operationError = error
+            if let journal = checkpointMode.withLock({ $0 }) {
+                do { try await journal.close(committed: false) }
+                catch { throw StorageTransactionCleanupError(operationError: operationError, cancellationError: error) }
+            }
+            versionstampCompletion.fail(operationError)
+            throw operationError
         }
     }
 
@@ -486,15 +666,17 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 state.phase = .cancelling(completion)
                 Self.clearPendingState(&state)
                 return .leader(completion)
-            case .committing(let completion):
+            case .sealing(let completion), .committing(let completion):
                 return .waitForCommit(completion)
             case .committed:
+                if let completion = state.checkpointCompletion { return .waitForCommit(completion) }
                 return .committed
             case .cancelling(let completion):
                 return .waitForCancellation(completion)
             case .cancelled:
                 return .cancelled
             case .failed:
+                if let completion = state.checkpointCompletion { return .waitForCommit(completion) }
                 return .failed
             case .commitUnknown(let error):
                 return .commitUnknown(error)
@@ -503,7 +685,21 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
 
         switch start {
         case .leader(let completion):
-            state.withLock { $0.phase = .cancelled }
+            if let journal = checkpointMode.withLock({ $0 }) {
+                do {
+                    try await journal.close(committed: false)
+                } catch {
+                    let failure = error
+                    state.withLock { $0.phase = .failed(failure) }
+                    versionstampCompletion.fail(failure)
+                    completion.fail(failure)
+                    throw failure
+                }
+            }
+            state.withLock { state in
+                Self.clearPendingState(&state)
+                state.phase = .cancelled
+            }
             versionstampCompletion.fail(
                 Self.phaseError(.cancelled, operation: .read)
             )
@@ -514,13 +710,16 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             do {
                 try await completion.wait()
             } catch {
-                if error.code == .commitUnknownResult {
+                if let error = error as? StorageError, error.code == .commitUnknownResult {
                     throw error
                 }
                 return
             }
             throw Self.phaseError(.committed, operation: .cancel)
-        case .cancelled, .failed:
+        case .failed:
+            if let journal = checkpointMode.withLock({ $0 }) { try await journal.close(committed: false) }
+            return
+        case .cancelled:
             return
         case .committed:
             throw Self.phaseError(.committed, operation: .cancel)
@@ -530,6 +729,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     public func setReadVersion(_ version: Int64) throws {
+        let journal = try journalForAccess(operation: .read)
         guard version >= 0 else {
             throw StorageError(
                 code: .invalidOperation,
@@ -538,26 +738,42 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 message: "Transaction read version must be non-negative"
             )
         }
-        try state.withLock { state in
-            try Self.ensureOpen(state.phase, operation: .read)
-            if let observedReadVersion = state.observedReadVersion {
-                guard observedReadVersion == version else {
-                    throw StorageError(
-                        code: .invalidOperation,
-                        operation: .read,
-                        backend: .cloudflareDurableObject,
-                        message: "Transaction read version is already fixed"
-                    )
+        let update = {
+            try self.state.withLock { state in
+                try Self.ensureHostAccess(state.phase,
+                    allowingBarrier: state.checkpointEnabled, operation: .read)
+                if let observedReadVersion = state.observedReadVersion {
+                    guard observedReadVersion == version else {
+                        throw StorageError(
+                            code: .invalidOperation,
+                            operation: .read,
+                            backend: .cloudflareDurableObject,
+                            message: "Transaction read version is already fixed"
+                        )
+                    }
+                    return
                 }
-                return
+                state.observedReadVersion = version
             }
-            state.observedReadVersion = version
         }
+        if let journal { try journal.performSynchronousOperation(update) }
+        else { try update() }
     }
 
     public func getReadVersion() async throws -> Int64 {
-        let (phase, readVersion) = state.withLock { ($0.phase, $0.observedReadVersion) }
-        try Self.ensureOpen(phase, operation: .read)
+        if try journalForAccess(operation: .read) != nil {
+            return try await TransactionOperationExecutor(access: self).withOperation { [self] in
+                try await readVersionFromHost()
+            }
+        }
+        return try await readVersionFromHost()
+    }
+
+    private func readVersionFromHost() async throws -> Int64 {
+        let readVersion = try state.withLock { state in
+            try Self.ensureHostAccess(state.phase, allowingBarrier: state.checkpointEnabled, operation: .read)
+            return state.observedReadVersion
+        }
         if let readVersion {
             return readVersion
         }
@@ -571,6 +787,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     public func setOption(forOption option: TransactionOption) throws {
+        _ = try journalForAccess(operation: .execute)
         switch option {
         case .timeout(let milliseconds):
             try configureTimeout(milliseconds: milliseconds)
@@ -637,25 +854,31 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 message: "Conflict range must be non-empty and ordered"
             )
         }
+        let journal = try journalForAccess(operation: .write)
+        if case .write = type, let journal {
+            try journal.append(.writeConflict(begin: beginKey, end: endKey))
+            return
+        }
         let range = StorageWireKeyRange(
             begin: beginKey,
             end: endKey
         ).detached()
-        try state.withLock { state in
-            try Self.ensureOpen(state.phase, operation: .write)
-            switch type {
-            case .read:
-                state.readConflictRanges = Self.merging(
-                    state.readConflictRanges,
-                    with: range
-                )
-            case .write:
-                state.writeConflictRanges = Self.merging(
-                    state.writeConflictRanges,
-                    with: range
-                )
+        let update = {
+            try self.state.withLock { state in
+                try Self.ensureHostAccess(state.phase,
+                    allowingBarrier: state.checkpointEnabled, operation: .write)
+                switch type {
+                case .read:
+                    state.readConflictRanges = Self.merging(
+                        state.readConflictRanges, with: range)
+                case .write:
+                    state.writeConflictRanges = Self.merging(
+                        state.writeConflictRanges, with: range)
+                }
             }
         }
+        if let journal { try journal.performSynchronousOperation(update) }
+        else { try update() }
     }
 
     public func getEstimatedRangeSizeBytes(
@@ -667,6 +890,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             endKey: endKey,
             message: "Range size boundaries are not ordered"
         )
+        let journal = try journalForAccess(operation: .rangeRead)
         let transactionView = try state.withLock { state in
             try Self.ensureOpen(state.phase, operation: .rangeRead)
             return (
@@ -674,7 +898,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 hasPendingMutations: !state.mutations.isEmpty
             )
         }
-        if transactionView.hasPendingMutations {
+        if journal != nil || transactionView.hasPendingMutations {
             return try await StorageRangeMetrics.exactSize(
                 getRange(
                     from: .firstGreaterOrEqual(beginKey),
@@ -730,6 +954,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 message: "Split point chunk size must be positive"
             )
         }
+        let journal = try journalForAccess(operation: .rangeRead)
         let transactionView = try state.withLock { state in
             try Self.ensureOpen(state.phase, operation: .rangeRead)
             return (
@@ -737,7 +962,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 hasPendingMutations: !state.mutations.isEmpty
             )
         }
-        if transactionView.hasPendingMutations {
+        if journal != nil || transactionView.hasPendingMutations {
             return try await StorageRangeMetrics.splitPoints(
                 beginKey: beginKey,
                 endKey: endKey,
@@ -789,7 +1014,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     public func requestVersionstamp() -> any PendingTransactionVersionstamp {
-        let failure = state.withLock { state -> StorageError? in
+        state.withLock { $0.hasAdmittedAccess = true }
+        let failure = state.withLock { state -> (any Error)? in
             guard case .open = state.phase else {
                 return Self.phaseError(state.phase, operation: .read)
             }
@@ -844,6 +1070,14 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             }
         }
         return value
+    }
+
+    private func validateWriteConflictSuppression(_ suppress: Bool) throws {
+        guard !suppress else {
+            throw StorageError.unsupportedOperation(
+                "Durable Object Wire v1 does not support suppressing write conflicts",
+                operation: .write, backend: .cloudflareDurableObject)
+        }
     }
 
     private func validate(
@@ -1049,74 +1283,14 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     private func acceptReadVersion(_ version: Int64) throws {
-        guard version >= 0 else {
-            throw StorageError(
-                code: .backendContractViolation,
-                operation: .read,
-                backend: .cloudflareDurableObject,
-                message: "Host returned a negative transaction read version"
-            )
-        }
-        try state.withLock { state in
-            try Self.ensureOpen(state.phase, operation: .read)
-            if let observed = state.observedReadVersion {
-                guard observed == version else {
-                    throw StorageError(
-                        code: .transactionConflict,
-                        operation: .read,
-                        backend: .cloudflareDurableObject,
-                        message: "Transaction read version changed"
-                    )
-                }
-            } else {
-                state.observedReadVersion = version
-            }
-        }
+        try reader.acceptReadVersion(version)
     }
 
-    private func recordReadConflictRange(
-        _ range: StorageWireKeyRange
-    ) throws {
-        try validateConflictRange(range)
-        // Conflict metadata outlives the decoded response. Copy only its small
-        // boundaries so the transaction does not retain an entire wire frame.
-        let detachedRange = range.detached()
-        try state.withLock { state in
-            try Self.ensureOpen(state.phase, operation: .rangeRead)
-            state.readConflictRanges = Self.merging(
-                state.readConflictRanges,
-                with: detachedRange
-            )
-        }
+    private func recordReadConflictRange(_ range: StorageWireKeyRange) throws {
+        try reader.recordReadConflictRange(range)
     }
 
-    private func validateConflictRange(
-        _ range: StorageWireKeyRange
-    ) throws {
-        if let begin = range.begin {
-            try validateBoundary(begin, operation: .rangeRead)
-        }
-        if let end = range.end {
-            try validateBoundary(end, operation: .rangeRead)
-        }
-        if let begin = range.begin, let end = range.end {
-            guard
-                CloudflareDurableObjectByteOrdering.compare(
-                    begin,
-                    end
-                ) < 0
-            else {
-                throw StorageError(
-                    code: .dataCorruption,
-                    operation: .rangeRead,
-                    backend: .cloudflareDurableObject,
-                    message: "Host returned an invalid read conflict range"
-                )
-            }
-        }
-    }
-
-    private static func merging(
+    static func merging(
         _ ranges: [StorageWireKeyRange],
         with range: StorageWireKeyRange
     ) -> [StorageWireKeyRange] {
@@ -1182,7 +1356,22 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         ) >= 0 ? left : right
     }
 
-    private static func ensureOpen(
+    static func ensureHostAccess(
+        _ phase: CloudflareDurableObjectTransactionPhase,
+        allowingBarrier: Bool,
+        operation: StorageOperation
+    ) throws {
+        if !allowingBarrier {
+            try ensureOpen(phase, operation: operation)
+            return
+        }
+        switch phase {
+        case .open, .sealing, .cancelling: return
+        default: throw phaseError(phase, operation: operation)
+        }
+    }
+
+    static func ensureOpen(
         _ phase: CloudflareDurableObjectTransactionPhase,
         operation: StorageOperation
     ) throws {
@@ -1191,10 +1380,10 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         }
     }
 
-    private static func phaseError(
+    static func phaseError(
         _ phase: CloudflareDurableObjectTransactionPhase,
         operation: StorageOperation
-    ) -> StorageError {
+    ) -> any Error {
         switch phase {
         case .open:
             return StorageError(
@@ -1203,6 +1392,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
                 backend: .cloudflareDurableObject,
                 message: "Transaction is open"
             )
+        case .sealing:
+            return lifecycleError("Transaction is sealing checkpoint access", operation: operation)
         case .committing:
             return lifecycleError("Transaction is committing", operation: operation)
         case .committed:
@@ -1211,8 +1402,8 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             return lifecycleError("Transaction is cancelling", operation: operation)
         case .cancelled:
             return lifecycleError("Transaction cancelled", operation: operation)
-        case .failed(let error), .commitUnknown(let error):
-            return error
+        case .failed(let error): return error
+        case .commitUnknown(let error): return error
         }
     }
 
@@ -1244,7 +1435,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         )
     }
 
-    private static func clearPendingState(
+    static func clearPendingState(
         _ state: inout CloudflareDurableObjectTransactionState
     ) {
         state.mutations.removeAll(keepingCapacity: false)
@@ -1267,6 +1458,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     }
 
     private func configureTimeout(milliseconds: Int) throws {
+        let journal = try journalForAccess(operation: .execute)
         guard milliseconds >= 0,
             let wireMilliseconds = Int64(exactly: milliseconds)
         else {
@@ -1280,10 +1472,15 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
             : monotonicClock.now.advanced(
                 by: .milliseconds(wireMilliseconds)
             )
-        try state.withLock { state in
-            try Self.ensureOpen(state.phase, operation: .execute)
-            state.deadline = deadline
+        let update = {
+            try self.state.withLock { state in
+                try Self.ensureHostAccess(state.phase,
+                    allowingBarrier: state.checkpointEnabled, operation: .execute)
+                state.deadline = deadline
+            }
         }
+        if let journal { try journal.performSynchronousOperation(update) }
+        else { try update() }
     }
 
     private func invalidOptionValue(_ message: String) -> StorageError {
@@ -1299,70 +1496,7 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
         operation: StorageOperation,
         _ body: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        let deadline = state.withLock { $0.deadline }
-        do {
-            return try await Self.mapHostError(operation: operation) {
-                guard let deadline else {
-                    return try await body()
-                }
-                try self.ensureDeadlineNotExpired(
-                    deadline,
-                    operation: operation
-                )
-                switch self.client.callExecution {
-                case .synchronous:
-                    let result = try await body()
-                    try self.ensureDeadlineNotExpired(
-                        deadline,
-                        operation: operation
-                    )
-                    return result
-                case .suspending:
-                    return try await CloudflareDurableObjectTimedCall<T>().execute(
-                        until: deadline,
-                        clock: self.monotonicClock,
-                        timeoutError: {
-                            Self.timeoutError(operation: operation)
-                        },
-                        operation: body
-                    )
-                }
-            }
-        } catch let error as StorageError
-            where error.code == .transactionTimedOut
-        {
-            let transitioned = state.withLock { state -> Bool in
-                guard case .open = state.phase else { return false }
-                state.phase = .failed(error)
-                Self.clearPendingState(&state)
-                return true
-            }
-            if transitioned {
-                versionstampCompletion.fail(error)
-            }
-            throw error
-        }
-    }
-
-    private static func mapHostError<T: Sendable>(
-        operation: StorageOperation,
-        _ body: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        do {
-            return try await body()
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as StorageError {
-            throw error
-        } catch {
-            throw StorageError(
-                code: .backendFailure,
-                operation: operation,
-                backend: .cloudflareDurableObject,
-                message: "Cloudflare Durable Object client operation failed",
-                underlyingDescription: underlyingStorageErrorDescription(error)
-            )
-        }
+        try await reader.performHostCall(operation: operation, body)
     }
 
     private func ensureDeadlineNotExpired(
@@ -1371,19 +1505,13 @@ public final class CloudflareDurableObjectStorageTransaction: Transaction, Senda
     ) throws {
         guard let deadline else { return }
         guard monotonicClock.now < deadline else {
-            throw Self.timeoutError(operation: operation)
+            throw StorageError(
+                code: .transactionTimedOut,
+                operation: operation,
+                backend: .cloudflareDurableObject,
+                message: "Cloudflare Durable Object transaction timed out"
+            )
         }
-    }
-
-    private static func timeoutError(
-        operation: StorageOperation
-    ) -> StorageError {
-        StorageError(
-            code: .transactionTimedOut,
-            operation: operation,
-            backend: .cloudflareDurableObject,
-            message: "Cloudflare Durable Object transaction timed out"
-        )
     }
 
     private func commitUnknownError(
@@ -1405,7 +1533,16 @@ extension CloudflareDurableObjectStorageTransaction {
         selector: KeySelector,
         snapshot: Bool
     ) async throws -> ByteString? {
-        try await TransactionKeySelection.resolve(
+        if let journal = try journalForAccess(operation: .rangeRead) {
+            let reader = reader
+            return try await TransactionOperationExecutor(access: self).withOperation {
+                try reader.validateAccess(operation: .rangeRead)
+                let key = try await journal.getKey(selector: selector, snapshot: snapshot, using: reader)
+                try reader.validateAccess(operation: .rangeRead)
+                return key
+            }
+        }
+        return try await TransactionKeySelection.resolve(
             selector,
             in: self,
             snapshot: snapshot
