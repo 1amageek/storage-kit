@@ -30,7 +30,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/1amageek/database-types.git",
-            from: "26.0730.0"
+            revision: "ef1938fd73c1663664eba04df5baa6d5c6b6a306"
         ),
         .package(
             url: "https://github.com/1amageek/fdb-swift-bindings.git",
