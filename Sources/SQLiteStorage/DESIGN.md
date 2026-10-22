@@ -4,7 +4,7 @@
 
 `SQLiteStorage` is the native SQLite adapter of storage-kit. It realizes the
 StorageKit `StorageEngine`, transaction, cursor, compaction, and
-`DirectoryAccess` contracts over one SQLite connection, and it realizes
+`DirectoryAccess` contracts over an explicitly bounded set of SQLite connections, and it realizes
 Directories and Partitions as a transactional catalog in the same database as
 required by SPEC §7.3.
 
@@ -20,8 +20,8 @@ required by SPEC §7.3.
 
 | Owns | Does not own |
 |---|---|
-| `SQLiteConnectionHandle`: one connection per engine, `kv_store` schema bootstrap, `PRAGMA journal_mode=WAL`, `auto_vacuum=INCREMENTAL`, `busy_timeout`, native error conversion | The SQLite library and its file locking model |
-| `SQLiteTransactionCoordinator` (actor): FIFO connection lease, `BEGIN IMMEDIATE`, the savepoint stack for nested transactions, terminal cleanup | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
+| `SQLiteConnectionHandle`: one synchronized handle per configured connection, `kv_store` schema bootstrap, `PRAGMA journal_mode=WAL`, `auto_vacuum=INCREMENTAL`, `busy_timeout`, native error conversion | The SQLite library and its file locking model |
+| `SQLiteTransactionCoordinator` (actor): FIFO connection lease, native transaction mode, the savepoint stack for nested transactions, terminal cleanup | Directory contract semantics D-1…D-12 and lease semantics L-1…L-8 ([Directory component](../StorageKit/Directory/DESIGN.md)) |
 | `SQLiteStorageTransaction`: buffered synchronous mutations, lazy coordinator entry on the first asynchronous operation, commit-at-most-once, cancel, `StorageCompactionTransaction` | The catalog algorithm and root bootstrap (`KeyValueDirectoryCatalog`, StorageKit) |
 | `SQLiteRangeResult`, `SQLiteRangeIteratorState`, `SQLiteRangeCursorLifetime`: statement-backed lazy cursors with explicit terminal finish | `PartitionLease` (StorageKit) |
 | Catalog placement: the engine instantiates `KeyValueDirectoryCatalog(transactionDomain:backend: .sqlite)` bound to its domain | Framework binding of `#Directory` declarations |
@@ -43,13 +43,13 @@ P-4). The engine adds no SQLite-specific metadata table.
 
 ```text
 SQLiteStorageEngine
-  ├─ connection: SQLiteConnectionHandle        serialized native calls, PRAGMAs, kv_store
+  ├─ connections: immutable connection/coordinator pairs, configured count
   ├─ lifetime: SQLiteStorageLifetime            engine-owned resource lifetime
-  ├─ coordinator: SQLiteTransactionCoordinator  actor: FIFO lease, BEGIN IMMEDIATE, savepoints
+  │    └─ SQLiteTransactionCoordinator actor: FIFO lease and savepoints per handle
   ├─ transactionDomain: StorageTransactionDomain identity + lease issuance gate
   ├─ directoryAccess: KeyValueDirectoryCatalog  (StorageKit) reads/writes kv_store via the transaction
   └─ creates SQLiteStorageTransaction
-           ├─ root: owns BEGIN IMMEDIATE … COMMIT/ROLLBACK through the coordinator
+           ├─ root: owns one selected connection through COMMIT/ROLLBACK
            ├─ child: SAVEPOINT … RELEASE/ROLLBACK TO, strict LIFO
            └─ SQLiteRangeResult -> SQLiteRangeIteratorState (prepared statement, finish())
 ```
@@ -67,6 +67,51 @@ Dependency direction: `SQLiteStorage -> StorageKit`, `SQLiteStorage -> DatabaseT
 | `path: String` | Database file path; `Configuration.inMemory` uses `":memory:"`, `Configuration.file(_:busyTimeoutMilliseconds:)` a file. |
 | `busyTimeoutMilliseconds: Int32` | `PRAGMA busy_timeout` budget (default 100 ms). Bounds how long one synchronous SQLite call inside the coordinator may block on another connection; beyond it the engine fails with `StorageError.transactionBusy` (`retryDisposition == .safe`). `0` fails immediately on contention. |
 
+### Explicit parallel transactions
+
+`Configuration.connectionCount` is a positive caller-owned resource budget,
+with default 1. It fixes both the number of opened handles and the maximum
+number of simultaneously active native root transactions. The caller selects
+the count from measured latency/throughput/memory; no hardware guess changes
+it. Additional roots queue FIFO at their selected connection. Allocation opens
+handles incrementally and closes every already opened handle on failure.
+
+A count above 1 requires an ordinary file path, a file-backed WAL database and SQLite 3.51.3 or later.
+URI filenames are rejected before opening: resolving them to plain filenames
+must not discard access options such as `mode=ro` for subsequent handles.
+The native connection validates the running library before opening, then
+validates the actual journal mode and retained database filename; private
+in-memory/temporary databases cannot silently become separate stores. Further
+handles open the same resolved filename. The version floor avoids the documented
+[WAL-reset race](https://sqlite.org/wal.html#walresetbug); older backports are not
+part of this mode's supported baseline. Default one-connection behavior is
+unchanged.
+
+Each root may read and write on its connection. A deferred first read establishes
+SQLite's committed snapshot; a later mutation keeps read-your-writes or fails
+with retryable `transactionBusy` if that snapshot cannot upgrade. Extended busy
+codes retain that classification. The adapter does not retry or move a running
+root to another connection. SQLite serializes writers. Nested transactions and
+checkpoints stay on the parent's handle and retain strict-LIFO savepoints.
+See [SQLite isolation](https://sqlite.org/isolation.html) and
+[transaction control](https://sqlite.org/lang_transaction.html).
+
+Shutdown first seals the shared lifetime and every coordinator, then closes all
+handles, including queued-root and active-cursor cleanup. One awaited engine
+shutdown remains the authoritative completion for all connections. A host must
+not replace an open database file or separate it from its WAL/SHM files.
+
+| State | Storage owner / isolation | Read and mutation | Release |
+|---|---|---|---|
+| Identifier and next connection index | Engine `Mutex<EngineState>` | Synchronous allocation/selection only | Engine |
+| Handle and prepared cursors | `SQLiteConnectionHandle` `Mutex<SQLiteConnection?>` | Existing serialized C boundary | All coordinators sealed, then close |
+| Root, waiters and savepoints | One coordinator actor per handle | Existing asynchronous FIFO entries | Await shutdown/transaction terminal |
+| Admission and lifetime | Existing engine lifecycle and shared lifetime | Same gate for every connection | One authoritative awaited shutdown |
+
+These owners have no target-specific synchronization branches. SQLiteStorage
+is a native adapter; portable framework execution uses its existing storage
+adapters and does not infer SQLite filesystem capability from Embedded mode.
+
 ### Directory realization
 
 | Element | Realization |
@@ -80,8 +125,8 @@ Dependency direction: `SQLiteStorage -> StorageKit`, `SQLiteStorage -> DatabaseT
 
 | ID | Invariant |
 |---|---|
-| SQ-1 | One native connection per engine; every native call runs inside the coordinator actor or the connection handle's serialized entry, and no lock is held across a suspension point. |
-| SQ-2 | Transactions acquire the connection lease in FIFO order; a root transaction owns `BEGIN IMMEDIATE` from its first asynchronous operation through its terminal commit or rollback. |
+| SQ-1 | A positive configured number of native connections per engine; every native call runs inside the coordinator actor or the connection handle's serialized entry, and no lock is held across a suspension point. |
+| SQ-2 | Root admission selects connections in round-robin order; each connection retains its FIFO lease. A root owns its selected connection from first asynchronous operation through terminal cleanup. One-connection mode uses `BEGIN IMMEDIATE`; explicit parallel mode uses `BEGIN DEFERRED`. |
 | SQ-3 | `createTransaction()` under an active `ActiveTransactionContext` transaction of the same domain returns a savepoint-backed child; children complete in strict LIFO order via `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT`. |
 | SQ-4 | Catalog mutations and data mutations of one transaction commit in the same native transaction; a Directory create, move, or removal is never visible without the data written beside it. |
 | SQ-5 | Catalog keys begin with `0xFE`; Directory and Partition root prefixes are Tuple-encoded integers and never begin with `0xFE`, so catalog rows and data rows in `kv_store` are disjoint. |
@@ -98,7 +143,7 @@ Transaction lifecycle:
 createTransaction()   admission check -> identifier -> (context child? SQ-3)
   -> setValue/clear   buffered synchronously, no SQLite call
   -> first getValue / rangeCursor / compaction / commit
-       -> coordinator.beginRoot   FIFO lease -> BEGIN IMMEDIATE (SQ-2)
+       -> coordinator.beginRoot   FIFO selected lease -> configured BEGIN mode (SQ-2)
        -> flush buffered mutations, execute statement
   -> commit           COMMIT (root) or RELEASE SAVEPOINT (child), lease to next waiter
   -> cancel           ROLLBACK / ROLLBACK TO SAVEPOINT, same lease handoff
@@ -173,3 +218,12 @@ outside every mutex. Seal rejects writes not yet admitted and drains admitted
 writes before replay.
 Terminal checkpoint and cleanup causes follow the linked failure contract,
 including shared completion and repeated commit observation.
+
+Parallel-mode behavioral evidence is owned by
+`SQLiteConcurrentTransactionTests`: simultaneous read admission, old/new snapshot
+visibility, stale upgrade refusal, read-your-writes, nested savepoint isolation,
+queued and active shutdown, and invalid/private-memory/URI configuration. The full
+SQLiteStorageTests suite preserves the default single-connection contracts.
+The task's file-backed framework workload measures counts 1/2/4/8/16 with
+validated SQL results and process RSS; performance acceptance remains pending
+until matched measurements complete.

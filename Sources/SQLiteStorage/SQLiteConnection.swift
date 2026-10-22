@@ -28,7 +28,11 @@ final class SQLiteConnection {
     }
 
     /// Opens a database at the given file path, or ":memory:" for in-memory.
-    init(path: String) throws {
+    init(path: String, allowsConcurrentTransactions: Bool = false) throws {
+        if allowsConcurrentTransactions && sqlite3_libversion_number() < 3_051_003 {
+            throw StorageError(code: .unsupportedOperation, operation: .open, backend: .sqlite,
+                message: "Concurrent SQLite transactions require SQLite 3.51.3 or later")
+        }
         var dbPointer: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         let rc = sqlite3_open_v2(path, &dbPointer, flags, nil)
@@ -65,6 +69,27 @@ final class SQLiteConnection {
                 value BLOB NOT NULL
             ) WITHOUT ROWID
             """)
+    }
+
+    /// Copies only configuration metadata while the connection/statement owns its C text.
+    func concurrentDatabasePath() throws -> String {
+        guard let db, let filename = sqlite3_db_filename(db, "main"), filename.pointee != 0 else {
+            throw StorageError(code: .unsupportedOperation, operation: .open, backend: .sqlite,
+                message: "Concurrent SQLite transactions require a file-backed database")
+        }
+        let path = String(cString: filename)
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        try prepareStatement("PRAGMA journal_mode", into: &statement)
+        let rc = sqlite3_step(statement)
+        guard rc == SQLITE_ROW else {
+            throw SQLiteErrorMapper.map(rc: rc, operation: .open, message: currentErrorMessage)
+        }
+        guard let text = sqlite3_column_text(statement, 0), String(cString: text) == "wal" else {
+            throw StorageError(code: .unsupportedOperation, operation: .open, backend: .sqlite,
+                message: "Concurrent SQLite transactions require WAL journal mode")
+        }
+        return path
     }
 
     /// Returns the integer result of a single-row SQL query.
@@ -805,7 +830,7 @@ final class SQLiteConnection {
 private enum SQLiteErrorMapper {
     static func map(rc: Int32, operation: StorageOperation, message: String) -> StorageError {
         let code: StorageError.Code
-        switch rc {
+        switch rc & 0xff {
         case SQLITE_BUSY, SQLITE_LOCKED:
             code = .transactionBusy
         case SQLITE_CORRUPT, SQLITE_NOTADB:

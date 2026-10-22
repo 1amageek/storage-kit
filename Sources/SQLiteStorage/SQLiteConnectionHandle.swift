@@ -9,12 +9,14 @@ import Synchronization
 /// `SQLiteStorageTransaction`.
 final class SQLiteConnectionHandle: Sendable {
     private let connection: Mutex<SQLiteConnection?>
+    let databasePath: String
 
-    init(path: String, busyTimeoutMilliseconds: Int32 = 100) throws {
-        let connection = try SQLiteConnection(path: path)
+    init(path: String, busyTimeoutMilliseconds: Int32 = 100, allowsConcurrentTransactions: Bool = false) throws {
+        let connection = try SQLiteConnection(path: path, allowsConcurrentTransactions: allowsConcurrentTransactions)
         try connection.initialize(
             busyTimeoutMilliseconds: busyTimeoutMilliseconds
         )
+        self.databasePath = allowsConcurrentTransactions ? try connection.concurrentDatabasePath() : path
         self.connection = Mutex(connection)
     }
 

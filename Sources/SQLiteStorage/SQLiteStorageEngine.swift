@@ -5,11 +5,17 @@ import Synchronization
 ///
 /// Synchronous mutations are buffered without acquiring SQLite. The first
 /// async read, range iteration, maintenance operation, or commit enters the
-/// coordinator actor, which owns `BEGIN IMMEDIATE` through terminal cleanup.
+/// selected connection's coordinator through terminal cleanup. The default
+/// single connection uses `BEGIN IMMEDIATE`; explicit parallel WAL connections
+/// use deferred transactions and report retryable snapshot upgrade conflicts.
 /// Nested transactions use native savepoints and strict LIFO ordering.
 public final class SQLiteStorageEngine: StorageEngine, Sendable {
     public struct Configuration: Sendable {
         public var path: String
+
+        /// Open handles and maximum simultaneous native root transactions.
+        /// Counts above one require a file-backed WAL database and SQLite 3.51.3+.
+        public var connectionCount: Int
 
         /// SQLite-level wait budget for acquiring the database write lock,
         /// applied as `PRAGMA busy_timeout`.
@@ -24,18 +30,21 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
         /// block. Set `0` to fail immediately on any contention.
         public var busyTimeoutMilliseconds: Int32
 
-        public init(path: String, busyTimeoutMilliseconds: Int32 = 100) {
+        public init(path: String, busyTimeoutMilliseconds: Int32 = 100, connectionCount: Int = 1) {
             self.path = path
+            self.connectionCount = connectionCount
             self.busyTimeoutMilliseconds = busyTimeoutMilliseconds
         }
 
         public static func file(
             _ path: String,
-            busyTimeoutMilliseconds: Int32 = 100
+            busyTimeoutMilliseconds: Int32 = 100,
+            connectionCount: Int = 1
         ) -> Configuration {
             Configuration(
                 path: path,
-                busyTimeoutMilliseconds: busyTimeoutMilliseconds
+                busyTimeoutMilliseconds: busyTimeoutMilliseconds,
+                connectionCount: connectionCount
             )
         }
 
@@ -48,34 +57,53 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
 
     private struct EngineState: Sendable {
         var nextTransactionIdentifier: UInt64 = 1
+        var nextConnectionIndex = 0
     }
 
-    private let connection: SQLiteConnectionHandle
+    private struct TransactionConnection: Sendable {
+        let handle: SQLiteConnectionHandle
+        let coordinator: SQLiteTransactionCoordinator
+    }
+
+    private let connections: [TransactionConnection]
     private let lifetime: SQLiteStorageLifetime
-    private let coordinator: SQLiteTransactionCoordinator
     public let transactionDomain: StorageTransactionDomain
     public let directoryAccess: any DirectoryAccess
     private let state = Mutex(EngineState())
     private let storageLifecycle = StorageEngineLifecycle()
 
     public init(configuration: Configuration) throws {
-        let connection = try SQLiteConnectionHandle(
-            path: configuration.path,
-            busyTimeoutMilliseconds: configuration.busyTimeoutMilliseconds
-        )
+        guard configuration.connectionCount > 0 else {
+            throw StorageError(code: .invalidOperation, operation: .open, backend: .sqlite,
+                message: "SQLite connectionCount must be positive")
+        }
         let lifetime = SQLiteStorageLifetime()
-        let domain = StorageTransactionDomain()
-        self.connection = connection
+        let parallel = configuration.connectionCount > 1
+        guard !parallel || !configuration.path.hasPrefix("file:") else {
+            throw StorageError(code: .unsupportedOperation, operation: .open, backend: .sqlite,
+                message: "Concurrent SQLite transactions require an ordinary file path without URI options")
+        }
+        var connections: [TransactionConnection] = []
+        do {
+            var path = configuration.path
+            while connections.count < configuration.connectionCount {
+                let handle = try SQLiteConnectionHandle(path: path,
+                    busyTimeoutMilliseconds: configuration.busyTimeoutMilliseconds,
+                    allowsConcurrentTransactions: parallel)
+                path = handle.databasePath
+                connections.append(TransactionConnection(handle: handle,
+                    coordinator: SQLiteTransactionCoordinator(connection: handle, lifetime: lifetime,
+                        allowsConcurrentTransactions: parallel)))
+            }
+        } catch {
+            for connection in connections { connection.handle.close() }
+            throw error
+        }
+        self.connections = connections
         self.lifetime = lifetime
+        let domain = StorageTransactionDomain()
         self.transactionDomain = domain
-        self.directoryAccess = KeyValueDirectoryCatalog(
-            transactionDomain: domain,
-            backend: .sqlite
-        )
-        self.coordinator = SQLiteTransactionCoordinator(
-            connection: connection,
-            lifetime: lifetime
-        )
+        self.directoryAccess = KeyValueDirectoryCatalog(transactionDomain: domain, backend: .sqlite)
     }
 
     public func createTransaction() throws -> SQLiteStorageTransaction {
@@ -103,10 +131,15 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
             }
             contextLease?.release()
 
+            let selected = state.withLock { state in
+                let selected = connections[state.nextConnectionIndex]
+                state.nextConnectionIndex = (state.nextConnectionIndex + 1) % connections.count
+                return selected
+            }
             return SQLiteStorageTransaction(
                 identifier: identifier,
-                coordinator: coordinator,
-                connection: connection,
+                coordinator: selected.coordinator,
+                connection: selected.handle,
                 lifetime: lifetime,
                 transactionDomain: transactionDomain
             )
@@ -116,15 +149,14 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     public func requestShutdown() {
         transactionDomain.requestShutdown()
         let lifetime = lifetime
-        let coordinator = coordinator
-        let connection = connection
+        let connections = connections
         storageLifecycle.requestShutdown(
             prepare: {
                 _ = lifetime.close()
             },
             cleanup: {
-                await coordinator.shutdown()
-                connection.close()
+                for connection in connections { await connection.coordinator.shutdown() }
+                for connection in connections { connection.handle.close() }
             }
         )
     }
@@ -139,12 +171,32 @@ public final class SQLiteStorageEngine: StorageEngine, Sendable {
     }
 
     var rangeInstrumentation: SQLiteRangeInstrumentation {
-        connection.rangeInstrumentation
+        var total = SQLiteRangeInstrumentation(prepareCount: 0, stepCount: 0,
+            payloadCopyCount: 0, finalizeCount: 0, openCursorCount: 0)
+        for connection in connections {
+            let value = connection.handle.rangeInstrumentation
+            total = SQLiteRangeInstrumentation(prepareCount: total.prepareCount &+ value.prepareCount,
+                stepCount: total.stepCount &+ value.stepCount,
+                payloadCopyCount: total.payloadCopyCount &+ value.payloadCopyCount,
+                finalizeCount: total.finalizeCount &+ value.finalizeCount,
+                openCursorCount: total.openCursorCount + value.openCursorCount)
+        }
+        return total
     }
 
     var leaseInstrumentation: SQLiteLeaseInstrumentation {
         get async {
-            await coordinator.leaseInstrumentation
+            var total = SQLiteLeaseInstrumentation(hasActiveRoot: false, waitingRootCount: 0,
+                savepointBeginCount: 0, savepointReleaseCount: 0, savepointRollbackCount: 0)
+            for connection in connections {
+                let value = await connection.coordinator.leaseInstrumentation
+                total = SQLiteLeaseInstrumentation(hasActiveRoot: total.hasActiveRoot || value.hasActiveRoot,
+                    waitingRootCount: total.waitingRootCount + value.waitingRootCount,
+                    savepointBeginCount: total.savepointBeginCount &+ value.savepointBeginCount,
+                    savepointReleaseCount: total.savepointReleaseCount &+ value.savepointReleaseCount,
+                    savepointRollbackCount: total.savepointRollbackCount &+ value.savepointRollbackCount)
+            }
+            return total
         }
     }
 

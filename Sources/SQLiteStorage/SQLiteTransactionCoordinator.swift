@@ -11,6 +11,7 @@ actor SQLiteTransactionCoordinator {
 
     private let connection: SQLiteConnectionHandle
     private let lifetime: SQLiteStorageLifetime
+    private let allowsConcurrentTransactions: Bool
 
     private var activeRootIdentifier: UInt64?
     private var transactionStack: [UInt64] = []
@@ -27,10 +28,12 @@ actor SQLiteTransactionCoordinator {
 
     init(
         connection: SQLiteConnectionHandle,
-        lifetime: SQLiteStorageLifetime
+        lifetime: SQLiteStorageLifetime,
+        allowsConcurrentTransactions: Bool = false
     ) {
         self.connection = connection
         self.lifetime = lifetime
+        self.allowsConcurrentTransactions = allowsConcurrentTransactions
     }
 
     func beginRoot(identifier: UInt64) async throws {
@@ -481,7 +484,7 @@ actor SQLiteTransactionCoordinator {
         }
         do {
             try connection.execute(
-                "BEGIN IMMEDIATE",
+                allowsConcurrentTransactions ? "BEGIN DEFERRED" : "BEGIN IMMEDIATE",
                 operation: .beginTransaction
             )
             activeRootIdentifier = identifier
