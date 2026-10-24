@@ -149,6 +149,11 @@ holding deterministic path-derived prefixes is foreign data and is rejected
 
 ## Verification and Change Impact
 
+Compound callback scheduling and its cross-target behavioral evidence belong
+to the [Storage component](Storage/DESIGN.md#compound-operation-scheduling).
+Its structured child inherits this module's transaction context; lifecycle
+completion remains owned by the original transaction owner.
+
 | Evidence | Location |
 |---|---|
 | Transaction, cursor, lifecycle, byte meter, versionstamp contracts | `Tests/StorageKitTests/*` |

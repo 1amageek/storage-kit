@@ -348,6 +348,38 @@ perform work after the scope closes. This prevents a barrier splitting catalog
 allocation from its edge write without deadlocking continuation of an already
 admitted Directory operation.
 
+### Compound Operation Scheduling
+
+`TransactionOperationExecutor.withOperation` owns one structured child for its
+compound callback. This is an execution-stack boundary: immediately completing
+async reads must not retain the caller's complete continuation chain through
+successive nested Directory operations on cooperative WASM executors. The child
+acquires the existing `performOperation` lease and publishes its result only
+after that lease has closed. Its parent joins the child before returning or
+throwing. No transaction, checkpoint, commit, retry or budget owner is added.
+
+The child inherits task-local transaction authority, priority and cancellation.
+Cancellation remains cooperative; a callback that is cleaning up is joined
+before the owning transaction can roll back or release resources. The original
+callback failure is propagated unchanged, including a domain failure observed
+after cancellation. Nested operations inherit the active journal lease only
+while its dynamic scope remains active; escaped tasks never extend its lifetime.
+
+This scheduling contract is identical on Native, ordinary WASM and Embedded.
+The TaskGroup is lexical state, and the result publication remains one actor on
+all targets. There is one child per compound operation, no extra payload copy,
+no detached work and no unbounded submission queue. The added task allocation
+and scheduling cost belongs to the operation and must be measured separately
+from payload/result adaptation.
+
+Verification is owned by `TransactionOperationExecutorTests`: nested results
+and inherited authority, original failure with rollback, cancellation with
+awaited callback completion, and journal barrier/lease lifetime. Framework's
+portable `DatabaseEmbeddedRuntimeContract` additionally exercises the observed
+ordinary-WASM failure through SQL/IR/block results, rollback/budgets, a100-row
+INSERT across two named databases, stale references and shutdown. A build or
+Native-only pass does not establish the portable stack contract.
+
 All cursors are registered at creation, including unopened cursors. Their
 validation and authoritative cleanup use the existing `KeyValueCursor` state;
 a rollback does not manufacture a second iterator lifetime. Barrier closure

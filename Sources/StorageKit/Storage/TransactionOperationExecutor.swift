@@ -9,11 +9,22 @@ public struct TransactionOperationExecutor: Sendable {
     public func withOperation<Result: Sendable & Copyable>(
         _ operation: @escaping @Sendable () async throws -> Result
     ) async throws -> Result {
-        let publication = TransactionOperationPublication<Result>()
-        try await access.performOperation {
-            await publication.publish(try await operation())
+        // A joined child bounds immediate-resume continuation stacks while
+        // inheriting task-local authority and cancellation from this operation.
+        try await withThrowingTaskGroup(of: Result.self) { group in
+            group.addTask {
+                let publication = TransactionOperationPublication<Result>()
+                try await access.performOperation {
+                    await publication.publish(try await operation())
+                }
+                return await publication.result()
+            }
+            guard let result = try await group.next() else {
+                throw StorageError(code: .backendContractViolation, operation: .execute,
+                    message: "Structured operation result was not published")
+            }
+            return result
         }
-        return await publication.result()
     }
 }
 
